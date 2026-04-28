@@ -38,7 +38,7 @@ export function GlassButton({ variant = "primary", className, children, ...props
     );
   }
 
-  
+
 
   return (
     <button className={combinedClassName} {...(props as ButtonHTMLAttributes<HTMLButtonElement>)}>

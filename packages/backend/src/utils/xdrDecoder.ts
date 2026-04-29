@@ -4,6 +4,17 @@
  *
  * Handles decoding of Base64-encoded XDR data returned by Soroban RPC getEvents.
  * Special attention is given to i128 types to prevent JavaScript number precision loss.
+ * 
+ * ## XDR in Soroban
+ * External Data Representation (XDR) is the standard format used by Stellar for 
+ * serializing data. In Soroban, contract return values, storage keys, and event 
+ * data are all XDR-encoded `ScVal` objects.
+ * 
+ * ## Precision Management
+ * JavaScript's `Number` type is an IEEE 754 double-precision 64-bit float, 
+ * which cannot safely represent integers larger than 2^53 - 1. Since Soroban 
+ * natively supports 128-bit integers (`i128`, `u128`), we must use `BigInt` 
+ * or `string` representations when handling these values in Node.js.
  */
 
 import { xdr, scValToNative } from "@stellar/stellar-sdk";
@@ -12,15 +23,24 @@ import { xdr, scValToNative } from "@stellar/stellar-sdk";
 
 /**
  * Raw event from Soroban RPC getEvents.
- * The `value` and `topic` fields contain Base64-encoded XDR.
+ * 
+ * The Soroban RPC `getEvents` method returns a JSON structure where cryptographic 
+ * data (topics, values) is Base64-encoded XDR.
  */
 export interface RawSorobanEvent {
+  /** The sequence number of the ledger containing the event. */
   ledger: number;
+  /** ISO 8601 timestamp of when the ledger was closed. */
   ledgerClosedAt: string;
+  /** The hex-encoded hash of the transaction that emitted the event. */
   txHash: string;
+  /** Unique identifier for the event within the ledger. */
   id: string;
+  /** Token used for pagination in subsequent RPC calls. */
   pagingToken: string;
+  /** Array of Base64-encoded XDR topics (max 4 topics per event). */
   topic: string[];
+  /** Base64-encoded XDR data payload of the event. */
   value: string;
 }
 
@@ -31,13 +51,22 @@ export type DecodedTopic = string | bigint | number | boolean;
 
 /**
  * Decoded event with all values converted to native TypeScript types.
+ * 
+ * This interface represents the "human-readable" version of a Soroban event, 
+ * ready for consumption by frontend or database storage.
  */
 export interface DecodedEvent {
+  /** The sequence number of the ledger containing the event. */
   ledger: number;
+  /** ISO 8601 timestamp of when the ledger was closed. */
   ledgerClosedAt: string;
+  /** The hex-encoded hash of the transaction that emitted the event. */
   txHash: string;
+  /** The name of the event (typically the first topic as a Symbol). */
   eventName: string;
+  /** Array of decoded topics (Strings, Numbers, BigInts, etc.). */
   topics: DecodedTopic[];
+  /** The decoded data payload of the event. */
   data: unknown;
 }
 
@@ -49,8 +78,11 @@ export interface DecodedEvent {
  * Soroban's i128 is a 128-bit signed integer. JavaScript's Number type can only
  * safely represent integers up to 2^53 - 1 (Number.MAX_SAFE_INTEGER).
  *
- * We return a string to preserve the full precision and allow the caller to
- * convert to BigInt if needed.
+ * Implementation Note:
+ * The `stellar-sdk` `scValToNative` method returns an object with `hi` (high 64 bits) 
+ * and `lo` (low 64 bits) BigInts for i128/u128 values. We bit-shift `hi` by 64 bits 
+ * and add `lo` to reconstruct the original 128-bit integer without any loss 
+ * of precision.
  *
  * @param scVal - The ScVal to decode (expected to be i128)
  * @returns String representation of the i128 value

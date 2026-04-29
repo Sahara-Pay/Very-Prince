@@ -1,25 +1,58 @@
+/**
+ * @file cache.ts
+ * @description Centralized Redis caching service.
+ * 
+ * This service provides a wrapper around the `ioredis` client to ensure that 
+ * the application remains resilient even if the Redis server is unavailable.
+ * 
+ * ## Resiliency Strategy
+ * All methods are prefixed with `safe` (e.g., `safeGet`, `safeSet`) and 
+ * wrap their respective Redis calls in `try/catch` blocks. If a Redis 
+ * operation fails, the error is logged, but the application execution 
+ * continues by returning `null` or silently failing. This is critical for 
+ * maintaining high availability in production.
+ */
+
 import { Redis } from "ioredis";
 import { env } from "../config/env.js";
 
-// We'll assume REDIS_URL is in env, defaulting to localhost if not.
-// For the sake of this task, we'll use a simple connection.
+// ─── Configuration ───────────────────────────────────────────────────────────
+
+/**
+ * The Redis connection string.
+ * Defaults to localhost if not provided in the environment.
+ */
 const REDIS_URL = process.env["REDIS_URL"] || "redis://localhost:6379";
 
+/**
+ * Singleton Redis client instance.
+ * 
+ * Configuration:
+ * - maxRetriesPerRequest: 1 - Ensures that requests fail quickly if the 
+ *   connection is lost, preventing a backlog of pending promises.
+ * - retryStrategy: Implements a custom backoff strategy with a maximum of 3 retries.
+ */
 export const redis = new Redis(REDIS_URL, {
-  maxRetriesPerRequest: 1, // Fail fast if Redis is down
+  maxRetriesPerRequest: 1, 
   retryStrategy(times) {
-    if (times > 3) return null; // stop retrying after 3 attempts
+    if (times > 3) return null; 
     return Math.min(times * 100, 3000);
   },
 });
+
+// ─── Event Listeners ─────────────────────────────────────────────────────────
 
 redis.on("error", (err) => {
   console.error("Redis error:", err);
 });
 
+// ─── Public API ─────────────────────────────────────────────────────────────
+
 /**
- * Safely get a value from Redis.
- * If Redis is down, it returns null instead of throwing.
+ * Safely retrieve a value from Redis.
+ * 
+ * @param key - The unique identifier for the cached data.
+ * @returns The cached string value, or `null` if the key does not exist or Redis is down.
  */
 export async function safeGet(key: string): Promise<string | null> {
   try {
@@ -31,8 +64,11 @@ export async function safeGet(key: string): Promise<string | null> {
 }
 
 /**
- * Safely set a value in Redis with TTL.
- * If Redis is down, it logs the error but doesn't throw.
+ * Safely store a value in Redis with an expiration time.
+ * 
+ * @param key - The unique identifier for the data.
+ * @param value - The string content to be cached (typically JSON).
+ * @param ttlSeconds - Time-to-live in seconds.
  */
 export async function safeSet(key: string, value: string, ttlSeconds: number): Promise<void> {
   try {

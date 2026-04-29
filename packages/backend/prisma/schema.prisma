@@ -11,28 +11,28 @@ datasource db {
 }
 
 model Organization {
-  id        String   @id
-  name      String
-  admin     String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String   @id // Unique identifier for the organization (Symbol on-chain)
+  name        String   // Display name of the organization
+  admin       String   // Primary administrator wallet address
+  createdAt   DateTime @default(now()) // When the organization was first indexed
+  updatedAt   DateTime @updatedAt // Last time the metadata was updated
 
   @@index([createdAt])
 }
 
 model Transaction {
-  id            String   @default(cuid())
-  txHash        String   // Blockchain transaction hash
-  eventIndex    Int      // Index of the event within the transaction
-  walletAddress String
-  volumeUSD     Decimal
-  createdAt     DateTime // Explicitly set to ledger closure time for partitioning
-  type          String   // e.g., "PAYOUT_ALLOCATED", "ORG_FUNDED", "PAYOUT_CLAIMED"
+  id            String   @default(cuid()) // Internal tracking ID
+  txHash        String   // Stellar blockchain transaction hash
+  eventIndex    Int      // Position of the event within the transaction
+  walletAddress String   // Actor associated with the transaction
+  volumeUSD     Decimal  // Value of the transaction in USD at the time of ledger closure
+  createdAt     DateTime // Exact timestamp of ledger closure (Partition Key)
+  type          String   // Type of event (e.g., "PAYOUT_ALLOCATED")
   ledger        Int      // Ledger sequence number
-  rawData       String?  // JSON-encoded raw event data for debugging
+  rawData       String?  // Original JSON payload from the Soroban RPC
 
   @@id([id, createdAt])
-  @@unique([txHash, eventIndex, createdAt]) // Required for partitioning
+  @@unique([txHash, eventIndex, createdAt]) // Ensures no duplicate events are indexed
   @@index([createdAt])
   @@index([walletAddress])
   @@index([txHash])
@@ -40,14 +40,14 @@ model Transaction {
 }
 
 model PayoutEvent {
-  id            String   @default(cuid())
-  orgId         String
-  maintainer    String
-  amountStroops BigInt
-  amountXlm     Decimal
-  ledger        Int
-  txHash        String
-  createdAt     DateTime // Partition key
+  id            String   @default(cuid()) // Internal tracking ID
+  orgId         String   // Associated organization ID
+  maintainer    String   // Recipient maintainer address
+  amountStroops BigInt   // Payout amount in stroops (10^-7 XLM)
+  amountXlm     Decimal  // Payout amount converted to XLM
+  ledger        Int      // Ledger sequence number
+  txHash        String   // Stellar transaction hash
+  createdAt     DateTime // Timestamp of the payout (Partition Key)
 
   @@id([id, createdAt])
   @@index([orgId])

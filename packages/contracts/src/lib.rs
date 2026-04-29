@@ -57,31 +57,57 @@ pub struct MultisigAdmin {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum PrincessError {
+    /// The contract has already been initialized and cannot be re-configured.
     AlreadyInitialized = 1,
+    /// The provided list of administrators for initialization is empty.
     EmptyAdminList = 2,
+    /// The multisig threshold must be greater than zero and less than or equal to the number of admins.
     InvalidThreshold = 3,
+    /// Attempted to call a function that requires the contract to be initialized.
     ContractNotInitialized = 4,
+    /// The protocol is currently paused by the global administrators.
     ProtocolPaused = 5,
+    /// The number of valid administrator signatures does not meet the required threshold.
     InsufficientMultisigAuth = 6,
+    /// An organization with this ID (or derived from this admin/name) already exists.
     OrgAlreadyRegistered = 7,
+    /// The requested organization could not be found in storage.
     OrgNotFound = 8,
+    /// The caller does not have the necessary permissions for this operation.
     NotAuthorized = 9,
+    /// The amount provided (funding or payout) must be a positive value.
     InvalidAmount = 10,
+    /// The organization's total budget would exceed the maximum representable value.
     BudgetOverflow = 11,
+    /// The organization does not have enough remaining budget to cover the payout.
     InsufficientBudget = 12,
+    /// An organization cannot have more than 10 administrators.
     MaxAdminLimitReached = 13,
+    /// The address is already registered as an administrator for this organization.
     AdminAlreadyExists = 14,
+    /// Cannot remove the last administrator; an organization must have at least one.
     CannotRemoveLastAdmin = 15,
+    /// The address is not currently an administrator of the specified organization.
     NotAnAdmin = 16,
+    /// This maintainer is already associated with an organization.
     MaintainerAlreadyRegistered = 17,
+    /// This maintainer is not registered in the system.
     MaintainerNotRegistered = 18,
+    /// The maintainer is registered but belongs to a different organization.
     MaintainerOrgMismatch = 19,
+    /// The maintainer's total claimable balance would exceed the maximum representable value.
     PayoutOverflow = 20,
+    /// A batch payout operation cannot exceed 100 entries to prevent timeout.
     BatchSizeExceeded = 21,
+    /// The provided list of payouts for a batch operation is empty.
     EmptyBatch = 22,
+    /// The maintainer has no funds available to claim.
     NoClaimableBalance = 23,
+    /// The payout is currently within its mandatory lock/vesting period.
     PayoutLocked = 24,
+    /// There is no pending administrator proposal to accept.
     NoPendingAdmin = 25,
+    /// The caller is not the address currently proposed as a new administrator.
     NotPendingAdmin = 26,
 }
 

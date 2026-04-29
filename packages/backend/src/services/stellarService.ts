@@ -126,6 +126,43 @@ export class StellarService {
   }
 
   /**
+   * Read the list of all registered organization IDs.
+   * This method fetches all `org_registered` events from the contract.
+   */
+  async readAllOrganizations(): Promise<string[]> {
+    const startLedger = parseInt(process.env["PROFILE_START_LEDGER"] ?? "1", 10);
+    
+    // topic[0] = Symbol("VeryPrincess"), topic[1] = Symbol("org_registered")
+    const topic0 = nativeToScVal("VeryPrincess", { type: "symbol" }).toXDR("base64");
+    const topic1 = nativeToScVal("org_registered", { type: "symbol" }).toXDR("base64");
+
+    const eventsResponse = await this.rpcServer.getEvents({
+      startLedger,
+      filters: [
+        {
+          type: "contract",
+          contractIds: [CONTRACT_ID],
+          topics: [[topic0, topic1]],
+        },
+      ],
+      limit: 1000,
+    });
+
+    const orgIds = new Set<string>();
+    for (const event of eventsResponse.events ?? []) {
+      try {
+        // topic[2] = orgId Symbol
+        const orgId = scValToNative(event.topic[2]) as string;
+        orgIds.add(orgId);
+      } catch {
+        // Skip malformed events
+      }
+    }
+
+    return [...orgIds];
+  }
+
+  /**
    * Read the list of maintainer addresses for an organization.
    *
    * @param orgId — The Symbol ID of the organization.

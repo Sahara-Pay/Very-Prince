@@ -78,6 +78,12 @@ function DashboardPageInner({ dictionary, lang }: { dictionary: Dictionary; lang
             >
               {dictionary.common.dashboard}
             </Link>
+            <Link
+              href={`/${lang}/leaderboard`}
+              className="text-sm font-medium text-white/60 transition-colors hover:text-white"
+            >
+              {dictionary.navigation.leaderboard}
+            </Link>
             <LanguageSwitcher currentLocale={lang} />
             <WalletButton />
           </div>

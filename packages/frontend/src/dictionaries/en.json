@@ -13,6 +13,7 @@
   },
   "navigation": {
     "dashboard": "Dashboard",
+    "leaderboard": "Leaderboard",
     "github": "View on GitHub",
     "stellar_network": "Stellar Network",
     "drips": "Drips"
@@ -92,5 +93,16 @@
     "english": "English",
     "spanish": "Español",
     "japanese": "日本語"
+  },
+  "leaderboard": {
+    "title": "Maintainer Leaderboard",
+    "description": "Celebrating the most active and high-earning maintainers across the ecosystem.",
+    "rank": "Rank",
+    "maintainer": "Maintainer",
+    "earnings": "All-Time Earnings",
+    "orgs_assisted": "Orgs Assisted",
+    "copy_address": "Copy Address",
+    "address_copied": "Address copied!",
+    "total_payouts": "Total Payouts"
   }
 }

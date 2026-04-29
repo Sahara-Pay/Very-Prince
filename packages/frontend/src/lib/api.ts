@@ -3,7 +3,7 @@
  * @description Backend API client for very-princess.
  */
 
-const BACKEND_URL = process.env["NEXT_PUBLIC_BACKEND_URL"] ?? "http://localhost:3001/api/v1/contract";
+const BACKEND_URL = process.env["NEXT_PUBLIC_BACKEND_URL"] ?? "http://localhost:3001/api";
 
 export interface Org {
   id: string;
@@ -34,9 +34,27 @@ export async function fetchOrganizations(page: number = 1, limit: number = 10, s
     params.append('search', search);
   }
   
-  const response = await fetch(`${BACKEND_URL}/orgs?${params}`);
+  const response = await fetch(`${BACKEND_URL}/v1/contract/orgs?${params}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch organizations: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export interface TopMaintainer {
+  address: string;
+  totalEarningsXlm: string;
+  totalEarningsStroops: string;
+  organizationsAssisted: number;
+}
+
+/**
+ * Fetch top maintainers from the backend.
+ */
+export async function fetchTopMaintainers(): Promise<TopMaintainer[]> {
+  const response = await fetch(`${BACKEND_URL}/stats/top-maintainers`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch leaderboard: ${response.statusText}`);
   }
   return response.json();
 }
@@ -50,7 +68,7 @@ export async function registerOrganization(
   admin: string,
   signerSecret: string
 ): Promise<{ success: boolean; transactionHash?: string }> {
-  const response = await fetch(`${BACKEND_URL}/orgs`, {
+  const response = await fetch(`${BACKEND_URL}/v1/contract/orgs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, name, admin, signerSecret }),

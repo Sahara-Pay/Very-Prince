@@ -199,6 +199,9 @@ function DashboardPageInner() {
                 </p>
               </div>
               <div className="flex items-center gap-4">
+                <Link href="/leaderboard" className="text-sm text-white/60 hover:text-white transition-all">
+                  Leaderboard
+                </Link>
                 <Link href="/organizations" className="text-sm text-stellar-teal hover:underline transition-all">
                   Browse Organizations →
                 </Link>

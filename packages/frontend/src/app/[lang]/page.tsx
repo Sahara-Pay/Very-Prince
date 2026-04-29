@@ -70,6 +70,12 @@ export default async function HomePage({ params }: HomePageProps) {
             >
               {dictionary.navigation.dashboard}
             </Link>
+            <Link
+              href={`/${params.lang}/leaderboard`}
+              className="text-sm font-medium text-white/60 transition-colors hover:text-white"
+            >
+              {dictionary.navigation.leaderboard}
+            </Link>
             <LanguageSwitcher currentLocale={params.lang} />
             <WalletButton />
           </div>

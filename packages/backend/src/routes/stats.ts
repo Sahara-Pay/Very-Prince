@@ -115,4 +115,37 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.send(data);
     }
   );
+
+  /**
+   * GET /top-maintainers
+   * Returns a ranked list of top maintainers by earnings.
+   *
+   * @example
+   * GET /api/stats/top-maintainers
+   */
+  fastify.get(
+    "/top-maintainers",
+    {
+      schema: {
+        response: {
+          200: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                address: { type: "string" },
+                totalEarningsXlm: { type: "string" },
+                totalEarningsStroops: { type: "string" },
+                organizationsAssisted: { type: "number" },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (_request, reply) => {
+      const data = await statsController.getTopMaintainers();
+      return reply.send(data);
+    }
+  );
 };

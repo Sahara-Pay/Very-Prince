@@ -27,6 +27,13 @@ export interface GlobalStatsResponse {
   cacheExpiresAt: string;
 }
 
+export interface TopMaintainer {
+  address: string;
+  totalEarningsXlm: string;
+  totalEarningsStroops: string;
+  organizationsAssisted: number;
+}
+
 function stroopsToXlm(stroops: bigint): string {
   return (Number(stroops) / 10_000_000).toFixed(7);
 }
@@ -128,6 +135,55 @@ export const statsController = {
     await safeSet(cacheKey, JSON.stringify(response), 60); // Cache for 1 minute
 
     return response;
+  },
+
+  /**
+   * Get top maintainers ranked by total earnings.
+   */
+  async getTopMaintainers(): Promise<TopMaintainer[]> {
+    const cacheKey = "stats:top-maintainers";
+    const cached = await safeGet(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+
+    const orgs = await stellarService.readAllOrganizations();
+    const maintainerAddresses = new Set<string>();
+
+    // Collect all unique maintainer addresses
+    await Promise.all(
+      orgs.map(async (orgId) => {
+        const maintainers = await stellarService.readMaintainers(orgId);
+        maintainers.forEach((m) => maintainerAddresses.add(m));
+      })
+    );
+
+    // Fetch stats for each maintainer
+    const maintainersData = await Promise.all(
+      [...maintainerAddresses].map(async (address) => {
+        const stats = await stellarService.readProfileStats(address);
+        return {
+          address,
+          totalEarningsXlm: stats.totalXlm,
+          totalEarningsStroops: stats.totalStroops.toString(),
+          organizationsAssisted: stats.orgIds.length,
+          rawStroops: stats.totalStroops,
+        };
+      })
+    );
+
+    // Sort by earnings descending
+    const sorted = maintainersData
+      .sort((a, b) => {
+        if (b.rawStroops > a.rawStroops) return 1;
+        if (b.rawStroops < a.rawStroops) return -1;
+        return 0;
+      })
+      .map(({ rawStroops, ...rest }) => rest);
+
+    await safeSet(cacheKey, JSON.stringify(sorted), 300); // Cache for 5 minutes
+
+    return sorted;
   },
 } as const;
 

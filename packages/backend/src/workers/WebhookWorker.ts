@@ -43,8 +43,7 @@ export class WebhookWorker {
               "X-Very-prince-Timestamp": payload.timestamp,
             },
             body: payloadString,
-            // @ts-expect-error - signal/timeout is available in native fetch
-            signal: AbortSignal.timeout(10000), 
+            signal: AbortSignal.timeout(10000) as any, 
           });
 
           const responseBody = await response.text();

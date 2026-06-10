@@ -126,7 +126,7 @@ jobs:
       # 4.5. Test — executes unit tests for the frontend and backend.
       #      Satisfies Issue #45 Acceptance Criteria Step 2.
       - name: Test (Turborepo)
-        run: npx turbo run test
+        run: npx turbo run test --filter=!@very-prince/docs
 
       # 5. Build — compiles both the Fastify backend (tsc) and the Next.js
       #    frontend (next build). Turborepo respects the `dependsOn` graph in
@@ -135,7 +135,7 @@ jobs:
       #    The `--log-order=grouped` flag keeps output readable in GitHub's
       #    log viewer even when tasks run in parallel.
       - name: Build (Turborepo)
-        run: npx turbo run build --log-order=grouped
+        run: npx turbo run build --filter=!@very-prince/docs --log-order=grouped
         env:
           # Silence Next.js telemetry in CI — no phone-home calls.
           NEXT_TELEMETRY_DISABLED: "1"

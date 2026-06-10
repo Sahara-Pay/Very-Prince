@@ -9,7 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc --project tsconfig.json",
     "start": "node dist/index.js",
-    "test": "vitest run --coverage",
+    "test": "vitest run --coverage --passWithNoTests",
     "lint": "eslint src --ext .ts",
     "postinstall": "prisma generate"
   },

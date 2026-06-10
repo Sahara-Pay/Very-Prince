@@ -418,7 +418,7 @@ mod tests {
         let env = Env::default();
         let token_admin = Address::generate(&env);
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-        let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
+        let _token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
         let contract_id = env.register_contract(None, PayoutRegistry);
         let client = PayoutRegistryClient::new(&env, &contract_id);

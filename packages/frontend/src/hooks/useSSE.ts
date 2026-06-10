@@ -97,7 +97,7 @@ export function useSSE(url?: string) {
   }, [url]);
 
   return {
-    isConnected: eventSourceRef.current?.readyState === EventSource.OPEN,
+    isConnected: typeof window !== 'undefined' && typeof EventSource !== 'undefined' && eventSourceRef.current?.readyState === EventSource.OPEN,
   };
 }
 

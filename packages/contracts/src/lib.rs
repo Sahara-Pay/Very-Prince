@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
-    Address, Bytes, BytesN, Env, FromVal, IntoVal, String, Symbol, Vec,
+    Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,7 +184,7 @@ impl PayoutRegistry {
             panic_with_error!(&env, PrinceError::EmptyAdminList);
         }
 
-        if threshold == 0 || threshold > admins.len() as u32 {
+        if threshold == 0 || threshold > admins.len() {
             panic_with_error!(&env, PrinceError::InvalidThreshold);
         }
 

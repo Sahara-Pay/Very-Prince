@@ -1,4 +1,4 @@
-﻿# Contributing to Very-prince
+# Contributing to Very-prince
 
 Thank you for your interest in contributing! Very-prince is an open-source infrastructure project built on Stellar Soroban. We welcome contributions of all kinds — from fixing typos to implementing new contract features.
 
@@ -221,6 +221,7 @@ Before opening your PR, make sure:
 - [ ] New public contract functions have doc comments.
 - [ ] New unit tests are added for all new behaviour.
 - [ ] `README.md` Contract Reference table is updated (if applicable).
+- [ ] Wallet interactions are manually tested according to the [QA Checklist](docs/QA_WALLET_INTERACTIONS.md) (if applicable).
 
 ---
 

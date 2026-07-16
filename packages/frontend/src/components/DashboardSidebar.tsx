@@ -3,6 +3,11 @@
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import type { ComponentType } from "react";
+import {
+  DASHBOARD_NAV_ACTIVE_INDICATOR_CLASS,
+  DASHBOARD_NAV_ICON_CLASS,
+  getDashboardNavItemClassName,
+} from "./dashboardNavigationStyles";
 
 interface NavLink {
   label: string;
@@ -141,16 +146,12 @@ export function DashboardSidebar() {
           return (
             <Link key={link.href} href={link.href}>
               <div
-                className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${
-                  active
-                    ? "bg-gradient-to-r from-stellar-purple/50 to-brand-500/30 text-white shadow-lg shadow-stellar-purple/20 border border-stellar-purple/30"
-                    : "text-white/70 hover:text-white hover:bg-white/5 border border-transparent"
-                }`}
+                className={getDashboardNavItemClassName(active)}
               >
-                {Icon && <Icon className="w-5 h-5 flex-shrink-0" />}
+                {Icon && <Icon className={DASHBOARD_NAV_ICON_CLASS} />}
                 <span className="font-medium text-sm">{link.label}</span>
                 {active && (
-                  <div className="ml-auto w-1.5 h-1.5 rounded-full bg-gradient-to-r from-stellar-purple to-brand-500" />
+                  <div className={DASHBOARD_NAV_ACTIVE_INDICATOR_CLASS} />
                 )}
               </div>
             </Link>

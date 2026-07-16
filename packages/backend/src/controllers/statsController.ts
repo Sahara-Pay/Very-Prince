@@ -152,6 +152,87 @@ export const statsController = {
   },
 
   /**
+   * Get the total funds raised across all organisations via a single optimised
+   * PostgreSQL aggregation query.
+   *
+   * Problem being solved:
+   *   The old `getGlobalStats()` fetches org budgets via N+1 Stellar RPC calls
+   *   (one per org) which is slow, rate-limited, and expensive.  By persisting
+   *   every `OrgFunded` on-chain event into the `FundingEvent` table we can
+   *   answer this question with a single SQL statement:
+   *
+   *     SELECT SUM(amount_stroops), COUNT(*), COUNT(DISTINCT org_id)
+   *     FROM   "FundingEvent"
+   *     [WHERE  created_at BETWEEN $from AND $to]
+   *
+   * @param fromDate - Optional ISO date string; only events on/after this date
+   * @param toDate   - Optional ISO date string; only events on/before this date
+   */
+  async getTotalFundsRaised(
+    fromDate?: string,
+    toDate?: string,
+  ): Promise<FundsRaisedResponse> {
+    const cacheKey = `stats:funds-raised:${fromDate ?? "all"}:${toDate ?? "all"}`;
+    const cached = await safeGet(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+
+    // Build the optional WHERE clause fragments
+    const conditions: string[] = [];
+    const params: (Date | string)[] = [];
+
+    if (fromDate) {
+      params.push(new Date(fromDate));
+      conditions.push(`"createdAt" >= $${params.length}`);
+    }
+    if (toDate) {
+      params.push(new Date(toDate));
+      conditions.push(`"createdAt" <= $${params.length}`);
+    }
+
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    // Single round-trip to PostgreSQL — no Stellar RPC, no N+1 loops
+    type AggRow = {
+      total_stroops: bigint | null;
+      event_count: bigint;
+      org_count: bigint;
+    };
+
+    const [row] = await prisma.$queryRawUnsafe<AggRow[]>(
+      `SELECT
+         COALESCE(SUM("amountStroops"), 0)           AS total_stroops,
+         COUNT(*)                                     AS event_count,
+         COUNT(DISTINCT "orgId")                      AS org_count
+       FROM "FundingEvent"
+       ${whereClause}`,
+      ...params,
+    );
+
+    const totalStroops = BigInt(row?.total_stroops ?? 0n);
+    const eventCount = Number(row?.event_count ?? 0n);
+    const orgCount = Number(row?.org_count ?? 0n);
+
+    const now = new Date();
+    const response: FundsRaisedResponse = {
+      totalFundsRaisedStroops: totalStroops.toString(),
+      totalFundsRaisedXlm: stroopsToXlm(totalStroops),
+      totalFundingEvents: eventCount,
+      distinctOrgsCount: orgCount,
+      ...(fromDate ? { fromDate } : {}),
+      ...(toDate ? { toDate } : {}),
+      cachedAt: now.toISOString(),
+    };
+
+    // Cache for 5 minutes (300 s) — same TTL as global stats
+    await safeSet(cacheKey, JSON.stringify(response), 300);
+
+    return response;
+  },
+
+  /**
     * Get top maintainers ranked by total earnings.
     * 
     * This endpoint identifies the most impactful contributors across the entire
@@ -221,4 +302,21 @@ export interface TVLResponse {
   tvlUSD: string;
   /** ISO timestamp of when this value was computed. */
   lastUpdated: string;
+}
+
+export interface FundsRaisedResponse {
+  /** Total funds raised across all organisations, in stroops. */
+  totalFundsRaisedStroops: string;
+  /** Total funds raised expressed in whole XLM. */
+  totalFundsRaisedXlm: string;
+  /** Total number of individual funding transactions. */
+  totalFundingEvents: number;
+  /** Number of distinct organisations that received funds. */
+  distinctOrgsCount: number;
+  /** ISO timestamp of the earliest funding event included (if filtered). */
+  fromDate?: string;
+  /** ISO timestamp of the latest funding event included (if filtered). */
+  toDate?: string;
+  /** ISO timestamp of when this result was computed. */
+  cachedAt: string;
 }

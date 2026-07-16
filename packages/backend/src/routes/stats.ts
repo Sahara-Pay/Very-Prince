@@ -1,19 +1,5 @@
-/**
- * @file stats.ts
- * @description Global ecosystem statistics endpoint.
- *
- * Registered at: /api/stats (see src/index.ts)
- *
- * ## Available Endpoints
- *
- * GET /api/stats/global  — Aggregated platform-wide statistics (1-minute cache)
- * GET /api/stats/tvl     — Total Value Locked across the platform
- */
-
-import type { FastifyPluginAsync } from "fastify";
-import { statsController } from "../controllers/statsController.js";
-
-// --- In-memory cache ---------------------------------------------------
+import type { FastifyPluginAsync } from 'fastify';
+import { statsController } from '../controllers/statsController.js';
 
 interface CacheEntry<T> {
   data: T;
@@ -22,33 +8,30 @@ interface CacheEntry<T> {
 
 let globalStatsCache: CacheEntry<Awaited<ReturnType<typeof statsController.getGlobalStats>>> | null = null;
 let tvlCache: CacheEntry<Awaited<ReturnType<typeof statsController.getTVL>>> | null = null;
-const CACHE_TTL_MS = 60 * 1000; // 1 minute
-
-// --- Route Plugin ------------------------------------------------------
+const CACHE_TTL_MS = 60 * 1000;
 
 export const statsRoutes: FastifyPluginAsync = async (fastify) => {
-  /**
-   * GET /global
-   * Returns aggregated platform statistics, cached for 1 minute.
-   *
-   * @example
-   * GET /api/stats/global
-   */
   fastify.get(
-    "/global",
+    '/global',
     {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: '1 minute',
+        },
+      },
       schema: {
         response: {
           200: {
-            type: "object",
+            type: 'object',
             properties: {
-              totalOrganizations: { type: "number" },
-              totalFundedStroops: { type: "string" },
-              totalFundedXlm: { type: "string" },
-              totalClaimedStroops: { type: "string" },
-              totalClaimedXlm: { type: "string" },
-              cachedAt: { type: "string" },
-              cacheExpiresAt: { type: "string" },
+              totalOrganizations: { type: 'number' },
+              totalFundedStroops: { type: 'string' },
+              totalFundedXlm: { type: 'string' },
+              totalClaimedStroops: { type: 'string' },
+              totalClaimedXlm: { type: 'string' },
+              cachedAt: { type: 'string' },
+              cacheExpiresAt: { type: 'string' },
             },
           },
         },
@@ -56,45 +39,37 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (_request, reply) => {
       const now = Date.now();
-
       if (globalStatsCache && now < globalStatsCache.expiresAt) {
         return reply.send(globalStatsCache.data);
       }
-
       const data = await statsController.getGlobalStats();
       globalStatsCache = { data, expiresAt: now + CACHE_TTL_MS };
-
       return reply.send(data);
     }
   );
 
-  /**
-   * GET /tvl
-   * Returns Total Value Locked across the platform.
-   *
-   * Query Parameters:
-   *   - format: 'full' returns exact value, 'short' returns abbreviated (e.g., 14.5M)
-   *
-   * @example
-   * GET /api/stats/tvl
-   * GET /api/stats/tvl?format=short
-   */
   fastify.get(
-    "/tvl",
+    '/tvl',
     {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: '1 minute',
+        },
+      },
       schema: {
         querystring: {
-          type: "object",
+          type: 'object',
           properties: {
-            format: { type: "string", enum: ["full", "short"] },
+            format: { type: 'string', enum: ['full', 'short'] },
           },
         },
         response: {
           200: {
-            type: "object",
+            type: 'object',
             properties: {
-              tvlUSD: { type: "string" },
-              lastUpdated: { type: "string" },
+              tvlUSD: { type: 'string' },
+              lastUpdated: { type: 'string' },
             },
           },
         },
@@ -102,41 +77,36 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (request, reply) => {
       const now = Date.now();
-      const format = (request.query as { format?: string }).format ?? "full";
-
-      // Cache is per-format, so we check if format matches
+      const format = (request.query as { format?: string }).format ?? 'full';
       if (tvlCache && now < tvlCache.expiresAt) {
         return reply.send(tvlCache.data);
       }
-
-      const data = await statsController.getTVL(format as "full" | "short");
+      const data = await statsController.getTVL(format as 'full' | 'short');
       tvlCache = { data, expiresAt: now + CACHE_TTL_MS };
-
       return reply.send(data);
     }
   );
 
-  /**
-   * GET /top-maintainers
-   * Returns a ranked list of top maintainers by earnings.
-   *
-   * @example
-   * GET /api/stats/top-maintainers
-   */
   fastify.get(
-    "/top-maintainers",
+    '/top-maintainers',
     {
+      config: {
+        rateLimit: {
+          max: 20,
+          timeWindow: '1 minute',
+        },
+      },
       schema: {
         response: {
           200: {
-            type: "array",
+            type: 'array',
             items: {
-              type: "object",
+              type: 'object',
               properties: {
-                address: { type: "string" },
-                totalEarningsXlm: { type: "string" },
-                totalEarningsStroops: { type: "string" },
-                organizationsAssisted: { type: "number" },
+                address: { type: 'string' },
+                totalEarningsXlm: { type: 'string' },
+                totalEarningsStroops: { type: 'string' },
+                organizationsAssisted: { type: 'number' },
               },
             },
           },
@@ -145,6 +115,59 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (_request, reply) => {
       const data = await statsController.getTopMaintainers();
+      return reply.send(data);
+    }
+  );
+
+  /**
+   * GET /funds-raised
+   * Returns the total funds raised across all organisations, derived from a
+   * single optimised PostgreSQL aggregation over the `FundingEvent` table.
+   *
+   * This endpoint replaces the previous N+1 Stellar RPC approach used by
+   * `getGlobalStats()` and is the primary resolution for issue #16.
+   *
+   * Query Parameters:
+   *   - fromDate: ISO date string — only include events on/after this date (optional)
+   *   - toDate:   ISO date string — only include events on/before this date (optional)
+   *
+   * @example
+   * GET /api/stats/funds-raised
+   * GET /api/stats/funds-raised?fromDate=2024-01-01&toDate=2024-12-31
+   */
+  fastify.get(
+    "/funds-raised",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          properties: {
+            fromDate: { type: "string", format: "date-time" },
+            toDate:   { type: "string", format: "date-time" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            properties: {
+              totalFundsRaisedStroops: { type: "string" },
+              totalFundsRaisedXlm:    { type: "string" },
+              totalFundingEvents:     { type: "number" },
+              distinctOrgsCount:      { type: "number" },
+              fromDate:               { type: "string" },
+              toDate:                 { type: "string" },
+              cachedAt:               { type: "string" },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { fromDate, toDate } = request.query as {
+        fromDate?: string;
+        toDate?: string;
+      };
+      const data = await statsController.getTotalFundsRaised(fromDate, toDate);
       return reply.send(data);
     }
   );

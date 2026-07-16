@@ -7,6 +7,7 @@ import { RegisterOrgModal } from "@/components/RegisterOrgModal";
 import { GlassButton } from "@/components/GlassButton";
 import type { Org } from "@/lib/api";
 import { useSSEWithSWR } from "@/hooks/useSSE";
+import { OrganizationSkeletonCard } from "@/components/OrganizationSkeletonCard";
 
 /**
  * @file dashboard/org/page.tsx
@@ -87,8 +88,10 @@ export default function DashboardOrganizationsPage() {
 
       {/* ── Content ────────────────────────────────────────────────────────────── */}
       {isLoading ? (
-        <div className="flex items-center justify-center py-12">
-          <div className="text-white/60">Loading organizations...</div>
+        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <OrganizationSkeletonCard key={i} />
+          ))}
         </div>
       ) : error ? (
         <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-6">

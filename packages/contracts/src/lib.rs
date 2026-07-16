@@ -110,6 +110,8 @@ pub enum PrinceError {
     NoPendingAdmin = 25,
     /// The caller is not the address currently proposed as a new administrator.
     NotPendingAdmin = 26,
+    /// The amount provided exceeds the maximum allowed limit.
+    AmountExceedsLimit = 27,
 }
 
 #[contracttype]
@@ -146,6 +148,8 @@ pub enum DataKey {
 const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
 /// Trigger an extension when fewer than ~7 days of TTL remain.
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
+/// Maximum allowed amount for funding or payout (1 trillion tokens in stroops).
+const MAX_AMOUNT_LIMIT: i128 = 10_000_000_000_000_000_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Technical Design Notes: Soroban Storage Model
@@ -456,6 +460,10 @@ impl PayoutRegistry {
             panic_with_error!(&env, PrinceError::InvalidAmount);
         }
 
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+
         if !env
             .storage()
             .persistent()
@@ -715,6 +723,10 @@ impl PayoutRegistry {
             panic_with_error!(&env, PrinceError::InvalidAmount);
         }
 
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+
         let maintainer_org: Symbol = env
             .storage()
             .persistent()
@@ -808,6 +820,9 @@ impl PayoutRegistry {
             let entry = payouts.get(i).unwrap();
             if entry.amount <= 0 {
                 panic_with_error!(&env, PrinceError::InvalidAmount);
+            }
+            if entry.amount > MAX_AMOUNT_LIMIT {
+                panic_with_error!(&env, PrinceError::AmountExceedsLimit);
             }
             let maintainer_org: Symbol = env
                 .storage()

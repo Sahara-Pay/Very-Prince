@@ -24,6 +24,25 @@ import { contractController } from "../controllers/contractController.js";
 import { stellarService } from "../services/stellarService.js";
 import { Keypair } from "@stellar/stellar-sdk";
 
+const OrganizationListQuery = z.object({
+  page: z.preprocess((value) => {
+    if (value === undefined || value === null || value === "") return 1;
+    return Number(String(value));
+  }, z.number().int().min(1).max(100)),
+  limit: z.preprocess((value) => {
+    if (value === undefined || value === null || value === "") return 10;
+    return Number(String(value));
+  }, z.number().int().min(1).max(100)),
+  search: z.preprocess((value) => {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+
+    const sanitized = value.trim().replace(/[\u0000-\u001F\u007F]/g, "");
+    return sanitized.length === 0 ? undefined : sanitized;
+  }, z.string().min(1).max(100).optional()),
+});
+
 // ─── Validation Schemas ──────────────────────────────────────────────────────
 
 /** Validation for the POST /orgs registration request body. */
@@ -99,9 +118,15 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
       },
     },
     async (request, reply) => {
-      const page = parseInt(request.query.page || "1", 10);
-      const limit = parseInt(request.query.limit || "10", 10);
-      const search = request.query.search;
+      const parsedQuery = OrganizationListQuery.safeParse(request.query);
+      if (!parsedQuery.success) {
+        return reply.status(400).send({
+          error: "Invalid query parameters",
+          details: parsedQuery.error.flatten().fieldErrors,
+        });
+      }
+
+      const { page, limit, search } = parsedQuery.data;
       const result = await contractController.getOrganizations(
         page,
         limit,

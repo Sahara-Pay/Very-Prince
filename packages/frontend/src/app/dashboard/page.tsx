@@ -12,6 +12,7 @@ import { WalletButton } from "@/components/WalletButton";
 import { PayoutCard } from "@/components/PayoutCard";
 import { FundOrgModal } from "@/components/FundOrgModal";
 import { AllocatePayoutModal } from "@/components/AllocatePayoutModal";
+import { EmptyMaintainersState } from "@/components/EmptyMaintainersState";
 import { WebhookSettings } from "@/components/WebhookSettings";
 import { ApiKeySettings } from "@/components/ApiKeySettings";
 import { useFreighter } from "@/hooks/useFreighter";
@@ -361,16 +362,11 @@ function DashboardPageInner() {
                   )}
 
                   {/* ── Empty State ── */}
-                  {balances.length === 0 && !isLoading && (
-                    <div className="rounded-2xl border border-dashed border-white/10 p-12 text-center">
-                      <p className="text-sm text-white/40">
-                        No maintainers registered for{" "}
-                        <span className="font-mono text-white/60">
-                          {organization.id}
-                        </span>{" "}
-                        yet.
-                      </p>
-                    </div>
+                  {optimisticBalances.length === 0 && !isLoading && (
+                    <EmptyMaintainersState
+                      orgId={organization.id}
+                      onAllocateClick={() => setShowAllocateModal(true)}
+                    />
                   )}
                 </>
               ) : (

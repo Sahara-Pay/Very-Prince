@@ -95,6 +95,11 @@ export function WalletProvider({ children }: WalletProviderProps) {
       // Get current network
       const network = await getNetworkFromFreighter();
 
+      // Validate that the network is Testnet
+      if (network !== 'testnet') {
+        throw new Error('Please switch to Stellar Testnet in Freighter.');
+      }
+
       setWalletState({
         publicKey,
         network,
@@ -167,6 +172,17 @@ export function WalletProvider({ children }: WalletProviderProps) {
 
       const publicKey = await getPublicKeyFromFreighter();
       const network = await getNetworkFromFreighter();
+
+      // Validate that the network is Testnet
+      if (network !== 'testnet') {
+        setWalletState(prev => ({
+          ...prev,
+          isConnected: false,
+          publicKey: null,
+          error: 'Please switch to Stellar Testnet in Freighter.',
+        }));
+        return;
+      }
 
       if (publicKey) {
         setWalletState({

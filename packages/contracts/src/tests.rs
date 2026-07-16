@@ -101,6 +101,40 @@ mod tests {
     }
 
     #[test]
+    fn test_fund_org_exceeds_limit_fails() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("myorg");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let donor = Address::generate(&env);
+        token.mint(&donor, &20_000_000_000_000_000_000);
+        
+        let result = client.try_fund_org(&org_sym, &donor, &10_000_000_000_000_000_001_i128);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_allocate_exceeds_limit_fails() {
+        let Setup { env, client, .. } = setup();
+        let org_sym = symbol_short!("myorg");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let maintainer = Address::generate(&env);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        let result = client.try_allocate_payout(
+            &org_sym,
+            &admin,
+            &maintainer,
+            &10_000_000_000_000_000_001_i128,
+            &0_u64,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_allocate_without_budget_panics() {
         let Setup { env, client, .. } = setup();
         let org_sym = symbol_short!("myorg");
@@ -570,5 +604,226 @@ mod tests {
         let result = client.try_unpause_protocol(&signers_unpause2);
         assert!(result.is_ok());
         assert_eq!(client.get_protocol_state(), crate::ProtocolState::Active);
+    }
+
+    // ── Property-based Fuzz Tests ──────────────────────────────────────────
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(50))]
+        
+        #[test]
+        fn test_fuzz_allocate_and_claim(
+            org_budget in 1..1_000_000_i128,
+            payout1 in -100..2_000_000_i128,
+            payout2 in -100..2_000_000_i128,
+            unlock1 in 0..10_000_u64,
+            unlock2 in 0..10_000_u64,
+            claim_time in 0..20_000_u64,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let token_admin = Address::generate(&env);
+            let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+            let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
+
+            let contract_id = env.register_contract(None, PayoutRegistry);
+            let client = PayoutRegistryClient::new(&env, &contract_id);
+
+            let admin1 = Address::generate(&env);
+            let mut admins = Vec::new(&env);
+            admins.push_back(admin1.clone());
+            client.init(&token_contract_id.address(), &admins, &1);
+
+            let org_sym = symbol_short!("fuzzorg");
+            let org_admin = Address::generate(&env);
+            client.register_org(
+                &org_sym,
+                &String::from_str(&env, "Fuzz Organization"),
+                &org_admin,
+            );
+
+            let maintainer1 = Address::generate(&env);
+            let maintainer2 = Address::generate(&env);
+            client.add_maintainer(&org_sym, &maintainer1);
+            client.add_maintainer(&org_sym, &maintainer2);
+
+            let donor = Address::generate(&env);
+            token_client.mint(&donor, &org_budget);
+            client.fund_org(&org_sym, &donor, &org_budget);
+
+            // Assert budget is updated correctly after funding
+            assert_eq!(client.get_org_budget(&org_sym), org_budget);
+
+            // Perform first payout allocation
+            let res1 = client.try_allocate_payout(
+                &org_sym,
+                &org_admin,
+                &maintainer1,
+                &payout1,
+                &unlock1,
+            );
+
+            let mut expected_budget = org_budget;
+            let mut expected_m1_bal = 0;
+
+            if payout1 <= 0 {
+                assert!(res1.is_err());
+            } else if payout1 > expected_budget {
+                assert!(res1.is_err());
+            } else {
+                assert!(res1.is_ok());
+                expected_budget -= payout1;
+                expected_m1_bal = payout1;
+                assert_eq!(client.get_org_budget(&org_sym), expected_budget);
+                assert_eq!(client.get_claimable_balance(&maintainer1), expected_m1_bal);
+            }
+
+            // Perform second payout allocation
+            let res2 = client.try_allocate_payout(
+                &org_sym,
+                &org_admin,
+                &maintainer2,
+                &payout2,
+                &unlock2,
+            );
+
+            let mut expected_m2_bal = 0;
+
+            if payout2 <= 0 {
+                assert!(res2.is_err());
+            } else if payout2 > expected_budget {
+                assert!(res2.is_err());
+            } else {
+                assert!(res2.is_ok());
+                expected_budget -= payout2;
+                expected_m2_bal = payout2;
+                assert_eq!(client.get_org_budget(&org_sym), expected_budget);
+                assert_eq!(client.get_claimable_balance(&maintainer2), expected_m2_bal);
+            }
+
+            // Validate total remaining budget matches conservation law
+            assert_eq!(client.get_org_budget(&org_sym), expected_budget);
+
+            // Claiming tests under randomized claim_time
+            env.ledger().set_timestamp(claim_time);
+
+            let token_query = token::Client::new(&env, &token_client.address);
+
+            // Try to claim payout 1
+            if expected_m1_bal > 0 {
+                let res_claim1 = client.try_claim_payout(&maintainer1);
+                if claim_time < unlock1 {
+                    assert!(res_claim1.is_err());
+                    assert_eq!(client.get_claimable_balance(&maintainer1), expected_m1_bal);
+                    assert_eq!(token_query.balance(&maintainer1), 0);
+                } else {
+                    assert!(res_claim1.is_ok());
+                    assert_eq!(client.get_claimable_balance(&maintainer1), 0);
+                    assert_eq!(token_query.balance(&maintainer1), expected_m1_bal);
+                }
+            }
+
+            // Try to claim payout 2
+            if expected_m2_bal > 0 {
+                let res_claim2 = client.try_claim_payout(&maintainer2);
+                if claim_time < unlock2 {
+                    assert!(res_claim2.is_err());
+                    assert_eq!(client.get_claimable_balance(&maintainer2), expected_m2_bal);
+                    assert_eq!(token_query.balance(&maintainer2), 0);
+                } else {
+                    assert!(res_claim2.is_ok());
+                    assert_eq!(client.get_claimable_balance(&maintainer2), 0);
+                    assert_eq!(token_query.balance(&maintainer2), expected_m2_bal);
+                }
+            }
+        }
+
+        #[test]
+        fn test_fuzz_batch_allocate(
+            org_budget in 1..1_000_000_i128,
+            payout1 in -100..2_000_000_i128,
+            payout2 in -100..2_000_000_i128,
+            payout3 in -100..2_000_000_i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let token_admin = Address::generate(&env);
+            let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+            let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
+
+            let contract_id = env.register_contract(None, PayoutRegistry);
+            let client = PayoutRegistryClient::new(&env, &contract_id);
+
+            let admin1 = Address::generate(&env);
+            let mut admins = Vec::new(&env);
+            admins.push_back(admin1.clone());
+            client.init(&token_contract_id.address(), &admins, &1);
+
+            let org_sym = symbol_short!("batchorg");
+            let org_admin = Address::generate(&env);
+            client.register_org(
+                &org_sym,
+                &String::from_str(&env, "Batch Fuzz Org"),
+                &org_admin,
+            );
+
+            let m1 = Address::generate(&env);
+            let m2 = Address::generate(&env);
+            let m3 = Address::generate(&env);
+
+            client.add_maintainer(&org_sym, &m1);
+            client.add_maintainer(&org_sym, &m2);
+            client.add_maintainer(&org_sym, &m3);
+
+            let donor = Address::generate(&env);
+            token_client.mint(&donor, &org_budget);
+            client.fund_org(&org_sym, &donor, &org_budget);
+
+            let mut payouts = Vec::new(&env);
+            payouts.push_back(PayoutParams {
+                maintainer: m1.clone(),
+                amount: payout1,
+            });
+            payouts.push_back(PayoutParams {
+                maintainer: m2.clone(),
+                amount: payout2,
+            });
+            payouts.push_back(PayoutParams {
+                maintainer: m3.clone(),
+                amount: payout3,
+            });
+
+            let res = client.try_batch_allocate(&org_admin, &org_sym, &payouts);
+
+            let total_payout = payout1.checked_add(payout2).and_then(|sum| sum.checked_add(payout3));
+            let has_invalid_amount = payout1 <= 0 || payout2 <= 0 || payout3 <= 0;
+
+            match total_payout {
+                None => {
+                    // Overflow in sum calculation -> should error
+                    assert!(res.is_err());
+                    assert_eq!(client.get_org_budget(&org_sym), org_budget);
+                }
+                Some(total) => {
+                    if has_invalid_amount {
+                        assert!(res.is_err());
+                        // Budget remains untouched
+                        assert_eq!(client.get_org_budget(&org_sym), org_budget);
+                    } else if total > org_budget {
+                        assert!(res.is_err());
+                        // Budget remains untouched (atomicity)
+                        assert_eq!(client.get_org_budget(&org_sym), org_budget);
+                    } else {
+                        assert!(res.is_ok());
+                        assert_eq!(client.get_org_budget(&org_sym), org_budget - total);
+                        assert_eq!(client.get_claimable_balance(&m1), payout1);
+                        assert_eq!(client.get_claimable_balance(&m2), payout2);
+                        assert_eq!(client.get_claimable_balance(&m3), payout3);
+                    }
+                }
+            }
+        }
     }
 }

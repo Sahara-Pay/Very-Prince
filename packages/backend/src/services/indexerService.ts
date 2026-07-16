@@ -243,6 +243,8 @@ export class IndexerService {
         const fundEvent = event as OrgFundedEvent;
         walletAddress = fundEvent.from;
         volumeUSD = BigInt(fundEvent.amount);
+
+        // Emit SSE for real-time UI updates
         emitSSEEvent('funds_deposited', {
           orgId: fundEvent.orgId,
           from: fundEvent.from,
@@ -250,6 +252,24 @@ export class IndexerService {
           amountXlm: stroopsToXlm(fundEvent.amount),
           ledger: fundEvent.ledger,
           txHash: fundEvent.txHash,
+        });
+
+        // Persist to DB for optimized SQL aggregation (avoids N+1 Stellar RPC calls)
+        // Uses upsert via createMany skipDuplicates for idempotency on the
+        // unique constraint (txHash, orgId, createdAt).
+        await prisma.fundingEvent.createMany({
+          data: [
+            {
+              orgId: fundEvent.orgId,
+              from: fundEvent.from,
+              amountStroops: BigInt(fundEvent.amount),
+              amountXlm: stroopsToXlm(fundEvent.amount),
+              ledger: fundEvent.ledger,
+              txHash: fundEvent.txHash,
+              createdAt,
+            },
+          ],
+          skipDuplicates: true,
         });
         break;
       }

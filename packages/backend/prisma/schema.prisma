@@ -55,6 +55,27 @@ model PayoutEvent {
   @@index([createdAt])
 }
 
+/// Persisted record of every on-chain OrgFunded event.
+/// Enables a single SQL SUM aggregation for total funds raised,
+/// avoiding N+1 Stellar RPC calls per organisation.
+model FundingEvent {
+  id            String   @default(cuid()) // Internal tracking ID
+  orgId         String   // Target organisation that received the funds
+  from          String   // Sender wallet address
+  amountStroops BigInt   // Amount sent in stroops (10^-7 XLM)
+  amountXlm     Decimal  // Amount converted to XLM at indexing time
+  ledger        Int      // Ledger sequence number
+  txHash        String   // Stellar transaction hash
+  createdAt     DateTime // Timestamp of ledger closure (Partition Key)
+
+  @@id([id, createdAt])
+  @@unique([txHash, orgId, createdAt]) // Idempotency: no duplicate funding events
+  @@index([orgId])
+  @@index([from])
+  @@index([createdAt])
+  @@index([ledger])
+}
+
 model Maintainer {
   address   String   @id
   orgId     String

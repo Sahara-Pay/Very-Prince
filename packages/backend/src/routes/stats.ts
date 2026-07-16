@@ -148,4 +148,57 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.send(data);
     }
   );
+
+  /**
+   * GET /funds-raised
+   * Returns the total funds raised across all organisations, derived from a
+   * single optimised PostgreSQL aggregation over the `FundingEvent` table.
+   *
+   * This endpoint replaces the previous N+1 Stellar RPC approach used by
+   * `getGlobalStats()` and is the primary resolution for issue #16.
+   *
+   * Query Parameters:
+   *   - fromDate: ISO date string — only include events on/after this date (optional)
+   *   - toDate:   ISO date string — only include events on/before this date (optional)
+   *
+   * @example
+   * GET /api/stats/funds-raised
+   * GET /api/stats/funds-raised?fromDate=2024-01-01&toDate=2024-12-31
+   */
+  fastify.get(
+    "/funds-raised",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          properties: {
+            fromDate: { type: "string", format: "date-time" },
+            toDate:   { type: "string", format: "date-time" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            properties: {
+              totalFundsRaisedStroops: { type: "string" },
+              totalFundsRaisedXlm:    { type: "string" },
+              totalFundingEvents:     { type: "number" },
+              distinctOrgsCount:      { type: "number" },
+              fromDate:               { type: "string" },
+              toDate:                 { type: "string" },
+              cachedAt:               { type: "string" },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { fromDate, toDate } = request.query as {
+        fromDate?: string;
+        toDate?: string;
+      };
+      const data = await statsController.getTotalFundsRaised(fromDate, toDate);
+      return reply.send(data);
+    }
+  );
 };

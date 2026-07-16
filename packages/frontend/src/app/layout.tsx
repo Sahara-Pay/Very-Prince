@@ -11,6 +11,7 @@ import Script from "next/script";
 import { Toaster } from "sonner";
 import { WalletProvider } from "@/contexts/WalletContext";
 import { AuthProvider } from "@/contexts/AuthContext";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -94,7 +95,9 @@ export default function RootLayout({
               className="pointer-events-none fixed inset-0 bg-hero-pattern"
             />
             {/* Page content */}
-            <div className="relative">{children}</div>
+            <div className="relative">
+              <ErrorBoundary>{children}</ErrorBoundary>
+            </div>
 
             {/* Toast notifications */}
             <Toaster

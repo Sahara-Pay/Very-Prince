@@ -1,12 +1,11 @@
-// Set-Content -LiteralPath "C:\Users\ADMIN\OneDrive\Desktop\profile\Very-prince\packages\frontend\src\app\profile\[address]\page.tsx" -Value @'
-// /**
-//  * @file profile/[address]/page.tsx
-//  * @description Public profile page for any wallet address interacting with
-//  * the PayoutRegistry. Shows total XLM earned, contributing orgs, and a
-//  * full payout timeline. URL is easily shareable - no wallet required.
-//  *
-//  * Route: /profile/[address]
-//  */
+/**
+ * @file profile/[address]/page.tsx
+ * @description Public profile page for any wallet address interacting with
+ * the PayoutRegistry. Shows total XLM earned, contributing orgs, and a
+ * full payout timeline. URL is easily shareable - no wallet required.
+ *
+ * Route: /profile/[address]
+ */
 
 import type { Metadata } from "next";
 import Link from "next/link";
@@ -110,18 +109,18 @@ export default async function ProfilePage({
         {/* Header */}
         <div className="space-y-1">
           <h1 className="text-2xl font-bold text-white">Maintainer Profile</h1>
-          <div className="flex items-center gap-2">
-            <code className="text-sm text-indigo-400 break-all">{address}</code>
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <code className="text-sm text-indigo-400 break-all min-w-0">{address}</code>
             <CopyButton
               text={address}
               label="copy"
-              className="text-gray-500 hover:text-gray-300 text-xs"
+              className="text-gray-500 hover:text-gray-300 text-xs shrink-0"
             />
           </div>
         </div>
 
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {/* Stats Cards — responsive: 1 col on mobile, 3 on sm+ */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 min-w-0">
           <StatCard
             label="Total Earned"
             value={`${formatXlm(stats.totalStroops)} XLM`}
@@ -155,7 +154,7 @@ export default async function ProfilePage({
           </section>
         )}
 
-        {/* Payout Timeline */}
+        {/* Payout Timeline — responsive: stack on mobile, row on sm+ */}
         <section className="space-y-3">
           <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">
             Payout Timeline
@@ -168,10 +167,10 @@ export default async function ProfilePage({
               {stats.payouts.map((payout, i) => (
                 <div
                   key={`${payout.txHash}-${i}`}
-                  className="flex items-center justify-between px-4 py-3 hover:bg-gray-900 transition-colors"
+                  className="flex flex-col gap-1 px-4 py-3 hover:bg-gray-900 transition-colors sm:flex-row sm:items-center sm:justify-between"
                 >
-                  <div className="space-y-0.5">
-                    <div className="flex items-center gap-2">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium text-white">
                         {formatXlm(payout.amountStroops)} XLM
                       </span>
@@ -184,12 +183,12 @@ export default async function ProfilePage({
                       {formatDate(payout.ledgerClosedAt)} - Ledger #{payout.ledger}
                     </p>
                   </div>
-                 <a> 
-            href={'https://stellar.expert/explorer/testnet/tx/' + payout.txHash}
+                  <a
+                    href={`https://stellar.expert/explorer/testnet/tx/${payout.txHash}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-xs text-gray-500 hover:text-indigo-400 transition-colors"
-                  
+                    className="text-xs text-gray-500 hover:text-indigo-400 transition-colors break-all sm:shrink-0"
+                  >
                     {shortAddress(payout.txHash)}
                   </a>
                 </div>
@@ -222,10 +221,9 @@ export default async function ProfilePage({
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-1">
-      <p className="text-xs text-gray-500 uppercase tracking-wide">{label}</p>
-      <p className="text-xl font-bold text-white">{value}</p>
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-1 min-w-0">
+      <p className="text-xs text-gray-500 uppercase tracking-wide truncate">{label}</p>
+      <p className="text-xl font-bold text-white break-words">{value}</p>
     </div>
   );
 }
-

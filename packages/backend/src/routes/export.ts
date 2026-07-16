@@ -14,11 +14,8 @@
 
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
-import { PrismaClient } from "@prisma/client";
 import csv from "fast-csv";
-
-// Initialize Prisma client
-const prisma = new PrismaClient();
+import { prisma } from "../services/db.js";
 
 // ─── Validation Schemas ──────────────────────────────────────────────────────
 

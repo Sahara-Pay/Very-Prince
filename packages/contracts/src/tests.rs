@@ -101,6 +101,40 @@ mod tests {
     }
 
     #[test]
+    fn test_fund_org_exceeds_limit_fails() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("myorg");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let donor = Address::generate(&env);
+        token.mint(&donor, &20_000_000_000_000_000_000);
+        
+        let result = client.try_fund_org(&org_sym, &donor, &10_000_000_000_000_000_001_i128);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_allocate_exceeds_limit_fails() {
+        let Setup { env, client, .. } = setup();
+        let org_sym = symbol_short!("myorg");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let maintainer = Address::generate(&env);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        let result = client.try_allocate_payout(
+            &org_sym,
+            &admin,
+            &maintainer,
+            &10_000_000_000_000_000_001_i128,
+            &0_u64,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_allocate_without_budget_panics() {
         let Setup { env, client, .. } = setup();
         let org_sym = symbol_short!("myorg");

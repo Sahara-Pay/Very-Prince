@@ -37,6 +37,7 @@ import { organizationRoutes } from "./routes/organization.js";
 import { authRoutes } from "./routes/auth.js";
 import { webhookRoutes } from "./routes/webhook.js";
 import { apiKeyRoutes } from "./routes/apiKeys.js";
+import { healthRoutes } from "./routes/health.js";
 import { indexerService } from "./services/indexerService.js";
 import { notificationController } from "./controllers/notificationController.js";
 import { configureTRPC } from "./trpc/server.js";
@@ -128,6 +129,7 @@ await server.register(swagger, {
       { name: 'Stats', description: 'Statistics and analytics' },
       { name: 'Events', description: 'Event tracking' },
       { name: 'Webhooks', description: 'Webhook management' },
+      { name: 'Health', description: 'Service health and uptime' },
     ],
   },
 });
@@ -171,6 +173,7 @@ await server.register(eventsRoutes, { prefix: "/api/events" });
 await server.register(organizationRoutes, { prefix: "/api/org" });
 await server.register(webhookRoutes, { prefix: "/api/org/:orgId/webhook" });
 await server.register(apiKeyRoutes, { prefix: "/api/org" });
+await server.register(healthRoutes, { prefix: "/health" });
 
 // Configure tRPC routes manually
 await configureTRPC(server);
@@ -190,14 +193,6 @@ server.get("/api/v1/notifications/unsubscribe", notificationController.unsubscri
 /**
  * System Health & Diagnostics
  */
-
-// Health check — used by CI, load balancers, and monitoring.
-server.get("/health", async () => ({
-  status: "ok",
-  version: "0.1.0",
-  timestamp: new Date().toISOString(),
-  uptime: process.uptime(), // Added uptime for diagnostic purposes
-}));
 
 // Indexer status endpoint
 server.get("/indexer/status", async () => {

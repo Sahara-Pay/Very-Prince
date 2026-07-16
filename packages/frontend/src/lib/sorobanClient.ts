@@ -206,7 +206,22 @@ class SorobanClient {
     }
 
     const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
-    return preparedTx.toXDR();
+    const xdr = preparedTx.toXDR();
+    try {
+      // Emit a debug event so frontend debug panel can capture raw XDRs
+      // (listeners are optional and this is safe to call in browser)
+      // @ts-ignore window in Node builds will be undefined; guard at runtime
+      if (typeof window !== "undefined" && (window as any).dispatchEvent) {
+        const ev = new CustomEvent("very-prince:xdr-debug", {
+          detail: { type: "unsigned", label: "fund_org", xdr },
+        });
+        window.dispatchEvent(ev);
+      }
+    } catch (err) {
+      // swallow any errors — this is non-critical debug instrumentation
+    }
+
+    return xdr;
   }
 
   public async buildClaimPayoutTransaction(userAddress: string): Promise<string> {
@@ -229,7 +244,16 @@ class SorobanClient {
     }
 
     const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
-    return preparedTx.toXDR();
+    const xdr = preparedTx.toXDR();
+    try {
+      if (typeof window !== "undefined" && (window as any).dispatchEvent) {
+        const ev = new CustomEvent("very-prince:xdr-debug", {
+          detail: { type: "unsigned", label: "claim_payout", xdr },
+        });
+        window.dispatchEvent(ev);
+      }
+    } catch (err) {}
+    return xdr;
   }
 
   public async buildAllocatePayoutTransaction(
@@ -263,7 +287,16 @@ class SorobanClient {
     }
 
     const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
-    return preparedTx.toXDR();
+    const xdr = preparedTx.toXDR();
+    try {
+      if (typeof window !== "undefined" && (window as any).dispatchEvent) {
+        const ev = new CustomEvent("very-prince:xdr-debug", {
+          detail: { type: "unsigned", label: "allocate_payout", xdr },
+        });
+        window.dispatchEvent(ev);
+      }
+    } catch (err) {}
+    return xdr;
   }
 
   public async buildUpdateOrgMetadataTransaction(
@@ -294,7 +327,16 @@ class SorobanClient {
     }
 
     const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
-    return preparedTx.toXDR();
+    const xdr = preparedTx.toXDR();
+    try {
+      if (typeof window !== "undefined" && (window as any).dispatchEvent) {
+        const ev = new CustomEvent("very-prince:xdr-debug", {
+          detail: { type: "unsigned", label: "update_org_metadata", xdr },
+        });
+        window.dispatchEvent(ev);
+      }
+    } catch (err) {}
+    return xdr;
   }
 
   public async submitSignedTransaction(signedXdr: string): Promise<unknown> {

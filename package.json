@@ -38,6 +38,7 @@
   },
   "packageManager": "npm@10.8.0",
   "dependencies": {
+    "@esbuild/linux-x64": "^0.28.1",
     "@fastify/rate-limit": "^10.3.0"
   }
 }

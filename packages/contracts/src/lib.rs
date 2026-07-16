@@ -179,6 +179,18 @@ impl PayoutRegistry {
     // Initialization
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// Initializes the contract state including the token address, global admins, multisig threshold, and sets state to Active.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `token` - Stellar Asset Contract address for funding/payouts.
+    /// * `admins` - Vector of global administrator addresses.
+    /// * `threshold` - Minimum number of admin signatures required for multisig actions.
+    ///
+    /// # Panics
+    /// * `AlreadyInitialized` - If the contract has already been initialized.
+    /// * `EmptyAdminList` - If the provided list of administrators is empty.
+    /// * `InvalidThreshold` - If the multisig threshold is 0 or greater than the number of administrators.
     pub fn init(env: Env, token: Address, admins: Vec<Address>, threshold: u32) {
         if env.storage().persistent().has(&DataKey::Token) {
             panic_with_error!(&env, PrinceError::AlreadyInitialized);
@@ -229,6 +241,13 @@ impl PayoutRegistry {
         );
     }
 
+    /// Retrieves the configured Stellar Asset Contract token address.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    ///
+    /// # Panics
+    /// * `ContractNotInitialized` - If the contract has not been initialized yet.
     pub fn get_token(env: Env) -> Address {
         env.storage().persistent().extend_ttl(
             &DataKey::Token,
@@ -322,18 +341,16 @@ impl PayoutRegistry {
     // Organisation Management & Funding
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Register a new organization on the contract.
-     *
-     * This function generates a deterministic organization ID based on the admin's
-     * address and the organization's name. It initializes the organization's
-     * data structure, budget, and maintainer list in persistent storage.
-     *
-     * @param env - The Soroban execution environment.
-     * @param admin - The Stellar address of the initial administrator.
-     * @param name - The human-readable name of the organization.
-     * @returns The generated 32-byte organization ID.
-     */
+    /// Registers a new organization with a unique ID, human-readable name, and initial administrator address.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `id` - Unique Symbol identifier for the organization.
+    /// * `name` - Human-readable name of the organization.
+    /// * `admin` - Stellar address of the initial organization administrator.
+    ///
+    /// # Panics
+    /// * `OrgAlreadyRegistered` - If an organization with this ID already exists.
     pub fn register_org(env: Env, id: Symbol, name: String, admin: Address) {
         admin.require_auth();
 
@@ -396,6 +413,14 @@ impl PayoutRegistry {
         );
     }
 
+    /// Retrieves organization details for the specified organization ID.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `id` - Organization's unique Symbol identifier.
+    ///
+    /// # Panics
+    /// * `OrgNotFound` - If the organization is not registered.
     pub fn get_org(env: Env, id: Symbol) -> Organization {
         env.storage().persistent().extend_ttl(
             &DataKey::Organization(id.clone()),
@@ -450,6 +475,20 @@ impl PayoutRegistry {
         );
     }
 
+    /// Funds an organization by transferring tokens from the donor to the contract, increasing the organization's budget.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `org_id` - Symbol ID of the organization to fund.
+    /// * `from` - Donor address.
+    /// * `amount` - Amount of tokens to transfer (in stroops).
+    ///
+    /// # Panics
+    /// * `ProtocolPaused` - If the protocol is paused.
+    /// * `InvalidAmount` - If amount is <= 0.
+    /// * `AmountExceedsLimit` - If amount is greater than the maximum limit.
+    /// * `OrgNotFound` - If the organization is not registered.
+    /// * `BudgetOverflow` - If the added amount causes the budget to overflow.
     pub fn fund_org(env: Env, org_id: Symbol, from: Address, amount: i128) {
         Self::assert_active(&env);
 
@@ -500,6 +539,18 @@ impl PayoutRegistry {
         );
     }
 
+    /// Adds a new administrator address to an organization.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `org_id` - Symbol ID of the organization.
+    /// * `admin` - Existing administrator address authorizing this action.
+    /// * `new_admin` - Address to add as a new administrator.
+    ///
+    /// # Panics
+    /// * `NotAuthorized` - If the authorizer `admin` is not an admin of the organization.
+    /// * `MaxAdminLimitReached` - If the organization already has 10 administrators.
+    /// * `AdminAlreadyExists` - If `new_admin` is already an administrator of this organization.
     pub fn add_admin(env: Env, org_id: Symbol, admin: Address, new_admin: Address) {
         admin.require_auth();
         let mut org = Self::get_org(env.clone(), org_id.clone());
@@ -538,6 +589,18 @@ impl PayoutRegistry {
         );
     }
 
+    /// Removes an administrator address from an organization.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `org_id` - Symbol ID of the organization.
+    /// * `admin` - Existing administrator address authorizing this action.
+    /// * `admin_to_remove` - Administrator address to remove.
+    ///
+    /// # Panics
+    /// * `NotAuthorized` - If the authorizer `admin` is not an admin of the organization.
+    /// * `CannotRemoveLastAdmin` - If the organization has only 1 administrator left.
+    /// * `NotAnAdmin` - If `admin_to_remove` is not an administrator of this organization.
     pub fn remove_admin(env: Env, org_id: Symbol, admin: Address, admin_to_remove: Address) {
         admin.require_auth();
         let mut org = Self::get_org(env.clone(), org_id.clone());
@@ -583,6 +646,11 @@ impl PayoutRegistry {
         );
     }
 
+    /// Retrieves the current token budget for an organization.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `id` - Symbol ID of the organization.
     pub fn get_org_budget(env: Env, id: Symbol) -> i128 {
         env.storage().persistent().extend_ttl(
             &DataKey::OrgBudget(id.clone()),
@@ -599,6 +667,16 @@ impl PayoutRegistry {
     // Maintainer Management
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// Registers a new maintainer under an organization.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `org_id` - Symbol ID of the organization.
+    /// * `maintainer` - Address of the maintainer to enroll.
+    ///
+    /// # Panics
+    /// * `OrgNotFound` - If the organization does not exist.
+    /// * `MaintainerAlreadyRegistered` - If the maintainer address is already registered.
     pub fn add_maintainer(env: Env, org_id: Symbol, maintainer: Address) {
         let admin: Address = env
             .storage()
@@ -662,6 +740,14 @@ impl PayoutRegistry {
         );
     }
 
+    /// Retrieves details of the specified maintainer.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `address` - The maintainer's Address.
+    ///
+    /// # Panics
+    /// * `MaintainerNotRegistered` - If the maintainer address is not registered in the system.
     pub fn get_maintainer(env: Env, address: Address) -> Maintainer {
         env.storage().persistent().extend_ttl(
             &DataKey::MaintainerOrg(address.clone()),
@@ -676,6 +762,11 @@ impl PayoutRegistry {
         Maintainer { address, org_id }
     }
 
+    /// Lists all maintainers registered under an organization.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `org_id` - Symbol ID of the organization.
     pub fn get_maintainers(env: Env, org_id: Symbol) -> Vec<Address> {
         env.storage().persistent().extend_ttl(
             &DataKey::OrgMaintainers(org_id.clone()),
@@ -692,6 +783,28 @@ impl PayoutRegistry {
     // Payout Allocation & Claiming
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// Allocates a single payout from the organization's budget to a maintainer.
+    ///
+    /// The payout amount is deducted from the organization's budget and added to the maintainer's
+    /// balance, which remains locked until `unlock_timestamp` (Unix epoch time in seconds).
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `org_id` - Symbol ID of the organization.
+    /// * `admin` - Administrator authorizing this payout.
+    /// * `maintainer` - Maintainer receiving the payout.
+    /// * `amount` - Amount of tokens to allocate (in stroops).
+    /// * `unlock_timestamp` - Unix epoch timestamp (seconds) after which payout can be claimed.
+    ///
+    /// # Panics
+    /// * `ProtocolPaused` - If the protocol is paused.
+    /// * `NotAuthorized` - If the caller is not an administrator of the organization.
+    /// * `InvalidAmount` - If amount is <= 0.
+    /// * `AmountExceedsLimit` - If amount is greater than the maximum allowed limit.
+    /// * `MaintainerNotRegistered` - If the maintainer is not registered.
+    /// * `MaintainerOrgMismatch` - If the maintainer belongs to a different organization.
+    /// * `InsufficientBudget` - If the organization does not have enough remaining budget.
+    /// * `PayoutOverflow` - If the payout addition would overflow the maintainer's balance.
     pub fn allocate_payout(
         env: Env,
         org_id: Symbol,
@@ -887,6 +1000,11 @@ impl PayoutRegistry {
         );
     }
 
+    /// Retrieves the current claimable payout balance for a maintainer.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `maintainer` - Address of the maintainer.
     pub fn get_claimable_balance(env: Env, maintainer: Address) -> i128 {
         env.storage().persistent().extend_ttl(
             &DataKey::MaintainerBalance(maintainer.clone()),
@@ -904,6 +1022,18 @@ impl PayoutRegistry {
         payout.amount
     }
 
+    /// Claims all accumulated payout balances for the maintainer, transferring tokens to their wallet.
+    ///
+    /// Requires authorization signature from the claiming maintainer.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `maintainer` - Address of the maintainer claiming their payout.
+    ///
+    /// # Panics
+    /// * `ProtocolPaused` - If the protocol is paused.
+    /// * `NoClaimableBalance` - If the maintainer's claimable balance is zero.
+    /// * `PayoutLocked` - If the current ledger timestamp is less than the payout's unlock timestamp.
     pub fn claim_payout(env: Env, maintainer: Address) -> i128 {
         Self::assert_active(&env);
 

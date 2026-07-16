@@ -824,6 +824,60 @@ mod tests {
                     }
                 }
             }
+            }
         }
+    }
+
+    #[test]
+    fn test_get_token() {
+        let Setup { client, token, .. } = setup();
+        assert_eq!(client.get_token(), token.address);
+    }
+
+    #[test]
+    fn test_update_org_metadata() {
+        let Setup { env, client, .. } = setup();
+        let org_sym = symbol_short!("metaorg");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let metadata_cid = String::from_str(&env, "QmXoypizjW3WknFixtNsQHCgL72vedxjQkDDP1mXWo6uco");
+        client.update_org_metadata(&org_sym, &admin, &metadata_cid);
+
+        let org = client.get_org(&org_sym);
+        assert_eq!(org.metadata_cid, Some(metadata_cid));
+    }
+
+    #[test]
+    fn test_update_org_metadata_unauthorized_fails() {
+        let Setup { env, client, .. } = setup();
+        let org_sym = symbol_short!("metaorg");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let impostor = Address::generate(&env);
+        let metadata_cid = String::from_str(&env, "QmXoypizjW3WknFixtNsQHCgL72vedxjQkDDP1mXWo6uco");
+        let result = client.try_update_org_metadata(&org_sym, &impostor, &metadata_cid);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_maintainer_and_get_maintainers() {
+        let Setup { env, client, .. } = setup();
+        let org_sym = symbol_short!("maintorg");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let m1 = Address::generate(&env);
+        let m2 = Address::generate(&env);
+
+        client.add_maintainer(&org_sym, &m1);
+        client.add_maintainer(&org_sym, &m2);
+
+        let maintainer_info = client.get_maintainer(&m1);
+        assert_eq!(maintainer_info.address, m1);
+        assert_eq!(maintainer_info.org_id, org_sym);
+
+        let maintainers = client.get_maintainers(&org_sym);
+        assert_eq!(maintainers.len(), 2);
+        assert!(maintainers.contains(&m1));
+        assert!(maintainers.contains(&m2));
     }
 }

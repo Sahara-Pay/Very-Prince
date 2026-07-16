@@ -6,7 +6,7 @@ import React from 'react';
  */
 export function OrganizationSkeletonCard() {
   return (
-    <div className="glass-panel p-6 animate-pulse">
+    <div className="glass-panel p-6 animate-pulse" data-testid="organization-skeleton">
       <div className="h-4 bg-white/20 rounded w-3/4 mb-2" />
       <div className="h-3 bg-white/20 rounded w-1/2 mb-2" />
       <div className="h-3 bg-white/20 rounded w-2/3" />

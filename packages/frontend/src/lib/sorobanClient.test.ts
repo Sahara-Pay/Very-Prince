@@ -9,47 +9,78 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// ─── Mock the entire @stellar/stellar-sdk module ──────────────────────────────
-// We mock before importing the module under test so that the singleton picks up
-// the mocked constructors.
+const mocks = vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_CONTRACT_ID = "CCONTRACT_ID_MOCK";
+  const mockToXDR = vi.fn(() => "MOCK_XDR_STRING");
+  const mockBuild = vi.fn(() => ({ toXDR: mockToXDR }));
+  const mockAddOperation = vi.fn().mockReturnThis();
+  const mockSetTimeout = vi.fn().mockReturnThis();
+  const mockTransactionBuilderInstance = {
+    addOperation: mockAddOperation,
+    setTimeout: mockSetTimeout,
+    build: mockBuild,
+  };
 
-const mockToXDR = vi.fn(() => "MOCK_XDR_STRING");
-const mockBuild = vi.fn(() => ({ toXDR: mockToXDR }));
-const mockAddOperation = vi.fn().mockReturnThis();
-const mockSetTimeout = vi.fn().mockReturnThis();
-const mockTransactionBuilderInstance = {
-  addOperation: mockAddOperation,
-  setTimeout: mockSetTimeout,
-  build: mockBuild,
-};
+  const mockContractCall = vi.fn(() => "MOCK_OPERATION");
+  const mockContractInstance = { call: mockContractCall };
 
-const mockContractCall = vi.fn(() => "MOCK_OPERATION");
-const mockContractInstance = { call: mockContractCall };
+  const mockSimulateTransaction = vi.fn();
+  const mockSendTransaction = vi.fn();
+  const mockGetTransaction = vi.fn();
+  const mockLoadAccount = vi.fn();
+  const mockLoadAccountHorizon = vi.fn();
 
-const mockSimulateTransaction = vi.fn();
-const mockSendTransaction = vi.fn();
-const mockGetTransaction = vi.fn();
-const mockLoadAccount = vi.fn();
-const mockLoadAccountHorizon = vi.fn();
+  const mockAssembleTransaction = vi.fn(() => ({ build: mockBuild }));
 
-const mockAssembleTransaction = vi.fn(() => ({ build: mockBuild }));
+  return {
+    mockToXDR,
+    mockBuild,
+    mockAddOperation,
+    mockSetTimeout,
+    mockTransactionBuilderInstance,
+    mockContractCall,
+    mockContractInstance,
+    mockSimulateTransaction,
+    mockSendTransaction,
+    mockGetTransaction,
+    mockLoadAccount,
+    mockLoadAccountHorizon,
+    mockAssembleTransaction,
+  };
+});
+
+const {
+  mockToXDR,
+  mockBuild,
+  mockAddOperation,
+  mockSetTimeout,
+  mockTransactionBuilderInstance,
+  mockContractCall,
+  mockContractInstance,
+  mockSimulateTransaction,
+  mockSendTransaction,
+  mockGetTransaction,
+  mockLoadAccount,
+  mockLoadAccountHorizon,
+  mockAssembleTransaction,
+} = mocks;
 
 vi.mock("@stellar/stellar-sdk", () => {
   return {
     SorobanRpc: {
       Server: vi.fn(() => ({
-        simulateTransaction: mockSimulateTransaction,
-        sendTransaction: mockSendTransaction,
-        getTransaction: mockGetTransaction,
+        simulateTransaction: mocks.mockSimulateTransaction,
+        sendTransaction: mocks.mockSendTransaction,
+        getTransaction: mocks.mockGetTransaction,
       })),
       Api: {
         isSimulationError: vi.fn((result: unknown) => {
           return (result as Record<string, unknown>).error !== undefined;
         }),
       },
-      assembleTransaction: mockAssembleTransaction,
+      assembleTransaction: mocks.mockAssembleTransaction,
     },
-    TransactionBuilder: vi.fn(() => mockTransactionBuilderInstance).mockImplementation(() => mockTransactionBuilderInstance) as unknown as {
+    TransactionBuilder: vi.fn(() => mocks.mockTransactionBuilderInstance).mockImplementation(() => mocks.mockTransactionBuilderInstance) as unknown as {
       fromXDR: ReturnType<typeof vi.fn>;
     } & ReturnType<typeof vi.fn>,
     Networks: {
@@ -58,7 +89,7 @@ vi.mock("@stellar/stellar-sdk", () => {
     BASE_FEE: "100",
     nativeToScVal: vi.fn((val: unknown) => ({ scVal: val })),
     scValToNative: vi.fn((val: unknown) => val),
-    Contract: vi.fn(() => mockContractInstance),
+    Contract: vi.fn(() => mocks.mockContractInstance),
     Keypair: {
       random: vi.fn(() => ({
         publicKey: vi.fn(() => "GABC1234567890ABCDE"),
@@ -66,7 +97,7 @@ vi.mock("@stellar/stellar-sdk", () => {
     },
     Horizon: {
       Server: vi.fn(() => ({
-        loadAccount: mockLoadAccountHorizon,
+        loadAccount: mocks.mockLoadAccountHorizon,
       })),
     },
   };
@@ -285,7 +316,7 @@ describe("sorobanClient — XDR builder utilities", () => {
   // ── submitSignedTransaction ───────────────────────────────────────────────────
 
   describe("submitSignedTransaction", () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       // TransactionBuilder.fromXDR needs to exist on the mock constructor
       const { TransactionBuilder } = vi.mocked(
         await import("@stellar/stellar-sdk")

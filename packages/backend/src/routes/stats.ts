@@ -165,6 +165,12 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     "/funds-raised",
     {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         querystring: {
           type: "object",

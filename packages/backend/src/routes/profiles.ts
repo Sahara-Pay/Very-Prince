@@ -11,8 +11,15 @@ export const profileRoutes: FastifyPluginAsync = async (fastify) => {
    * @returns Payout history including total stroops, total XLM, org IDs, and individual payout records.
    */
   fastify.get(
-    '/:address/stats',
-    {},
+    "/:address/stats",
+    {
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: "1 minute",
+        },
+      },
+    },
     async (request, reply) => {
       const { address } = (request.params as { address: string });
       try {

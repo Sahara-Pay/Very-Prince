@@ -10,7 +10,14 @@ import type { AppRouter } from './router.js';
 // Create a simple tRPC HTTP handler for Fastify
 export async function configureTRPC(server: FastifyInstance) {
   // Register tRPC routes manually
-  server.post('/trpc/:path', async (request: FastifyRequest, reply: FastifyReply) => {
+  server.post('/trpc/:path', {
+    config: {
+      rateLimit: {
+        max: 60,
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (request: FastifyRequest, reply: FastifyReply) => {
     const { path } = request.params as { path: string };
     const body = request.body as any;
     

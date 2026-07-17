@@ -106,6 +106,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     "/orgs",
     {
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         querystring: {
           type: "object",
@@ -143,6 +149,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: z.infer<typeof RegisterOrgBody> }>(
     "/orgs",
     {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         body: {
           type: "object",
@@ -186,6 +198,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { orgId: string } }>(
     "/orgs/:orgId",
     {
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         // description: "Get a registered organization by its Symbol ID.",
         // tags: ["Organizations"],
@@ -231,6 +249,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     "/orgs/:orgId/maintainers",
     {
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         // description: "List all maintainers for a given organization.",
         // tags: ["Maintainers"],
@@ -272,6 +296,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { orgId: string } }>(
     "/orgs/:orgId/budget",
     {
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         // description: "Get the secure available budget for an organization.",
         // tags: ["Organizations"],
@@ -355,6 +385,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { address: string } }>(
     "/maintainers/:address/balance",
     {
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         // description: "Get the claimable payout balance for a maintainer.",
         // tags: ["Maintainers"],
@@ -443,6 +479,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { address: string } }>(
     "/maintainer/:address",
     {
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         params: {
           type: "object",
@@ -470,6 +512,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     "/auth/nonce",
     {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         body: {
           type: "object",
@@ -496,6 +544,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     "/claim",
     {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         body: {
           type: "object",
@@ -535,6 +589,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     "/submit",
     {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         body: {
           type: "object",
@@ -570,6 +630,12 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post(
     "/auth/verify",
     {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         body: {
           type: "object",

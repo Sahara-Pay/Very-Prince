@@ -31,7 +31,14 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
    * @param reply - Fastify reply.
    * @returns Webhook URL and a masked secret indicator.
    */
-  fastify.get("/", async (request, reply) => {
+  fastify.get("/", {
+    config: {
+      rateLimit: {
+        max: 30,
+        timeWindow: "1 minute",
+      },
+    },
+  }, async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;
 
@@ -71,7 +78,14 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
    * @param reply - Fastify reply.
    * @returns Updated webhook configuration.
    */
-  fastify.post("/", async (request, reply) => {
+  fastify.post("/", {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: "1 minute",
+      },
+    },
+  }, async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;
     const { url } = WebhookConfigBody.parse(request.body);
@@ -101,7 +115,14 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
    * @param reply - Fastify reply.
    * @returns Array of past webhook delivery records.
    */
-  fastify.get("/deliveries", async (request, reply) => {
+  fastify.get("/deliveries", {
+    config: {
+      rateLimit: {
+        max: 30,
+        timeWindow: "1 minute",
+      },
+    },
+  }, async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;
 
@@ -130,7 +151,14 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
    * @param reply - Fastify reply.
    * @returns Result of the test delivery attempt.
    */
-  fastify.post("/test", async (request, reply) => {
+  fastify.post("/test", {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: "1 minute",
+      },
+    },
+  }, async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;
 
@@ -159,7 +187,14 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
    * @param reply - Fastify reply.
    * @returns The plaintext webhook signing secret.
    */
-  fastify.get("/reveal", async (request, reply) => {
+  fastify.get("/reveal", {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: "1 minute",
+      },
+    },
+  }, async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;
 

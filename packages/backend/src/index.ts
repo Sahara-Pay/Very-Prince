@@ -101,13 +101,48 @@ await server.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
 
 await configureTRPC(server);
 
-server.post('/api/v1/notifications/preferences', notificationController.saveEmailPreference);
-server.delete('/api/v1/notifications/preferences', notificationController.deleteEmailPreference);
-server.get('/api/v1/notifications/unsubscribe', notificationController.unsubscribe);
+server.post('/api/v1/notifications/preferences', {
+  config: {
+    rateLimit: {
+      max: 10,
+      timeWindow: '1 minute',
+    },
+  },
+}, notificationController.saveEmailPreference);
+server.delete('/api/v1/notifications/preferences', {
+  config: {
+    rateLimit: {
+      max: 10,
+      timeWindow: '1 minute',
+    },
+  },
+}, notificationController.deleteEmailPreference);
+server.get('/api/v1/notifications/unsubscribe', {
+  config: {
+    rateLimit: {
+      max: 30,
+      timeWindow: '1 minute',
+    },
+  },
+}, notificationController.unsubscribe);
 
 server.get('/health', async () => ({ status: 'ok', version: '0.1.0', timestamp: new Date().toISOString(), uptime: process.uptime() }));
-server.get('/indexer/status', async () => indexerService.getStatus());
-server.post('/indexer/sync', async () => { await indexerService.triggerSync(); return { message: 'Sync triggered' }; });
+server.get('/indexer/status', {
+  config: {
+    rateLimit: {
+      max: 60,
+      timeWindow: '1 minute',
+    },
+  },
+}, async () => indexerService.getStatus());
+server.post('/indexer/sync', {
+  config: {
+    rateLimit: {
+      max: 10,
+      timeWindow: '1 minute',
+    },
+  },
+}, async () => { await indexerService.triggerSync(); return { message: 'Sync triggered' }; });
 
 try {
   await server.listen({ port: SERVER_PORT, host: SERVER_HOST });

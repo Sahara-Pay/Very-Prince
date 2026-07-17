@@ -22,6 +22,15 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
     (request as any).user = { publicKey: token };
   });
 
+  /**
+   * GET /
+   * Returns the webhook configuration for an organization, masking the secret.
+   * Requires admin authentication.
+   *
+   * @param request - Fastify request containing `orgId` path parameter and Bearer token.
+   * @param reply - Fastify reply.
+   * @returns Webhook URL and a masked secret indicator.
+   */
   fastify.get("/", async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;
@@ -53,6 +62,15 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  /**
+   * POST /
+   * Creates or updates the webhook URL for an organization.
+   * Requires admin authentication.
+   *
+   * @param request - Fastify request with `orgId` path param, Bearer token, and `{ url }` body.
+   * @param reply - Fastify reply.
+   * @returns Updated webhook configuration.
+   */
   fastify.post("/", async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;
@@ -74,6 +92,15 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  /**
+   * GET /deliveries
+   * Returns the delivery history for an organization's webhook.
+   * Requires admin authentication.
+   *
+   * @param request - Fastify request containing `orgId` path parameter and Bearer token.
+   * @param reply - Fastify reply.
+   * @returns Array of past webhook delivery records.
+   */
   fastify.get("/deliveries", async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;
@@ -94,6 +121,15 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  /**
+   * POST /test
+   * Sends a test event to the configured webhook URL for an organization.
+   * Requires admin authentication.
+   *
+   * @param request - Fastify request containing `orgId` path parameter and Bearer token.
+   * @param reply - Fastify reply.
+   * @returns Result of the test delivery attempt.
+   */
   fastify.post("/test", async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;
@@ -114,6 +150,15 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  /**
+   * GET /reveal
+   * Reveals the plaintext webhook secret for an organization.
+   * Requires admin authentication.
+   *
+   * @param request - Fastify request containing `orgId` path parameter and Bearer token.
+   * @param reply - Fastify reply.
+   * @returns The plaintext webhook signing secret.
+   */
   fastify.get("/reveal", async (request, reply) => {
     const { orgId } = request.params as { orgId: string };
     const user = (request as any).user;

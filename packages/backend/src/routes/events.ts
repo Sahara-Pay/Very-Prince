@@ -6,6 +6,18 @@ const sseConnections = new Set<any>();
 export { emitSSEEvent };
 
 export const eventsRoutes: FastifyPluginAsync = async (fastify) => {
+  /**
+   * GET /stream
+   * Opens a Server-Sent Events (SSE) connection for real-time event streaming.
+   *
+   * Emits a `connected` event on handshake and a `heartbeat` event every 30 seconds
+   * to keep the connection alive. The connection is cleaned up automatically when
+   * the client disconnects.
+   *
+   * @param request - Fastify request.
+   * @param reply - Fastify reply used as a raw SSE stream.
+   * @returns An open SSE stream (does not resolve until the client disconnects).
+   */
   fastify.get(
     '/stream',
     {

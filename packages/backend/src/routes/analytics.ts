@@ -2,6 +2,14 @@ import type { FastifyPluginAsync } from 'fastify';
 import { analyticsController } from '../controllers/analyticsController.js';
 
 export const analyticsRoutes: FastifyPluginAsync = async (fastify) => {
+  /**
+   * GET /leaderboard
+   * Returns the top traders ranked by 7-day USD volume.
+   *
+   * @param _request - Fastify request (unused).
+   * @param reply - Fastify reply.
+   * @returns Array of leaderboard entries with rank, wallet address, and volume.
+   */
   fastify.get(
     '/leaderboard',
     {

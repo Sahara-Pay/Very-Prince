@@ -20,10 +20,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // To allow the mocked implementations to be accessed in tests, we use
 // vi.hoisted() which also runs before the mock factories execute.
 // ---------------------------------------------------------------------------
-const { safeGetMock, safeSetMock, queryRawUnsafeMock } = vi.hoisted(() => ({
+const { safeGetMock, safeSetMock, queryRawUnsafeMock, findManyMock } = vi.hoisted(() => ({
   safeGetMock:          vi.fn<[string], Promise<string | null>>(),
   safeSetMock:          vi.fn<[string, string, number], Promise<void>>(),
   queryRawUnsafeMock:   vi.fn(),
+  findManyMock:         vi.fn(),
 }));
 
 vi.mock('../services/cache.js', () => ({
@@ -36,6 +37,7 @@ vi.mock('../services/db.js', () => ({
   prisma: {
     $queryRawUnsafe: queryRawUnsafeMock,
     invoice: { aggregate: vi.fn() },
+    fundingEvent: { findMany: findManyMock },
   },
 }));
 
@@ -262,5 +264,107 @@ describe('statsController.getTotalFundsRaised()', () => {
     expect(result.totalFundsRaisedStroops).toBe('10000000000000000');
     // XLM conversion: 10^16 / 10^7 = 10^9 XLM
     expect(result.totalFundsRaisedXlm).toBe('1000000000.0000000');
+  });
+});
+
+describe('statsController.getOrgFundingHistory()', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    safeGetMock.mockResolvedValue(null);
+    safeSetMock.mockResolvedValue(undefined);
+  });
+
+  it('returns empty history if no events are found', async () => {
+    findManyMock.mockResolvedValue([]);
+
+    const result = await statsController.getOrgFundingHistory('stellar');
+
+    expect(findManyMock).toHaveBeenCalledWith({
+      where: { orgId: 'stellar' },
+      orderBy: { createdAt: 'asc' },
+    });
+    expect(result).toEqual([]);
+  });
+
+  it('calculates running cumulative sums and shapes output correctly', async () => {
+    const mockEvents = [
+      {
+        id: '1',
+        orgId: 'stellar',
+        from: 'GDX...',
+        amountStroops: 10_000_000n, // 1 XLM
+        amountXlm: '1.0000000',
+        ledger: 100,
+        txHash: 'hash1',
+        createdAt: new Date('2026-07-17T08:00:00.000Z'),
+      },
+      {
+        id: '2',
+        orgId: 'stellar',
+        from: 'GDY...',
+        amountStroops: 25_000_000n, // 2.5 XLM
+        amountXlm: '2.5000000',
+        ledger: 101,
+        txHash: 'hash2',
+        createdAt: new Date('2026-07-17T09:00:00.000Z'),
+      },
+    ];
+    findManyMock.mockResolvedValue(mockEvents);
+
+    const result = await statsController.getOrgFundingHistory('stellar');
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({
+      id: '1',
+      orgId: 'stellar',
+      from: 'GDX...',
+      amountStroops: '10000000',
+      amountXlm: '1.0000000',
+      cumulativeStroops: '10000000',
+      cumulativeXlm: '1.0000000',
+      txHash: 'hash1',
+      createdAt: '2026-07-17T08:00:00.000Z',
+    });
+    expect(result[1]).toEqual({
+      id: '2',
+      orgId: 'stellar',
+      from: 'GDY...',
+      amountStroops: '25000000',
+      amountXlm: '2.5000000',
+      cumulativeStroops: '35000000',
+      cumulativeXlm: '3.5000000',
+      txHash: 'hash2',
+      createdAt: '2026-07-17T09:00:00.000Z',
+    });
+  });
+
+  it('serves results from cache and stores to cache', async () => {
+    const cachedData = [
+      {
+        id: '1',
+        orgId: 'stellar',
+        from: 'GDX...',
+        amountStroops: '10000000',
+        amountXlm: '1.0000000',
+        cumulativeStroops: '10000000',
+        cumulativeXlm: '1.0000000',
+        txHash: 'hash1',
+        createdAt: '2026-07-17T08:00:00.000Z',
+      },
+    ];
+
+    // Cache hit
+    safeGetMock.mockResolvedValue(JSON.stringify(cachedData));
+    let result = await statsController.getOrgFundingHistory('stellar');
+    expect(result).toEqual(cachedData);
+    expect(findManyMock).not.toHaveBeenCalled();
+
+    // Cache miss & save
+    safeGetMock.mockResolvedValue(null);
+    findManyMock.mockResolvedValue([]);
+    result = await statsController.getOrgFundingHistory('stellar');
+    expect(result).toEqual([]);
+    expect(findManyMock).toHaveBeenCalledOnce();
+    expect(safeSetMock).toHaveBeenCalledWith('stats:funding-history:stellar', JSON.stringify([]), 60);
   });
 });

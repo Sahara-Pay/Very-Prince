@@ -277,4 +277,86 @@ export const statsController = {
 
     return sorted;
   },
+
+  /**
+   * Get the historical funding events and cumulative funding over time for a specific organization.
+   *
+   * @param orgId - The ID/Symbol of the organization
+   */
+  async getOrgFundingHistory(orgId: string): Promise<FundingHistoryResponse[]> {
+    const cacheKey = `stats:funding-history:${orgId}`;
+    const cached = await safeGet(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+
+    const events = await prisma.fundingEvent.findMany({
+      where: {
+        orgId,
+      },
+      orderBy: {
+        createdAt: "asc",
+      },
+    });
+
+    let cumulativeStroops = 0n;
+
+    const history = events.map((event) => {
+      const amountStroops = BigInt(event.amountStroops);
+      cumulativeStroops += amountStroops;
+
+      return {
+        id: event.id,
+        orgId: event.orgId,
+        from: event.from,
+        amountStroops: amountStroops.toString(),
+        amountXlm: event.amountXlm.toString(),
+        cumulativeStroops: cumulativeStroops.toString(),
+        cumulativeXlm: stroopsToXlm(cumulativeStroops),
+        txHash: event.txHash,
+        createdAt: event.createdAt.toISOString(),
+      };
+    });
+
+    // Cache for 1 minute (60s)
+    await safeSet(cacheKey, JSON.stringify(history), 60);
+
+    return history;
+  },
 } as const;
+
+export interface FundingHistoryResponse {
+  id: string;
+  orgId: string;
+  from: string;
+  amountStroops: string;
+  amountXlm: string;
+  cumulativeStroops: string;
+  cumulativeXlm: string;
+  txHash: string;
+  createdAt: string;
+}
+
+export interface TVLResponse {
+  /** Total Value Locked in USD. */
+  tvlUSD: string;
+  /** ISO timestamp of when this value was computed. */
+  lastUpdated: string;
+}
+
+export interface FundsRaisedResponse {
+  /** Total funds raised across all organisations, in stroops. */
+  totalFundsRaisedStroops: string;
+  /** Total funds raised expressed in whole XLM. */
+  totalFundsRaisedXlm: string;
+  /** Total number of individual funding transactions. */
+  totalFundingEvents: number;
+  /** Number of distinct organisations that received funds. */
+  distinctOrgsCount: number;
+  /** ISO timestamp of the earliest funding event included (if filtered). */
+  fromDate?: string;
+  /** ISO timestamp of the latest funding event included (if filtered). */
+  toDate?: string;
+  /** ISO timestamp of when this result was computed. */
+  cachedAt: string;
+}

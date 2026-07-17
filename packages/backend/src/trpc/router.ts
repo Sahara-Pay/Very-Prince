@@ -7,6 +7,7 @@ import { initTRPC } from '@trpc/server';
 import { z } from 'zod';
 import { stellarService } from '../services/stellarService.js';
 import { safeGet, safeSet } from '../services/cache.js';
+import { statsController } from '../controllers/statsController.js';
 
 // Create tRPC instance
 export const t = initTRPC.create();
@@ -118,6 +119,13 @@ export const appRouter = t.router({
       totalVolume: '0',
       lastSync: new Date().toISOString(),
     })),
+    getFundingHistory: t.procedure
+      .input(z.object({
+        orgId: z.string().min(1).max(32),
+      }))
+      .query(async ({ input }) => {
+        return statsController.getOrgFundingHistory(input.orgId);
+      }),
   }),
 });
 

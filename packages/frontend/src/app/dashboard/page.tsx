@@ -15,6 +15,7 @@ import { AllocatePayoutModal } from "@/components/AllocatePayoutModal";
 import { EmptyMaintainersState } from "@/components/EmptyMaintainersState";
 import { WebhookSettings } from "@/components/WebhookSettings";
 import { ApiKeySettings } from "@/components/ApiKeySettings";
+import { FundingHistoryChart } from "@/components/FundingHistoryChart";
 import { useFreighter } from "@/hooks/useFreighter";
 import {
   readOrganization,
@@ -340,6 +341,10 @@ function DashboardPageInner() {
                         </div>
                       </div>
                     )}
+                  </div>
+
+                  <div className="mb-8">
+                    <FundingHistoryChart orgId={organization.id} />
                   </div>
 
                   {/* ── Maintainer Balances ── */}

@@ -204,4 +204,52 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.send(data);
     }
   );
+
+  /**
+   * GET /funding-history/:orgId
+   * Returns the historical funding events and cumulative funding over time
+   * for a specific organization.
+   *
+   * @param request - Fastify request with orgId parameter
+   * @param reply - Fastify reply
+   * @returns Array of funding history events with running cumulative totals
+   */
+  fastify.get<{ Params: { orgId: string } }>(
+    "/funding-history/:orgId",
+    {
+      schema: {
+        params: {
+          type: "object",
+          properties: {
+            orgId: { type: "string" },
+          },
+          required: ["orgId"],
+        },
+        response: {
+          200: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                orgId: { type: "string" },
+                from: { type: "string" },
+                amountStroops: { type: "string" },
+                amountXlm: { type: "string" },
+                cumulativeStroops: { type: "string" },
+                cumulativeXlm: { type: "string" },
+                txHash: { type: "string" },
+                createdAt: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { orgId } = request.params;
+      const data = await statsController.getOrgFundingHistory(orgId);
+      return reply.send(data);
+    }
+  );
 };

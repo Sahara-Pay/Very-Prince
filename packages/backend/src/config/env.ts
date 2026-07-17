@@ -12,6 +12,7 @@ const envSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   HORIZON_URL: z.string().url().default('https://horizon-testnet.stellar.org'),
   RPC_URL: z.string().url().default('https://soroban-testnet.stellar.org'),
+  HORIZON_FALLBACK_URL: z.string().url().optional(),
   NETWORK_PASSPHRASE: z.string().default('Test SDF Network ; September 2015'),
   CONTRACT_ID: z.string().default(''),
   DEPLOYMENT_LEDGER: z.coerce.number().int().default(0),
@@ -28,6 +29,7 @@ export const SERVER_PORT = config.PORT;
 export const SERVER_HOST = config.HOST;
 export const HORIZON_URL = config.HORIZON_URL;
 export const RPC_URL = config.RPC_URL;
+export const HORIZON_FALLBACK_URL = config.HORIZON_FALLBACK_URL;
 export const NETWORK_PASSPHRASE = config.NETWORK_PASSPHRASE;
 export const CONTRACT_ID = config.CONTRACT_ID;
 export const DEPLOYMENT_LEDGER = config.DEPLOYMENT_LEDGER;

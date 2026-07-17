@@ -29,9 +29,24 @@
  * 4. Response: RPC returns the simulation result (return value + footprint).
  * 5. Parsing: Service decodes the XDR return value into native JS types.
  *
+ * ## Horizon Fallback
+ *
+ * When the Soroban RPC endpoint is unavailable (rate-limited, network outage,
+ * or maintenance), this service transparently falls back to the Stellar Horizon
+ * REST API for operations that have Horizon equivalents:
+ *
+ *   - `sendTransaction` → `POST /transactions` via Horizon
+ *   - `getTransaction`  → `GET /transactions/{hash}` via Horizon
+ *   - `getLatestLedger` → `GET /ledgers?order=desc&limit=1` via Horizon
+ *
+ * Soroban-specific operations (simulateTransaction, getEvents for contract
+ * events) have no Horizon equivalent and will fail gracefully with the
+ * original RPC error.
+ *
  * ## Error Handling Policy
  *
  * - Transient Errors: Handled via `_callWithRetry` (exponential backoff).
+ * - RPC Failures: Automatically falls back to Horizon when eligible.
  * - Contract Errors: Simulation failures are logged and thrown as standard Errors.
  * - Network Errors: Horizon/RPC timeouts are caught and retried up to 3 times.
  *
@@ -63,10 +78,16 @@ import {
 import {
   CONTRACT_ID,
   HORIZON_URL,
+  HORIZON_FALLBACK_URL,
   NETWORK_PASSPHRASE,
   RPC_URL,
 } from "../config/env.js";
 import { withRetry } from "../utils/retry.js";
+import {
+  HorizonFallbackProvider,
+  isFallbackEligibleError,
+  type FallbackResult,
+} from "../utils/horizonFallback.js";
 import { decodeI128ToBigInt, stroopsToXlm } from "../utils/xdrDecoder.js";
 import type { AccountInfo, ContractCallResult, PayoutEvent, ProfileStats } from "@very-prince/types";
 
@@ -82,6 +103,9 @@ export class StellarService {
   /** Soroban RPC server for smart contract interactions. */
   private readonly rpcServer: SorobanRpc.Server;
 
+  /** Horizon fallback provider for when Soroban RPC is unavailable. */
+  private readonly fallback: HorizonFallbackProvider | null;
+
   constructor() {
     this.horizon = new Horizon.Server(HORIZON_URL, {
       allowHttp: HORIZON_URL.startsWith("http://"), // allow HTTP for local dev only
@@ -90,6 +114,18 @@ export class StellarService {
     this.rpcServer = new SorobanRpc.Server(RPC_URL, {
       allowHttp: RPC_URL.startsWith("http://"),
     });
+
+    // Initialize fallback provider if a separate fallback URL is configured.
+    // When HORIZON_FALLBACK_URL is not set, the fallback is disabled and the
+    // service relies solely on the primary Soroban RPC endpoint.
+    if (HORIZON_FALLBACK_URL) {
+      this.fallback = new HorizonFallbackProvider({
+        horizonUrl: HORIZON_FALLBACK_URL,
+        networkPassphrase: NETWORK_PASSPHRASE,
+      });
+    } else {
+      this.fallback = null;
+    }
   }
 
   /**
@@ -118,6 +154,44 @@ export class StellarService {
         }
       }
     });
+  }
+
+  /**
+   * Execute an RPC operation with automatic Horizon fallback.
+   *
+   * Tries the primary Soroban RPC call first. If it fails with a
+   * transient error (5xx, timeout, ECONNREFUSED) and a Horizon fallback
+   * provider is configured, transparently falls back to Horizon.
+   *
+   * @param rpcFn - The Soroban RPC operation to execute.
+   * @param fallbackFn - The Horizon-based fallback operation.
+   * @returns The result from whichever source succeeded.
+   * @throws The last error if both RPC and fallback fail.
+   */
+  private async _callWithFallback<T>(
+    rpcFn: () => Promise<T>,
+    fallbackFn: (fallback: HorizonFallbackProvider) => Promise<FallbackResult<T>>
+  ): Promise<T> {
+    try {
+      return await this._callWithRetry(rpcFn);
+    } catch (rpcError) {
+      if (!this.fallback || !isFallbackEligibleError(rpcError)) {
+        throw rpcError;
+      }
+
+      console.warn(
+        `[Stellar] Soroban RPC failed, attempting Horizon fallback: ${(rpcError as Error).message}`
+      );
+
+      const fallbackResult = await fallbackFn(this.fallback);
+      if (fallbackResult.ok) {
+        console.info("[Stellar] Horizon fallback succeeded");
+        return fallbackResult.value;
+      }
+
+      // Both sources failed — throw the original RPC error
+      throw rpcError;
+    }
   }
 
   // ── Horizon (Account) Operations ─────────────────────────────────────────
@@ -370,17 +444,15 @@ export class StellarService {
    */
   async getContractState(contractId: string): Promise<Record<string, unknown>> {
     try {
-      // Get the ledger info to establish baseline
-      const ledger = await this._callWithRetry(() => this.rpcServer.getLatestLedger());
+      // Get the ledger info to establish baseline, with Horizon fallback
+      const ledgerSequence = await this.getLatestLedger();
 
       // In a real implementation, you would query specific contract storage keys
       // For now, we'll return basic contract information
       return {
         contractId,
-        ledgerSequence: ledger.sequence,
-        timestamp: new Date().toISOString(), // Use current time since ledger doesn't have timestamp
-        // Add more contract-specific data as needed
-        // This could include total organizations, total budgets, etc.
+        ledgerSequence,
+        timestamp: new Date().toISOString(),
       };
     } catch (error) {
       console.error('Error fetching contract state:', error);
@@ -447,10 +519,24 @@ export class StellarService {
   /**
    * Get the latest ledger sequence number.
    * Used to determine the upper bound for event queries.
+   *
+   * Falls back to Horizon `GET /ledgers?order=desc&limit=1` if Soroban RPC
+   * is unavailable.
    */
   async getLatestLedger(): Promise<number> {
-    const ledger = await this._callWithRetry(() => this.rpcServer.getLatestLedger());
-    return ledger.sequence;
+    return this._callWithFallback(
+      async () => {
+        const ledger = await this.rpcServer.getLatestLedger();
+        return ledger.sequence;
+      },
+      async (fallback) => {
+        const result = await fallback.getLatestLedger();
+        if (result.ok) {
+          return { ok: true as const, value: result.value.sequence, source: "horizon" as const };
+        }
+        return { ok: false as const, source: "horizon" as const };
+      }
+    );
   }
 
   // ── Soroban Write Operations ──────────────────────────────────────────────
@@ -604,6 +690,10 @@ export class StellarService {
   /**
    * Submit a state-changing contract call.
    * Builds → Simulates (to get auth + footprint) → Signs → Sends.
+   *
+   * Transaction submission and confirmation polling include Horizon fallback:
+   * if Soroban RPC is down, transactions are submitted via Horizon's
+   * `POST /transactions` endpoint and confirmed via `GET /transactions/{hash}`.
    */
   private async _submitContractCall(
     functionName: string,
@@ -640,18 +730,27 @@ export class StellarService {
     const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
     preparedTx.sign(keypair);
 
-    const sendResult = await this._callWithRetry(() => this.rpcServer.sendTransaction(preparedTx));
+    // Send transaction with Horizon fallback
+    const sendResult = await this._callWithFallback(
+      async () => {
+        const result = await this.rpcServer.sendTransaction(preparedTx);
+        if (result.status === "ERROR") {
+          throw new Error(`Transaction failed: ${JSON.stringify(result)}`);
+        }
+        return result;
+      },
+      async (fallback) => {
+        const result = await fallback.submitTransaction(preparedTx);
+        if (!result.ok) return { ok: false as const, source: "horizon" as const };
+        if (result.value.status === "FAILED") {
+          throw new Error(`Horizon submission failed: ${result.value.hash}`);
+        }
+        return { ok: true as const, value: { hash: result.value.hash }, source: "horizon" as const };
+      }
+    );
 
-    if (sendResult.status === "ERROR") {
-      throw new Error(`Transaction failed: ${JSON.stringify(sendResult)}`);
-    }
-
-    // Poll for confirmation.
-    let getResult = await this._callWithRetry(() => this.rpcServer.getTransaction(sendResult.hash));
-    while (getResult.status === "NOT_FOUND") {
-      await new Promise((r) => setTimeout(r, 1000));
-      getResult = await this._callWithRetry(() => this.rpcServer.getTransaction(sendResult.hash));
-    }
+    // Poll for confirmation with Horizon fallback
+    const getResult = await this._pollTransaction(sendResult.hash);
 
     if (getResult.status !== "SUCCESS") {
       throw new Error(`Transaction not successful: ${getResult.status}`);
@@ -659,7 +758,7 @@ export class StellarService {
 
     return {
       success: true,
-      value: scValToNative(getResult.returnValue as xdr.ScVal),
+      value: getResult.returnValue ? scValToNative(getResult.returnValue as xdr.ScVal) : undefined,
       transactionHash: sendResult.hash,
     };
   }
@@ -708,22 +807,33 @@ export class StellarService {
 
   /**
    * Submit a signed transaction to the Stellar network.
+   *
+   * Includes Horizon fallback: if Soroban RPC is unavailable, the transaction
+   * is submitted via Horizon's `POST /transactions` endpoint.
    */
   async submitTransaction(signedTransactionXdr: string): Promise<ContractCallResult> {
     const transaction = TransactionBuilder.fromXDR(signedTransactionXdr, NETWORK_PASSPHRASE);
 
-    const sendResult = await this._callWithRetry(() => this.rpcServer.sendTransaction(transaction));
+    const sendResult = await this._callWithFallback(
+      async () => {
+        const result = await this.rpcServer.sendTransaction(transaction);
+        if (result.status === "ERROR") {
+          throw new Error(`Transaction failed: ${result.errorResult || "Unknown error"}`);
+        }
+        return result;
+      },
+      async (fallback) => {
+        const result = await fallback.submitTransaction(signedTransactionXdr);
+        if (!result.ok) return { ok: false as const, source: "horizon" as const };
+        if (result.value.status === "FAILED") {
+          throw new Error(`Horizon submission failed: ${result.value.hash}`);
+        }
+        return { ok: true as const, value: { hash: result.value.hash }, source: "horizon" as const };
+      }
+    );
 
-    if (sendResult.status === "ERROR") {
-      throw new Error(`Transaction failed: ${sendResult.errorResult || 'Unknown error'}`);
-    }
-
-    // Poll for confirmation
-    let getResult = await this._callWithRetry(() => this.rpcServer.getTransaction(sendResult.hash));
-    while (getResult.status === "NOT_FOUND") {
-      await new Promise((r) => setTimeout(r, 1000));
-      getResult = await this._callWithRetry(() => this.rpcServer.getTransaction(sendResult.hash));
-    }
+    // Poll for confirmation with Horizon fallback
+    const getResult = await this._pollTransaction(sendResult.hash);
 
     if (getResult.status !== "SUCCESS") {
       throw new Error(`Transaction not successful: ${getResult.status}`);
@@ -731,9 +841,51 @@ export class StellarService {
 
     return {
       success: true,
-      value: scValToNative(getResult.returnValue as xdr.ScVal),
+      value: getResult.returnValue ? scValToNative(getResult.returnValue as xdr.ScVal) : undefined,
       transactionHash: sendResult.hash,
     };
+  }
+
+  /**
+   * Poll for transaction confirmation with Horizon fallback.
+   *
+   * Tries Soroban RPC `getTransaction` first. If it fails with a
+   * transient error, falls back to Horizon `GET /transactions/{hash}`.
+   *
+   * @param hash - The transaction hash to poll for.
+   * @returns The transaction result with status and return value.
+   */
+  private async _pollTransaction(
+    hash: string
+  ): Promise<{ status: string; returnValue?: xdr.ScVal }> {
+    const MAX_POLL_ATTEMPTS = 30;
+    const POLL_INTERVAL_MS = 1000;
+
+    for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
+      try {
+        const result = await this.rpcServer.getTransaction(hash);
+        if (result.status !== "NOT_FOUND") {
+          return result as { status: string; returnValue?: xdr.ScVal };
+        }
+      } catch (rpcError) {
+        // If RPC fails and we have a fallback, try Horizon
+        if (this.fallback && isFallbackEligibleError(rpcError)) {
+          console.warn("[Stellar] RPC getTransaction failed, trying Horizon fallback");
+          const fallbackResult = await this.fallback.getTransaction(hash);
+          if (fallbackResult.ok) {
+            // Horizon doesn't provide Soroban return values, but it can confirm success
+            return {
+              status: fallbackResult.value.status,
+            };
+          }
+        }
+        // If fallback also fails, continue polling (transient error may resolve)
+      }
+
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    }
+
+    throw new Error(`Transaction ${hash} not confirmed after ${MAX_POLL_ATTEMPTS} attempts`);
   }
 
   /**

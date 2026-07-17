@@ -11,6 +11,15 @@ let tvlCache: CacheEntry<Awaited<ReturnType<typeof statsController.getTVL>>> | n
 const CACHE_TTL_MS = 60 * 1000;
 
 export const statsRoutes: FastifyPluginAsync = async (fastify) => {
+  /**
+   * GET /global
+   * Returns platform-wide aggregate statistics including total organizations,
+   * funded stroops, and claimed stroops. Results are cached for 60 seconds.
+   *
+   * @param _request - Fastify request (unused).
+   * @param reply - Fastify reply.
+   * @returns Global stats object with totals and cache metadata.
+   */
   fastify.get(
     '/global',
     {
@@ -48,6 +57,16 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  /**
+   * GET /tvl
+   * Returns the Total Value Locked (TVL) across all active invoices in USD.
+   * Accepts an optional `format` query param (`full` or `short`). Results are
+   * cached for 60 seconds.
+   *
+   * @param request - Fastify request with optional `format` query param.
+   * @param reply - Fastify reply.
+   * @returns `{ tvlUSD, lastUpdated }`.
+   */
   fastify.get(
     '/tvl',
     {
@@ -87,6 +106,14 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  /**
+   * GET /top-maintainers
+   * Returns the top maintainers ranked by total XLM earnings across all organizations.
+   *
+   * @param _request - Fastify request (unused).
+   * @param reply - Fastify reply.
+   * @returns Array of top maintainers with earnings and organization count.
+   */
   fastify.get(
     '/top-maintainers',
     {

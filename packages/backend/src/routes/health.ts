@@ -10,6 +10,14 @@ export interface HealthResponse {
 }
 
 export const healthRoutes: FastifyPluginAsync = async (fastify) => {
+  /**
+   * GET /
+   * Health check endpoint — reports whether the API process is running.
+   *
+   * @param _request - Fastify request (unused).
+   * @param reply - Fastify reply.
+   * @returns `{ status, version, timestamp, uptime }` indicating service health.
+   */
   fastify.get(
     "/",
     {

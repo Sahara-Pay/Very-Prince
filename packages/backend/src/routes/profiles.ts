@@ -2,6 +2,14 @@ import type { FastifyPluginAsync } from 'fastify';
 import { stellarService } from '../services/stellarService.js';
 
 export const profileRoutes: FastifyPluginAsync = async (fastify) => {
+  /**
+   * GET /:address/stats
+   * Returns aggregate payout statistics for a Stellar wallet address.
+   *
+   * @param request - Fastify request containing `address` path parameter.
+   * @param reply - Fastify reply.
+   * @returns Payout history including total stroops, total XLM, org IDs, and individual payout records.
+   */
   fastify.get(
     '/:address/stats',
     {},

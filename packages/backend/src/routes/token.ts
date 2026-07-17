@@ -7,6 +7,12 @@ export interface VerifyResponse {
 }
 
 export const tokenController = {
+  /**
+   * Check whether a token contract address is verified and return its risk level.
+   *
+   * @param address - Token contract address to look up.
+   * @returns Verification status and risk level (`LOW` or `HIGH`).
+   */
   async verifyToken(address: string): Promise<VerifyResponse> {
     const verifiedContract = await prisma.verifiedContract.findUnique({
       where: { address },
@@ -27,6 +33,14 @@ export const tokenController = {
 };
 
 export async function tokenRoutes(fastify: FastifyInstance) {
+  /**
+   * GET /verify/:address
+   * Verifies whether a token contract address is trusted and returns its risk level.
+   *
+   * @param request - Fastify request containing `address` path parameter.
+   * @param reply - Fastify reply.
+   * @returns `{ isVerified, riskLevel }` for the given contract address.
+   */
   fastify.get("/verify/:address", {
     schema: {
       description: "Verify if a token contract address is verified and check its risk level",

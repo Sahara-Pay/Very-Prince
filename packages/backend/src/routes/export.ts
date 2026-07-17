@@ -43,6 +43,18 @@ interface ExportRecord {
 }
 
 export const exportRoutes: FastifyPluginAsync = async (fastify) => {
+  /**
+   * GET /payouts/:address
+   * Exports payout history for a Stellar wallet address as CSV or JSON.
+   *
+   * Supports optional date range filtering via `startDate` / `endDate` query
+   * parameters. Suitable for tax accounting and internal audit workflows.
+   *
+   * @param request - Fastify request containing `address` path param and `type`,
+   *   `startDate`, `endDate` query params.
+   * @param reply - Fastify reply streamed as `text/csv` or `application/json`.
+   * @returns Payout export file attachment.
+   */
   fastify.get<{
     Params: z.infer<typeof AddressParamsSchema>;
     Querystring: z.infer<typeof ExportQuerySchema>;

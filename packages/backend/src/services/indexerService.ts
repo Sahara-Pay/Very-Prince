@@ -14,6 +14,10 @@ import {
   type PayoutClaimedEvent,
   type MaintainerAddedEvent,
 } from '../utils/xdrDecoder.js';
+import { createChildLogger } from '../utils/logger.js';
+
+/** Module-scoped structured logger */
+const log = createChildLogger('indexer');
 
 export class IndexerService {
   private isRunning = false;
@@ -38,21 +42,21 @@ export class IndexerService {
 
   start(): void {
     if (this.isRunning) {
-      console.log('Indexer is already running');
+      log.info('Indexer is already running — skipping start');
       return;
     }
 
     const cronExpression = process.env.INDEXER_CRON_EXPRESSION || '*/5 * * * *';
 
-    console.log('Starting indexer with cron expression: ' + cronExpression);
-    console.log('Syncing Blockchain Data...');
+    log.info({ cronExpression }, 'Starting indexer');
+    log.info('Syncing Blockchain Data...');
 
     this.cronJob = cron.schedule(cronExpression, async () => {
       await this.syncWithBackoff();
     }, { timezone: 'UTC' });
 
     this.isRunning = true;
-    console.log('Indexer started successfully');
+    log.info('Indexer started successfully');
   }
 
   stop(): void {
@@ -61,7 +65,7 @@ export class IndexerService {
       this.cronJob = null;
     }
     this.isRunning = false;
-    console.log('Indexer stopped');
+    log.info('Indexer stopped');
   }
 
   private async syncWithBackoff(): Promise<void> {
@@ -71,7 +75,10 @@ export class IndexerService {
     } catch (error) {
       this.incrementBackoff();
       const delay = this.getBackoffDelay();
-      console.error('Sync failed (' + this.consecutiveFailures + ' consecutive failures). Retrying in ' + (delay / 1000) + 's:', error);
+      log.error(
+        { err: error as Error, consecutiveFailures: this.consecutiveFailures, retryInMs: delay },
+        'Blockchain sync failed — will retry with backoff',
+      );
       setTimeout(() => this.syncWithBackoff(), delay);
     }
   }
@@ -79,27 +86,27 @@ export class IndexerService {
   private async getCursor(): Promise<number> {
     const state = await prisma.indexerState.findUnique({ where: { id: this.CURSOR_ID } });
     if (!state) {
-      console.log('No existing cursor found. Initializing with DEPLOYMENT_LEDGER: ' + DEPLOYMENT_LEDGER);
+      log.info({ deploymentLedger: DEPLOYMENT_LEDGER }, 'No existing cursor found — initialising from DEPLOYMENT_LEDGER');
       return DEPLOYMENT_LEDGER;
     }
     return state.lastProcessedLedger;
   }
 
   private async syncBlockchainData(): Promise<void> {
-    console.log('Starting blockchain data sync...');
+    log.debug('Starting blockchain data sync...');
 
     if (!CONTRACT_ID) {
-      console.warn('No CONTRACT_ID configured, skipping sync');
+      log.warn('No CONTRACT_ID configured — skipping sync');
       return;
     }
 
     const lastProcessedLedger = await this.getCursor();
-    console.log('Indexing from ledger: ' + (lastProcessedLedger + 1));
+    log.info({ fromLedger: lastProcessedLedger + 1 }, 'Indexing from ledger');
 
     const eventsResponse = await stellarService.getEvents(lastProcessedLedger + 1);
 
     if (eventsResponse.events && eventsResponse.events.length > 0) {
-      console.log('Processing ' + eventsResponse.events.length + ' new events...');
+      log.info({ count: eventsResponse.events.length }, 'Processing new contract events');
 
       for (let i = 0; i < eventsResponse.events.length; i++) {
         const rawEvent = eventsResponse.events[i];
@@ -108,14 +115,14 @@ export class IndexerService {
           const decodedEvent = decodeSorobanEvent(rawEvent);
           const contractEvent = parseContractEvent(decodedEvent);
           if (!contractEvent) {
-            console.warn('Unknown event type: ' + decodedEvent.eventName);
+            log.warn({ eventName: decodedEvent.eventName }, 'Unknown event type — skipping');
             continue;
           }
           const eventIndex = i;
-          console.log('Processing event: ' + contractEvent.eventName);
+          log.debug({ eventName: contractEvent.eventName, ledger: contractEvent.ledger, txHash: contractEvent.txHash }, 'Processing contract event');
           await this.handleContractEvent(contractEvent, eventIndex);
         } catch (error) {
-          console.error('Error processing event for SSE:', error);
+          log.error({ err: error as Error }, 'Error processing contract event — skipping');
         }
       }
 
@@ -129,12 +136,12 @@ export class IndexerService {
         });
       });
 
-      console.log('Successfully processed events up to ledger ' + latestLedger);
+      log.info({ latestLedger }, 'Successfully processed events up to ledger');
     } else {
-      console.log('No new events found');
+      log.debug('No new contract events found');
     }
 
-    console.log('Blockchain data sync completed successfully');
+    log.debug('Blockchain data sync completed successfully');
   }
 
   private async handleContractEvent(event: ContractEvent, eventIndex: number): Promise<void> {
@@ -273,7 +280,7 @@ export class IndexerService {
   }
 
   async triggerSync(): Promise<void> {
-    console.log('Manual sync triggered');
+    log.info('Manual blockchain sync triggered');
     await this.syncWithBackoff();
   }
 }

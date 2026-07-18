@@ -15,7 +15,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import csv from "fast-csv";
-import { prisma } from "../services/db.ts";
+import { prisma } from "../services/db.js";
 import type { ExportRecord } from "@very-prince/types";
 
 const ExportQuerySchema = z.object({
@@ -54,8 +54,22 @@ export const exportRoutes: FastifyPluginAsync = async (fastify) => {
         },
       },
       schema: {
-        params: AddressParamsSchema,
-        querystring: ExportQuerySchema,
+        params: {
+          type: 'object',
+          properties: {
+            address: { type: 'string' },
+          },
+          required: ['address'],
+        },
+        querystring: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: ['csv', 'json'] },
+            startDate: { type: 'string' },
+            endDate: { type: 'string' },
+          },
+          required: ['type'],
+        },
       },
     },
     async (request, reply) => {

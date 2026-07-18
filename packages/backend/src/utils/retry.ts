@@ -53,7 +53,9 @@ export async function withRetry<T>(
         if (onRetry) {
           onRetry(error, attempt);
         } else {
-          console.warn(`[Retry] Rate limited (429). Retrying in ${delay}ms... (Attempt ${attempt}/${maxRetries})`);
+          // Use dynamic import to avoid circular dependency with logger
+          const { logger } = await import('./logger.js');
+          logger.warn({ attempt, maxRetries, delayMs: delay }, 'Rate limited (429) — retrying with backoff');
         }
         
         // Non-blocking sleep before next attempt

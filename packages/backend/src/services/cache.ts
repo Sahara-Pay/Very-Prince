@@ -14,6 +14,9 @@
  */
 
 import { Redis } from "ioredis";
+import { createChildLogger } from "../utils/logger.js";
+
+const log = createChildLogger('cache');
 
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -47,7 +50,7 @@ export const bullRedisConnection = new Redis(REDIS_URL, {
 // ─── Event Listeners ─────────────────────────────────────────────────────────
 
 redis.on("error", (err) => {
-  console.error("Redis error:", err);
+  log.error({ err }, 'Redis connection error');
 });
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -62,7 +65,7 @@ export async function safeGet(key: string): Promise<string | null> {
   try {
     return await redis.get(key);
   } catch (error) {
-    console.error(`Redis safeGet failed for key ${key}:`, error);
+    log.error({ err: error as Error, key }, 'Redis safeGet failed');
     return null;
   }
 }
@@ -78,6 +81,6 @@ export async function safeSet(key: string, value: string, ttlSeconds: number): P
   try {
     await redis.set(key, value, "EX", ttlSeconds);
   } catch (error) {
-    console.error(`Redis safeSet failed for key ${key}:`, error);
+    log.error({ err: error as Error, key }, 'Redis safeSet failed');
   }
 }

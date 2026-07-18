@@ -32,6 +32,9 @@
  */
 
 import { Horizon, Transaction } from "@stellar/stellar-sdk";
+import { createChildLogger } from './logger.js';
+
+const log = createChildLogger('horizonFallback');
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -125,7 +128,7 @@ export class HorizonFallbackProvider {
         source: "horizon",
       };
     } catch (error) {
-      console.warn("[HorizonFallback] getLatestLedger failed:", (error as Error).message);
+      log.warn({ err: error as Error }, "Horizon getLatestLedger fallback failed");
       return { ok: false, source: "horizon" };
     }
   }
@@ -165,7 +168,7 @@ export class HorizonFallbackProvider {
         return { ok: true, value: { status: "NOT_FOUND" }, source: "horizon" };
       }
 
-      console.warn("[HorizonFallback] getTransaction failed:", (error as Error).message);
+      log.warn({ err: error as Error }, "Horizon getTransaction fallback failed");
       return { ok: false, source: "horizon" };
     }
   }
@@ -227,7 +230,7 @@ export class HorizonFallbackProvider {
         };
       }
 
-      console.warn("[HorizonFallback] submitTransaction failed:", (error as Error).message);
+      log.warn({ err: error as Error }, "Horizon submitTransaction fallback failed");
       return { ok: false, source: "horizon" };
     }
   }
@@ -251,7 +254,7 @@ export class HorizonFallbackProvider {
         source: "horizon",
       };
     } catch (error) {
-      console.warn("[HorizonFallback] getHealth failed:", (error as Error).message);
+      log.warn({ err: error as Error }, "Horizon getHealth fallback failed");
       return { ok: false, source: "horizon" };
     }
   }

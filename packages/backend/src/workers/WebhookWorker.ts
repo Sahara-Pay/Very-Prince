@@ -7,6 +7,9 @@ import { Worker, Job } from "bullmq";
 import { bullRedisConnection } from "../services/cache.js";
 import { webhookService, WebhookJobData } from "../services/webhookService.js";
 import { webhookRepository } from "../repositories/WebhookRepository.js";
+import { createChildLogger } from "../utils/logger.js";
+
+const log = createChildLogger('webhookWorker');
 
 export class WebhookWorker {
   private worker: Worker;
@@ -84,11 +87,11 @@ export class WebhookWorker {
     );
 
     this.worker.on("completed", (job) => {
-      console.log(`Webhook job ${job.id} completed successfully`);
+      log.info({ jobId: job.id }, 'Webhook job completed successfully');
     });
 
     this.worker.on("failed", (job, err) => {
-      console.error(`Webhook job ${job?.id} failed:`, err);
+      log.error({ err, jobId: job?.id }, 'Webhook job failed');
     });
   }
 

@@ -90,6 +90,10 @@ import {
 import { decodeI128ToBigInt, stroopsToXlm } from "../utils/xdrDecoder.js";
 import { getSorobanRpcClient } from "./sorobanRpcService.js";
 import type { AccountInfo, ContractCallResult, PayoutEvent, ProfileStats } from "@very-prince/types";
+import { createChildLogger } from "../utils/logger.js";
+
+/** Module-scoped structured logger */
+const log = createChildLogger('stellarService');
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -146,9 +150,9 @@ export class StellarService {
     return withRetry(fn, {
       onRetry: (_, attempt) => {
         if (attempt >= 3) {
-          console.error(`[CRITICAL] High-priority: Rate limit backoff exceeded 3 times! (Attempt ${attempt})`);
+          log.error({ attempt }, 'Rate limit backoff exceeded 3 retries — high-priority alert');
         } else {
-          console.warn(`[Stellar] Rate limited. Retrying... (Attempt ${attempt})`);
+          log.warn({ attempt }, 'Rate limited by Stellar network, retrying...');
         }
       }
     });
@@ -177,13 +181,14 @@ export class StellarService {
         throw rpcError;
       }
 
-      console.warn(
-        `[Stellar] Soroban RPC failed, attempting Horizon fallback: ${(rpcError as Error).message}`
+      log.warn(
+        { err: rpcError as Error },
+        'Soroban RPC failed, attempting Horizon fallback',
       );
 
       const fallbackResult = await fallbackFn(this.fallback);
       if (fallbackResult.ok) {
-        console.info("[Stellar] Horizon fallback succeeded");
+        log.info('Horizon fallback succeeded');
         return fallbackResult.value;
       }
 
@@ -211,7 +216,9 @@ export class StellarService {
    * @throws If the account does not exist on the network (404 Not Found).
    */
   async getAccountInfo(publicKey: string): Promise<AccountInfo> {
+    log.debug({ publicKey }, 'Loading account info from Horizon');
     const account = await this._callWithRetry(() => this.horizon.loadAccount(publicKey));
+    log.debug({ publicKey, sequence: account.sequenceNumber() }, 'Account info loaded');
     return {
       id: account.id,
       sequence: account.sequenceNumber(),
@@ -229,10 +236,13 @@ export class StellarService {
    * @returns The claimable balance in stroops, or `0` if none.
    */
   async readClaimableBalance(maintainerAddress: string): Promise<bigint> {
+    log.debug({ maintainerAddress }, 'Reading claimable balance');
     const result = await this._simulateContractCall("get_claimable_balance", [
       nativeToScVal(maintainerAddress, { type: "address" }),
     ]);
-    return BigInt(scValToNative(result as xdr.ScVal) as number);
+    const balance = BigInt(scValToNative(result as xdr.ScVal) as number);
+    log.debug({ maintainerAddress, balanceStroops: balance.toString() }, 'Claimable balance fetched');
+    return balance;
   }
 
   /**
@@ -241,6 +251,7 @@ export class StellarService {
    * @param orgId — The Symbol ID of the organization (e.g. "stellar").
    */
   async readOrganization(orgId: string): Promise<Record<string, unknown>> {
+    log.debug({ orgId }, 'Reading organisation from contract');
     const result = await this._simulateContractCall("get_org", [
       nativeToScVal(orgId, { type: "symbol" }),
     ]);
@@ -253,6 +264,7 @@ export class StellarService {
    * This method fetches all `org_registered` events from the contract.
    */
   async readAllOrganizations(): Promise<string[]> {
+    log.debug('Fetching all registered organisation IDs from contract events');
     const startLedger = parseInt(process.env["PROFILE_START_LEDGER"] ?? "1", 10);
     
     // topic[0] = Symbol("VeryPrince"), topic[1] = Symbol("org_registered")
@@ -453,7 +465,7 @@ export class StellarService {
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
-      console.error('Error fetching contract state:', error);
+      log.error({ err: error as Error, contractId }, 'Error fetching contract state');
       throw error;
     }
   }
@@ -564,7 +576,8 @@ export class StellarService {
     admin: string,
     signerSecret: string
   ): Promise<ContractCallResult> {
-    return this._submitContractCall(
+    log.info({ orgId: id, name, admin }, 'Registering new organisation on contract');
+    const result = await this._submitContractCall(
       "register_org",
       [
         nativeToScVal(id, { type: "symbol" }),
@@ -573,6 +586,8 @@ export class StellarService {
       ],
       signerSecret
     );
+    log.info({ orgId: id, txHash: result.transactionHash }, 'Organisation registered successfully');
+    return result;
   }
 
   /**
@@ -622,7 +637,8 @@ export class StellarService {
     unlockTimestamp: number = 0
   ): Promise<ContractCallResult> {
     const adminAddress = Keypair.fromSecret(signerSecret).publicKey();
-    return this._submitContractCall(
+    log.info({ orgId, maintainerAddress, amountStroops: amountStroops.toString(), adminAddress }, 'Allocating payout');
+    const result = await this._submitContractCall(
       "allocate_payout",
       [
         nativeToScVal(orgId, { type: "symbol" }),
@@ -633,6 +649,8 @@ export class StellarService {
       ],
       signerSecret
     );
+    log.info({ orgId, maintainerAddress, txHash: result.transactionHash }, 'Payout allocated successfully');
+    return result;
   }
 
   // ── Internal Helpers ──────────────────────────────────────────────────────
@@ -810,6 +828,7 @@ export class StellarService {
    * is submitted via Horizon's `POST /transactions` endpoint.
    */
   async submitTransaction(signedTransactionXdr: string): Promise<ContractCallResult> {
+    log.info('Submitting signed transaction to network');
     const transaction = TransactionBuilder.fromXDR(signedTransactionXdr, NETWORK_PASSPHRASE);
 
     const sendResult = await this._callWithFallback(
@@ -837,6 +856,7 @@ export class StellarService {
       throw new Error(`Transaction not successful: ${getResult.status}`);
     }
 
+    log.info({ txHash: sendResult.hash }, 'Transaction submitted and confirmed successfully');
     return {
       success: true,
       value: getResult.returnValue ? scValToNative(getResult.returnValue as xdr.ScVal) : undefined,
@@ -868,7 +888,7 @@ export class StellarService {
       } catch (rpcError) {
         // If RPC fails and we have a fallback, try Horizon
         if (this.fallback && isFallbackEligibleError(rpcError)) {
-          console.warn("[Stellar] RPC getTransaction failed, trying Horizon fallback");
+          log.warn({ err: rpcError as Error, hash }, 'RPC getTransaction failed, trying Horizon fallback');
           const fallbackResult = await this.fallback.getTransaction(hash);
           if (fallbackResult.ok) {
             // Horizon doesn't provide Soroban return values, but it can confirm success

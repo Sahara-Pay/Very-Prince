@@ -3,8 +3,11 @@ import { stellarService } from "../services/stellarService.js";
 import { redis } from "../services/cache.js";
 import type { PaginatedOrgsResponse } from "@very-prince/types";
 import { ipfsService } from "./ipfsService.js";
+import { createChildLogger } from "../utils/logger.js";
 
 export type { PaginatedOrgsResponse };
+
+const log = createChildLogger('organizationService');
 
 export class OrganizationService {
   async getOrganizations(page: number, limit: number, search?: string): Promise<PaginatedOrgsResponse> {
@@ -96,7 +99,7 @@ export class OrganizationService {
         return JSON.parse(cached);
       }
     } catch (error) {
-      console.error(`Redis error in getOrganization for key ${cacheKey}:`, error);
+      log.error({ err: error as Error, cacheKey }, 'Redis error in getOrganization');
     }
 
     const org = await stellarService.readOrganization(orgId);
@@ -110,7 +113,7 @@ export class OrganizationService {
     try {
       await redis.set(cacheKey, JSON.stringify(orgDetails), "EX", 300);
     } catch (error) {
-      console.error(`Redis set error in getOrganization for key ${cacheKey}:`, error);
+      log.error({ err: error as Error, cacheKey }, 'Redis set error in getOrganization');
     }
 
     return orgDetails;

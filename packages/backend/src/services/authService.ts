@@ -20,6 +20,9 @@
 
 import { randomBytes } from "crypto";
 import { safeSet, safeGet } from "./cache.js";
+import { createChildLogger } from "../utils/logger.js";
+
+const log = createChildLogger('authService');
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -151,7 +154,7 @@ export class AuthService {
 
       return stored;
     } catch (error) {
-      console.error(`Failed to parse cached nonce for ${publicKey}:`, error);
+      log.error({ err: error as Error, publicKey }, 'Failed to parse cached nonce');
       return null;
     }
   }

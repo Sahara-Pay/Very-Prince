@@ -1,9 +1,17 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { emitSSEEvent } from '../services/sse.ts';
 
 const sseConnections = new Set<any>();
 
-export { emitSSEEvent };
+export function emitSSEEvent(event: string, data: Record<string, unknown>): void {
+  const payload = 'event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n';
+  for (const conn of sseConnections) {
+    try {
+      conn.write(payload);
+    } catch {
+      sseConnections.delete(conn);
+    }
+  }
+}
 
 export const eventsRoutes: FastifyPluginAsync = async (fastify) => {
   /**

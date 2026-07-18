@@ -165,6 +165,7 @@ export default function PayoutsPage() {
               <button
                 onClick={() => handleExportData('csv')}
                 disabled={isExporting}
+                aria-label={isExporting ? "Exporting data as CSV" : "Export payouts as CSV"}
                 className="rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {isExporting ? (
@@ -184,6 +185,7 @@ export default function PayoutsPage() {
               <button
                 onClick={() => handleExportData('json')}
                 disabled={isExporting}
+                aria-label={isExporting ? "Exporting data as JSON" : "Export payouts as JSON"}
                 className="rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {isExporting ? (
@@ -251,6 +253,7 @@ export default function PayoutsPage() {
                   <button
                     onClick={() => handleClaimPayout(payout.orgId)}
                     disabled={isSigning}
+                    aria-label={isSigning ? `Claiming ${payout.amountXlm} XLM from ${payout.orgId}` : `Claim ${payout.amountXlm} XLM from ${payout.orgId}`}
                     className="rounded-lg bg-gradient-to-r from-stellar-purple to-brand-500 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-stellar-purple/20 transition-all hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {isSigning ? "Claiming..." : "Claim"}

@@ -81,6 +81,7 @@ export function RegisterOrgModal({ onClose, onSuccess }: RegisterOrgModalProps) 
               type="button"
               onClick={onClose}
               disabled={isSubmitting}
+              aria-label="Close registration modal"
               className="rounded-full bg-white/5 p-2 text-white/50 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
             >
               <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -145,6 +146,7 @@ export function RegisterOrgModal({ onClose, onSuccess }: RegisterOrgModalProps) 
             <button
               type="submit"
               disabled={isSubmitting || !isConnected}
+              aria-label={isSubmitting ? "Registering organization" : "Register organization"}
               className="w-full rounded-xl bg-gradient-to-r from-stellar-purple to-brand-500 py-3 text-sm font-semibold text-white shadow-lg shadow-stellar-purple/20 transition-all hover:brightness-110 disabled:opacity-50"
             >
               {isSubmitting ? "Registering..." : "Register Organization"}

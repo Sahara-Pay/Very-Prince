@@ -157,6 +157,7 @@ export function FundOrgModal({ orgId, onClose, onSuccess }: FundOrgModalProps) {
                   href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(`I just funded ${orgId} on PayoutRegistry! 🚀\n\n#Stellar #OpenSource`)}`}
                   target="_blank"
                   rel="noopener noreferrer"
+                  aria-label="Share funding on Twitter"
                   className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#1DA1F2] py-3 font-semibold text-white transition-all hover:brightness-110"
                 >
                   <svg className="h-5 w-5 fill-current" viewBox="0 0 24 24">
@@ -166,6 +167,7 @@ export function FundOrgModal({ orgId, onClose, onSuccess }: FundOrgModalProps) {
                 </a>
                 <button
                   onClick={handleClose}
+                  aria-label="Close success message"
                   className="w-full rounded-xl border border-white/10 bg-white/5 py-3 font-semibold text-white transition-all hover:bg-white/10"
                 >
                   Close
@@ -228,6 +230,12 @@ export function FundOrgModal({ orgId, onClose, onSuccess }: FundOrgModalProps) {
             <button
               type="submit"
               disabled={isSubmitting || !amount || parseFloat(amount) <= 0 || (balance !== null && parseFloat(amount) > balance)}
+              aria-label={
+                isSubmitting ? "Processing funding on Testnet" :
+                !isConnected ? "Please connect Freighter" :
+                balanceStatus === "unfunded" || balanceStatus === "empty" ? "Fund your wallet first" :
+                "Confirm funding"
+              }
               className="mt-6 w-full rounded-xl bg-gradient-to-r from-stellar-purple to-stellar-teal py-3 font-semibold text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isSubmitting ? (

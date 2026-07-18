@@ -48,6 +48,7 @@ export function WalletTest() {
           <button
             onClick={connectWallet}
             disabled={isConnecting}
+            aria-label="Connect wallet"
             className="px-4 py-2 bg-stellar-purple text-white rounded hover:bg-stellar-purple/80 disabled:opacity-50"
           >
             {isConnecting ? 'Connecting...' : 'Connect Wallet'}
@@ -56,12 +57,14 @@ export function WalletTest() {
           <>
             <button
               onClick={disconnectWallet}
+              aria-label="Disconnect wallet"
               className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-500/80"
             >
               Disconnect
             </button>
             <button
               onClick={handleTestTransaction}
+              aria-label="Test signing a transaction"
               className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-500/80"
             >
               Test Sign

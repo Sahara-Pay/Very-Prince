@@ -22,6 +22,8 @@
  * @throws The last encountered error if all retries fail, or the initial error 
  *          if it's not a retryable error (non-429).
  */
+import { logger } from "./logger.js";
+
 export async function withRetry<T>(
   fn: () => Promise<T>,
   options: {
@@ -53,7 +55,7 @@ export async function withRetry<T>(
         if (onRetry) {
           onRetry(error, attempt);
         } else {
-          console.warn(`[Retry] Rate limited (429). Retrying in ${delay}ms... (Attempt ${attempt}/${maxRetries})`);
+          logger.warn({ delay, attempt, maxRetries }, "[Retry] Rate limited (429), retrying");
         }
         
         // Non-blocking sleep before next attempt

@@ -35,10 +35,10 @@ interface FundOrgModalProps {
 
 export function FundOrgModal({ orgId, onClose, onSuccess }: FundOrgModalProps) {
   const { isConnected, publicKey } = useUnifiedWallet();
-  const { fundOrg, isSubmitting, error } = useFundOrg();
-
   const [amount, setAmount] = useState("");
   const [isSuccess, setIsSuccess] = useState(false);
+  const [progressStep, setProgressStep] = useState<"idle" | "building" | "signing" | "submitting" | "confirmed">("idle");
+  const { fundOrg, isSubmitting, error } = useFundOrg({ onProgress: setProgressStep });
 
   // Balance detection for the smart FaucetBanner and display
   const [balanceStatus, setBalanceStatus] = useState<BalanceStatus>("loading");
@@ -71,14 +71,25 @@ export function FundOrgModal({ orgId, onClose, onSuccess }: FundOrgModalProps) {
 
   // ── Submit handler ────────────────────────────────────────────────────────
 
+  const progressSteps = [
+    { key: "building", label: "Building XDR" },
+    { key: "signing", label: "Requesting Signature" },
+    { key: "submitting", label: "Submitting" },
+    { key: "confirmed", label: "Confirmed" },
+  ] as const;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     const numAmount = Number(amount);
+    setProgressStep("building");
+    setIsSuccess(false);
+
     try {
       await fundOrg(orgId, numAmount);
       setIsSuccess(true);
     } catch (err) {
+      setProgressStep("idle");
       // Error is handled by the hook
     }
   };
@@ -174,6 +185,48 @@ export function FundOrgModal({ orgId, onClose, onSuccess }: FundOrgModalProps) {
             </div>
           ) : (
             <>
+              {(isSubmitting || progressStep !== "idle" || isSuccess) && (
+                <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <div className="mb-3 flex items-center justify-between text-[10px] uppercase tracking-[0.26em] text-white/45">
+                    <span>Transaction progress</span>
+                    <span>{progressStep === "confirmed" ? "Complete" : "In progress"}</span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {progressSteps.map((step, index) => {
+                      const activeIndex = progressSteps.findIndex((item) => item.key === progressStep);
+                      const isComplete = activeIndex >= 0 && index < activeIndex;
+                      const isActive = index === activeIndex;
+                      const isPending = !isComplete && !isActive;
+
+                      return (
+                        <div key={step.key} className="flex flex-1 items-center gap-2">
+                          <div className="flex min-w-0 flex-1 flex-col items-center text-center">
+                            <div
+                              className={`flex h-8 w-8 items-center justify-center rounded-full border text-sm font-semibold transition-all ${
+                                isComplete
+                                  ? "border-stellar-teal bg-stellar-teal/20 text-stellar-teal"
+                                  : isActive
+                                    ? "border-stellar-purple bg-stellar-purple/20 text-stellar-purple"
+                                    : "border-white/10 bg-white/5 text-white/40"
+                              }`}
+                            >
+                              {index + 1}
+                            </div>
+                            <span className={`mt-2 text-[10px] leading-tight ${isPending ? "text-white/35" : "text-white/70"}`}>
+                              {step.label}
+                            </span>
+                          </div>
+                          {index < progressSteps.length - 1 && (
+                            <div className={`h-[2px] flex-1 rounded-full ${isComplete || isActive ? "bg-stellar-teal" : "bg-white/10"}`} />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <FaucetBanner balanceStatus={balanceStatus} />
 
               {/* ── Amount Input Form ── */}

@@ -7,7 +7,11 @@ import {
   submitSignedTransaction,
 } from "@/lib/sorobanClient";
 
-export function useFundOrg() {
+interface UseFundOrgOptions {
+  onProgress?: (step: "building" | "signing" | "submitting" | "confirmed" | "idle") => void;
+}
+
+export function useFundOrg({ onProgress }: UseFundOrgOptions = {}) {
   const { isConnected, publicKey, signTransaction } = useFreighter();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -27,19 +31,21 @@ export function useFundOrg() {
     try {
       const stroops = BigInt(Math.floor(amount * 10_000_000));
 
-      // Step 1 — build & simulate the unsigned transaction XDR
+      onProgress?.("building");
       const unsignedXdr = await buildFundOrgTransaction(orgId, publicKey, stroops);
 
-      // Step 2 — ask Freighter to sign it (user approves in the extension popup)
+      onProgress?.("signing");
       const signedXdr = await signTransaction(unsignedXdr);
 
-      // Step 3 — broadcast to Soroban RPC and wait for ledger confirmation
+      onProgress?.("submitting");
       await submitSignedTransaction(signedXdr);
 
+      onProgress?.("confirmed");
       setIsSubmitting(false);
       return true;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Funding failed. Please try again.";
+      onProgress?.("idle");
       setError(errorMessage);
       setIsSubmitting(false);
       throw new Error(errorMessage);

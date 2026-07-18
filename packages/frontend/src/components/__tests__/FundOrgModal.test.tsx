@@ -5,12 +5,9 @@ import { vi } from "vitest";
 import { FundOrgModal } from "../FundOrgModal";
 
 const mockFundOrg = vi.fn();
+const mockUseFundOrg = vi.fn();
 vi.mock("@/hooks/useFundOrg", () => ({
-  useFundOrg: () => ({
-    fundOrg: mockFundOrg,
-    isSubmitting: false,
-    error: null,
-  }),
+  useFundOrg: (options?: { onProgress?: (step: string) => void }) => mockUseFundOrg(options),
 }));
 
 vi.mock("@/hooks/useUnifiedWallet", () => ({
@@ -27,6 +24,35 @@ vi.mock("@/lib/sorobanClient", () => ({
 describe("FundOrgModal", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockUseFundOrg.mockReturnValue({
+      fundOrg: mockFundOrg,
+      isSubmitting: false,
+      error: null,
+    });
+  });
+
+  test("shows a step-by-step progress bar while funding", async () => {
+    const onSuccess = vi.fn();
+    const onClose = vi.fn();
+    mockFundOrg.mockImplementationOnce(async () => {
+      return undefined;
+    });
+
+    render(<FundOrgModal orgId="testorg" onSuccess={onSuccess} onClose={onClose} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Confirm Funding/i })).not.toBeDisabled();
+    });
+
+    const input = screen.getByPlaceholderText("0.00");
+    fireEvent.change(input, { target: { value: "10" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /Confirm Funding/i }));
+
+    expect(await screen.findByText("Building XDR")).toBeInTheDocument();
+    expect(screen.getByText("Requesting Signature")).toBeInTheDocument();
+    expect(screen.getByText("Submitting")).toBeInTheDocument();
+    expect(screen.getByText("Confirmed")).toBeInTheDocument();
   });
 
   test("shows success screen and share to Twitter button after successful funding", async () => {

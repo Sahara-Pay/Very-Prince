@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import useSWR from "swr";
+import { useQuery } from "@tanstack/react-query";
 
 interface FundingHistoryPoint {
   id: string;
@@ -30,14 +30,12 @@ const fetcher = async (url: string) => {
 };
 
 export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
-  const { data, error, isLoading } = useSWR(
-    orgId ? `${BACKEND_URL}/stats/funding-history/${orgId}` : null,
-    fetcher,
-    {
-      revalidateOnFocus: false,
-      dedupingInterval: 5000,
-    }
-  );
+  const { data, error, isLoading } = useQuery({
+    queryKey: ["funding-history", orgId],
+    queryFn: () => fetcher(`${BACKEND_URL}/stats/funding-history/${orgId}`),
+    enabled: Boolean(orgId),
+    staleTime: 5000,
+  });
 
   const [hoveredPoint, setHoveredPoint] = useState<FundingHistoryPoint | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
@@ -272,7 +270,7 @@ export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
           </linearGradient>
 
           {/* Interactive Dots */}
-          {pointsWithCoords.map((pt, index) => {
+          {pointsWithCoords.map((pt) => {
             const isHovered = hoveredPoint?.id === pt.id;
             return (
               <g key={pt.id}>

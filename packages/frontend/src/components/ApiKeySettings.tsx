@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 interface ApiKey {
   id: string;
@@ -25,10 +26,7 @@ interface Props {
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 export function ApiKeySettings({ orgId, publicKey }: Props) {
-  const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [isRevoking, setIsRevoking] = useState<string | null>(null);
-  const [isUpdating, setIsUpdating] = useState<string | null>(null);
+  const queryClient = useQueryClient();
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [editingKey, setEditingKey] = useState<string | null>(null);
@@ -37,29 +35,25 @@ export function ApiKeySettings({ orgId, publicKey }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const fetchApiKeys = async () => {
-    try {
+  const apiKeysQuery = useQuery({
+    queryKey: ["api-keys", orgId, publicKey],
+    enabled: Boolean(orgId && publicKey),
+    queryFn: async () => {
       const res = await fetch(`${BACKEND_URL}/api/org/${orgId}/api-keys`, {
         headers: { Authorization: `Bearer ${publicKey}` },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setApiKeys(data.data || []);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch API keys: ${res.statusText}`);
       }
-    } catch (err) {
-      console.error("Failed to fetch API keys", err);
-    }
-  };
+      const data = await res.json();
+      return (data.data || []) as ApiKey[];
+    },
+  });
 
-  useEffect(() => {
-    fetchApiKeys();
-  }, [orgId]);
+  const apiKeys = apiKeysQuery.data || [];
 
-  const handleGenerateKey = async () => {
-    setIsGenerating(true);
-    setError(null);
-    setSuccess(null);
-    try {
+  const generateKeyMutation = useMutation({
+    mutationFn: async () => {
       const res = await fetch(`${BACKEND_URL}/api/org/${orgId}/api-keys`, {
         method: "POST",
         headers: {
@@ -68,56 +62,47 @@ export function ApiKeySettings({ orgId, publicKey }: Props) {
         },
         body: JSON.stringify({ name: newKeyName || undefined }),
       });
-      if (res.ok) {
+      if (!res.ok) {
         const data = await res.json();
-        setGeneratedKey(data.data);
-        setShowGenerateModal(false);
-        setNewKeyName("");
-        setSuccess("API key generated successfully! Save it now - it won't be shown again.");
-        await fetchApiKeys();
-      } else {
-        const data = await res.json();
-        setError(data.message || "Failed to generate API key");
+        throw new Error(data.message || "Failed to generate API key");
       }
-    } catch (err) {
-      setError("Network error. Please try again.");
-    } finally {
-      setIsGenerating(false);
-    }
-  };
+      const data = await res.json();
+      return data.data as GeneratedApiKey;
+    },
+    onSuccess: async (data) => {
+      setGeneratedKey(data);
+      setShowGenerateModal(false);
+      setNewKeyName("");
+      setSuccess("API key generated successfully! Save it now - it won't be shown again.");
+      await queryClient.invalidateQueries({ queryKey: ["api-keys", orgId, publicKey] });
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Network error. Please try again.");
+    },
+  });
 
-  const handleRevokeKey = async (keyId: string) => {
-    if (!confirm("Are you sure you want to revoke this API key? This action cannot be undone.")) {
-      return;
-    }
-    
-    setIsRevoking(keyId);
-    setError(null);
-    setSuccess(null);
-    try {
+  const revokeKeyMutation = useMutation({
+    mutationFn: async (keyId: string) => {
       const res = await fetch(`${BACKEND_URL}/api/org/${orgId}/api-keys/${keyId}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${publicKey}` },
       });
-      if (res.ok) {
-        setSuccess("API key revoked successfully");
-        await fetchApiKeys();
-      } else {
+      if (!res.ok) {
         const data = await res.json();
-        setError(data.message || "Failed to revoke API key");
+        throw new Error(data.message || "Failed to revoke API key");
       }
-    } catch (err) {
-      setError("Network error. Please try again.");
-    } finally {
-      setIsRevoking(null);
-    }
-  };
+    },
+    onSuccess: async () => {
+      setSuccess("API key revoked successfully");
+      await queryClient.invalidateQueries({ queryKey: ["api-keys", orgId, publicKey] });
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Network error. Please try again.");
+    },
+  });
 
-  const handleUpdateKey = async (keyId: string) => {
-    setIsUpdating(keyId);
-    setError(null);
-    setSuccess(null);
-    try {
+  const updateKeyMutation = useMutation({
+    mutationFn: async (keyId: string) => {
       const res = await fetch(`${BACKEND_URL}/api/org/${orgId}/api-keys/${keyId}`, {
         method: "PUT",
         headers: {
@@ -126,20 +111,42 @@ export function ApiKeySettings({ orgId, publicKey }: Props) {
         },
         body: JSON.stringify({ name: editingName }),
       });
-      if (res.ok) {
-        setSuccess("API key updated successfully");
-        setEditingKey(null);
-        setEditingName("");
-        await fetchApiKeys();
-      } else {
+      if (!res.ok) {
         const data = await res.json();
-        setError(data.message || "Failed to update API key");
+        throw new Error(data.message || "Failed to update API key");
       }
-    } catch (err) {
-      setError("Network error. Please try again.");
-    } finally {
-      setIsUpdating(null);
+    },
+    onSuccess: async () => {
+      setSuccess("API key updated successfully");
+      setEditingKey(null);
+      setEditingName("");
+      await queryClient.invalidateQueries({ queryKey: ["api-keys", orgId, publicKey] });
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Network error. Please try again.");
+    },
+  });
+
+  const handleGenerateKey = async () => {
+    setError(null);
+    setSuccess(null);
+    generateKeyMutation.mutate();
+  };
+
+  const handleRevokeKey = async (keyId: string) => {
+    if (!confirm("Are you sure you want to revoke this API key? This action cannot be undone.")) {
+      return;
     }
+    
+    setError(null);
+    setSuccess(null);
+    revokeKeyMutation.mutate(keyId);
+  };
+
+  const handleUpdateKey = async (keyId: string) => {
+    setError(null);
+    setSuccess(null);
+    updateKeyMutation.mutate(keyId);
   };
 
   const copyToClipboard = (text: string) => {
@@ -260,10 +267,10 @@ export function ApiKeySettings({ orgId, publicKey }: Props) {
                       <>
                         <button
                           onClick={() => handleUpdateKey(apiKey.id)}
-                          disabled={isUpdating === apiKey.id}
+                          disabled={updateKeyMutation.isPending && updateKeyMutation.variables === apiKey.id}
                           className="rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-1 text-xs font-medium text-green-400 hover:bg-green-500/20 disabled:opacity-50"
                         >
-                          {isUpdating === apiKey.id ? "Saving..." : "Save"}
+                          {updateKeyMutation.isPending && updateKeyMutation.variables === apiKey.id ? "Saving..." : "Save"}
                         </button>
                         <button
                           onClick={() => {
@@ -291,10 +298,10 @@ export function ApiKeySettings({ orgId, publicKey }: Props) {
                         {apiKey.isActive && (
                           <button
                             onClick={() => handleRevokeKey(apiKey.id)}
-                            disabled={isRevoking === apiKey.id}
+                            disabled={revokeKeyMutation.isPending && revokeKeyMutation.variables === apiKey.id}
                             className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1 text-xs font-medium text-red-400 hover:bg-red-500/20 disabled:opacity-50"
                           >
-                            {isRevoking === apiKey.id ? "Revoking..." : "Revoke"}
+                            {revokeKeyMutation.isPending && revokeKeyMutation.variables === apiKey.id ? "Revoking..." : "Revoke"}
                           </button>
                         )}
                       </>
@@ -336,10 +343,10 @@ export function ApiKeySettings({ orgId, publicKey }: Props) {
             <div className="flex gap-3">
               <button
                 onClick={handleGenerateKey}
-                disabled={isGenerating}
+                disabled={generateKeyMutation.isPending}
                 className="flex-1 rounded-lg bg-gradient-to-r from-stellar-purple to-brand-500 px-4 py-2 text-sm font-semibold text-white hover:brightness-110 disabled:opacity-50"
               >
-                {isGenerating ? "Generating..." : "Generate Key"}
+                {generateKeyMutation.isPending ? "Generating..." : "Generate Key"}
               </button>
               <button
                 onClick={() => {

@@ -4,7 +4,6 @@
  */
 
 import { createTRPCProxyClient, httpBatchLink } from '@trpc/client';
-import type { AppRouter } from '@backend/trpc/router';
 
 // Get the backend URL from environment variables
 const getBaseUrl = () => {
@@ -23,7 +22,7 @@ const getBaseUrl = () => {
 };
 
 // Create the tRPC client
-export const trpcClient = createTRPCProxyClient<AppRouter>({
+export const trpcClient = createTRPCProxyClient<any>({
   links: [
     httpBatchLink({
       url: `${getBaseUrl()}/trpc`,
@@ -33,7 +32,7 @@ export const trpcClient = createTRPCProxyClient<AppRouter>({
       },
     }),
   ],
-});
+}) as any;
 
 // Export the client for use in components
 export default trpcClient;

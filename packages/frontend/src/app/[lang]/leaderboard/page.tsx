@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { GlassPanel } from "@/components/GlassPanel";
 import { GlassButton } from "@/components/GlassButton";
 import { fetchTopMaintainers, type TopMaintainer } from "@/lib/api";
@@ -15,29 +16,21 @@ interface LeaderboardPageProps {
 }
 
 export default function LeaderboardPage({ params }: LeaderboardPageProps) {
-  const [maintainers, setMaintainers] = useState<TopMaintainer[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [dictionary, setDictionary] = useState<Dictionary | null>(null);
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const [data, dict] = await Promise.all([
-          fetchTopMaintainers(),
-          getDictionary(params.lang),
-        ]);
-        setMaintainers(data);
-        setDictionary(dict);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load leaderboard");
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadData();
-  }, [params.lang]);
+  const { data, error, isLoading } = useQuery({
+    queryKey: ["leaderboard", params.lang],
+    queryFn: async () => {
+      const [maintainers, dictionary] = await Promise.all([
+        fetchTopMaintainers(),
+        getDictionary(params.lang),
+      ]);
+      return { maintainers, dictionary };
+    },
+  });
+
+  const maintainers: TopMaintainer[] = data?.maintainers ?? [];
+  const dictionary: Dictionary | undefined = data?.dictionary;
 
   const truncateAddress = (address: string) => {
     if (!address) return "";
@@ -50,7 +43,7 @@ export default function LeaderboardPage({ params }: LeaderboardPageProps) {
     setTimeout(() => setCopiedAddress(null), 2000);
   };
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-stellar-blue">
         <div className="text-xl font-medium text-white/60 animate-pulse">
@@ -64,7 +57,7 @@ export default function LeaderboardPage({ params }: LeaderboardPageProps) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-stellar-blue">
         <div className="text-xl font-medium text-red-400">
-          {error || "An error occurred"}
+          {error instanceof Error ? error.message : "An error occurred"}
         </div>
       </div>
     );

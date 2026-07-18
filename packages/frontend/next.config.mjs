@@ -63,6 +63,10 @@ const nextConfig = {
   // degrade gracefully in the browser bundle.
   webpack: (config) => {
     config.resolve = config.resolve ?? {};
+    config.resolve.extensionAlias = {
+      ...config.resolve.extensionAlias,
+      ".js": [".js", ".ts", ".tsx"],
+    };
     config.resolve.fallback = {
       ...config.resolve.fallback,
       fs: false,

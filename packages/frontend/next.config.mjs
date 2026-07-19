@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Next.js configuration for the Very-prince frontend.
  *
  * Key notes:
@@ -12,6 +12,12 @@ import withPWA from "next-pwa";
 const pwaConfig = withPWA({
   dest: "public",
   disable: process.env.NODE_ENV === "development",
+  register: true,
+  skipWaiting: true,
+  // Serve a branded offline page when the network is unavailable.
+  fallbacks: {
+    document: "/offline.html",
+  },
   // Only cache GET requests — never cache POST/wallet/webhook endpoints.
   runtimeCaching: [
     {
@@ -69,6 +75,12 @@ const nextConfig = {
       net: false,
       tls: false,
       crypto: false,
+    };
+    // Allow ESM-style .js imports to resolve to .ts files
+    // (needed for @very-prince/types which uses "type": "module").
+    config.resolve.extensionAlias = {
+      ...config.resolve.extensionAlias,
+      ".js": [".ts", ".tsx", ".js", ".jsx"],
     };
     return config;
   },

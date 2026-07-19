@@ -3,6 +3,7 @@
 import { ReactNode } from "react";
 import { DashboardSidebar } from "./DashboardSidebar";
 import { MobileDrawer } from "./MobileDrawer";
+import { InstallPWABanner } from "./InstallPWABanner";
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -38,6 +39,9 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
           {children}
         </div>
       </main>
+
+      {/* ── PWA Install Prompt ────────────────────────────────────────────────── */}
+      <InstallPWABanner />
     </div>
   );
 }

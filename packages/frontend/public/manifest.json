@@ -1,12 +1,16 @@
-﻿{
-  "name": "Very-prince – Stellar Payout Registry",
-  "short_name": "Very-prince",
-  "description": "A decentralized multi-organization payout registry built on Stellar Soroban.",
+{
+  "id": "/?source=pwa",
+  "name": "Very-Prince – Stellar Payout Registry",
+  "short_name": "Very-Prince",
+  "description": "A decentralized multi-organization payout registry built on Stellar Soroban. Track and claim contributor payouts transparently on-chain.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0a0e1a",
   "theme_color": "#6366f1",
   "orientation": "portrait-primary",
+  "prefer_related_applications": false,
+  "categories": ["finance", "productivity"],
   "icons": [
     {
       "src": "/icons/icon-192x192.png",
@@ -23,6 +27,65 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
+    },
+    {
+      "src": "/icons/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshots/screenshot-narrow.png",
+      "sizes": "390x844",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Very-Prince dashboard on mobile"
+    },
+    {
+      "src": "/screenshots/screenshot-wide.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Very-Prince dashboard on desktop"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Dashboard",
+      "short_name": "Dashboard",
+      "description": "View your payout dashboard",
+      "url": "/dashboard",
+      "icons": [
+        {
+          "src": "/icons/icon-192x192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Organizations",
+      "short_name": "Orgs",
+      "description": "Browse registered organizations",
+      "url": "/organizations",
+      "icons": [
+        {
+          "src": "/icons/icon-192x192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Payouts",
+      "short_name": "Payouts",
+      "description": "View and claim your payouts",
+      "url": "/payouts",
+      "icons": [
+        {
+          "src": "/icons/icon-192x192.png",
+          "sizes": "192x192"
+        }
+      ]
     }
   ]
 }

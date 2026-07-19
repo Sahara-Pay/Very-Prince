@@ -76,6 +76,10 @@ export default function RootLayout({
     <html lang="en" translate="no" suppressHydrationWarning className={`${inter.variable} ${jetbrainsMono.variable} notranslate`}>
       <head>
         <meta name="google" content="notranslate" />
+        {/* PWA — Apple/iOS meta tags for home screen install */}
+        <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         {/* Plausible — privacy-first analytics, no cookies, GDPR-compliant */}
         {plausibleDomain && (
           <Script

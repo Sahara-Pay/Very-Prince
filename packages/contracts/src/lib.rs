@@ -443,15 +443,7 @@ impl PayoutRegistry {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        let empty_list: Vec<Address> = Vec::new(&env);
-        env.storage()
-            .persistent()
-            .set(&DataKey::OrgMaintainers(id.clone()), &empty_list);
-        env.storage().persistent().extend_ttl(
-            &DataKey::OrgMaintainers(id.clone()),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        // OrgMaintainers entry will be created lazily when a maintainer is added.
 
         env.storage()
             .persistent()

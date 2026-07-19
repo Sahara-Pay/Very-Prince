@@ -113,6 +113,9 @@ mod tests {
         
         let result = client.try_fund_org(&org_sym, &donor, &10_000_000_000_000_000_001_i128);
         assert!(result.is_err());
+        // also ensure negative amount is rejected
+        let neg_result = client.try_fund_org(&org_sym, &donor, -10_i128);
+        assert!(neg_result.is_err());
     }
 
     #[test]

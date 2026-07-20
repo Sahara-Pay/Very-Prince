@@ -336,27 +336,3 @@ export interface FundingHistoryResponse {
   txHash: string;
   createdAt: string;
 }
-
-export interface TVLResponse {
-  /** Total Value Locked in USD. */
-  tvlUSD: string;
-  /** ISO timestamp of when this value was computed. */
-  lastUpdated: string;
-}
-
-export interface FundsRaisedResponse {
-  /** Total funds raised across all organisations, in stroops. */
-  totalFundsRaisedStroops: string;
-  /** Total funds raised expressed in whole XLM. */
-  totalFundsRaisedXlm: string;
-  /** Total number of individual funding transactions. */
-  totalFundingEvents: number;
-  /** Number of distinct organisations that received funds. */
-  distinctOrgsCount: number;
-  /** ISO timestamp of the earliest funding event included (if filtered). */
-  fromDate?: string;
-  /** ISO timestamp of the latest funding event included (if filtered). */
-  toDate?: string;
-  /** ISO timestamp of when this result was computed. */
-  cachedAt: string;
-}

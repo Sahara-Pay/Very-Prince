@@ -39,6 +39,7 @@ export function FundOrgModal({ orgId, onClose, onSuccess }: FundOrgModalProps) {
   const [isSuccess, setIsSuccess] = useState(false);
   const [progressStep, setProgressStep] = useState<"idle" | "building" | "signing" | "submitting" | "confirmed">("idle");
   const { fundOrg, isSubmitting, error } = useFundOrg({ onProgress: setProgressStep });
+  const shareText = `I just funded ${orgId} on PayoutRegistry! 🚀\n\n#Stellar #OpenSource`;
 
   // Balance detection for the smart FaucetBanner and display
   const [balanceStatus, setBalanceStatus] = useState<BalanceStatus>("loading");
@@ -165,7 +166,7 @@ export function FundOrgModal({ orgId, onClose, onSuccess }: FundOrgModalProps) {
               </p>
               <div className="flex w-full flex-col gap-3">
                 <a
-                  href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(`I just funded ${orgId} on PayoutRegistry! 🚀\n\n#Stellar #OpenSource`)}`}
+                  href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText)}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="Share funding on Twitter"

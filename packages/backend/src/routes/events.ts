@@ -1,7 +1,9 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { emitSSEEvent } from '../services/sse.ts';
-
-const sseConnections = new Set<any>();
+import {
+  addSSEConnection,
+  emitSSEEvent,
+  removeSSEConnection,
+} from '../services/sse.js';
 
 export { emitSSEEvent };
 
@@ -37,11 +39,11 @@ export const eventsRoutes: FastifyPluginAsync = async (fastify) => {
         'Access-Control-Allow-Headers': 'Cache-Control',
       });
 
-      sseConnections.add(reply.raw);
+      addSSEConnection(reply.raw);
       reply.raw.write('event: connected\ndata: ' + JSON.stringify({ timestamp: Date.now() }) + '\n\n');
 
       request.raw.on('close', () => {
-        sseConnections.delete(reply.raw);
+        removeSSEConnection(reply.raw);
       });
 
       const heartbeat = setInterval(() => {
@@ -49,7 +51,7 @@ export const eventsRoutes: FastifyPluginAsync = async (fastify) => {
           reply.raw.write('event: heartbeat\ndata: ' + JSON.stringify({ timestamp: Date.now() }) + '\n\n');
         } catch {
           clearInterval(heartbeat);
-          sseConnections.delete(reply.raw);
+          removeSSEConnection(reply.raw);
         }
       }, 30000);
 

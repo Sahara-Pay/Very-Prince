@@ -7,7 +7,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import useSWR from "swr";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { WalletButton } from "@/components/WalletButton";
 import { useSSEWithSWR } from "@/hooks/useSSE";
 import { useUnifiedWallet } from "@/hooks/useUnifiedWallet";
@@ -27,9 +27,11 @@ export default function PayoutsPage() {
   useSSEWithSWR();
 
   // Fetch pending payouts for the connected wallet
-  const { data: payouts, error, isLoading, mutate } = useSWR(
-    isConnected && publicKey ? [`/api/v1/contract/maintainer/${publicKey}`] : null,
-    async ([url]) => {
+  const { data: payouts, error, isLoading, refetch } = useQuery({
+    queryKey: ["payouts", publicKey],
+    enabled: isConnected && Boolean(publicKey),
+    queryFn: async () => {
+      const url = `/api/v1/contract/maintainer/${publicKey}`;
       const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"}${url}`);
       if (!response.ok) {
         throw new Error(`Failed to fetch payouts: ${response.statusText}`);
@@ -42,17 +44,54 @@ export default function PayoutsPage() {
         amountXlm: (Number(payout.amountStroops) / 10_000_000).toFixed(2),
       }));
     },
-    {
-      revalidateOnFocus: false,
-      revalidateOnReconnect: true,
-    }
-  );
+  });
+
+  const exportMutation = useMutation({
+    mutationFn: async (format: 'csv' | 'json') => {
+      if (!publicKey) return;
+      const baseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
+      const url = new URL(`/api/export/payouts/${publicKey}`, baseUrl);
+      url.searchParams.set('type', format);
+
+      const response = await fetch(url.toString());
+      if (!response.ok) {
+        throw new Error(`Export failed: ${response.statusText}`);
+      }
+
+      const contentDisposition = response.headers.get('Content-Disposition');
+      let filename = `payout-history-${publicKey}-${new Date().toISOString().split('T')[0]}.${format}`;
+
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+        if (filenameMatch && filenameMatch[1]) {
+          filename = filenameMatch[1];
+        }
+      }
+
+      return { blob: await response.blob(), filename };
+    },
+    onSuccess: (data) => {
+      if (!data) return;
+      const downloadUrl = window.URL.createObjectURL(data.blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = data.filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(downloadUrl);
+    },
+    onError: (error) => {
+      console.error("Export failed:", error);
+      alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    },
+  });
 
   const handleClaimPayout = async (orgId: string) => {
     try {
       await claimPayout(orgId);
       // Refresh the payouts list after successful claim
-      await mutate();
+      await refetch();
     } catch (error) {
       console.error("Failed to claim payout:", error);
     }
@@ -62,44 +101,9 @@ export default function PayoutsPage() {
     if (!publicKey) return;
     
     setIsExporting(true);
-    try {
-      const baseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
-      const url = new URL(`/api/export/payouts/${publicKey}`, baseUrl);
-      url.searchParams.set('type', format);
-      
-      const response = await fetch(url.toString());
-      if (!response.ok) {
-        throw new Error(`Export failed: ${response.statusText}`);
-      }
-      
-      // Get filename from Content-Disposition header or create default
-      const contentDisposition = response.headers.get('Content-Disposition');
-      let filename = `payout-history-${publicKey}-${new Date().toISOString().split('T')[0]}.${format}`;
-      
-      if (contentDisposition) {
-        const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
-        if (filenameMatch && filenameMatch[1]) {
-          filename = filenameMatch[1];
-        }
-      }
-      
-      // Create blob and download
-      const blob = await response.blob();
-      const downloadUrl = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(downloadUrl);
-      
-    } catch (error) {
-      console.error("Export failed:", error);
-      alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    } finally {
-      setIsExporting(false);
-    }
+    exportMutation.mutate(format, {
+      onSettled: () => setIsExporting(false),
+    });
   };
 
   if (!isConnected) {

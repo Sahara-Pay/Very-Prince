@@ -2,8 +2,8 @@
 #[cfg(test)]
 mod tests {
     use crate::{PayoutParams, PayoutRegistry, PayoutRegistryClient};
-    use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{symbol_short, token, Address, Env, IntoVal, String, Symbol, Vec};
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, IntoVal, String, Symbol, Vec};
 
     // ── Test Helpers ─────────────────────────────────────────────────────────
 
@@ -824,7 +824,6 @@ mod tests {
                     }
                 }
             }
-            }
         }
     }
 
@@ -879,5 +878,150 @@ mod tests {
         assert_eq!(maintainers.len(), 2);
         assert!(maintainers.contains(&m1));
         assert!(maintainers.contains(&m2));
+    }
+
+    // ── Reentrancy Attack Simulation ───────────────────────────────────────────
+    //
+    // A deliberately malicious token contract used to prove the reentrancy guard
+    // works. On `transfer` to the configured target (the claiming maintainer)
+    // it re-invokes the registry's `claim_payout`, simulating a contract that
+    // re-enters the registry on token receipt.
+
+    #[contract]
+    pub struct MaliciousToken;
+
+    #[contractimpl]
+    impl MaliciousToken {
+        /// Records the registry address and the "re-enter" target the registry
+        /// will be re-invoked against when this token delivers tokens to it.
+        pub fn init(env: Env, registry: Address, reenter_target: Address) {
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "reg"), &registry);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "tgt"), &reenter_target);
+        }
+
+        pub fn mint(env: Env, to: Address, amount: i128) {
+            to.require_auth();
+            let key = to.clone();
+            let bal: i128 = env.storage().instance().get(&key).unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&key, &(bal.checked_add(amount).unwrap()));
+        }
+
+        pub fn balance(env: Env, id: Address) -> i128 {
+            env.storage().instance().get(&id).unwrap_or(0)
+        }
+
+        pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+            from.require_auth();
+
+            let from_key = from.clone();
+            let fb: i128 = env.storage().instance().get(&from_key).unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&from_key, &(fb.checked_sub(amount).unwrap()));
+
+            let to_key = to.clone();
+            let tb: i128 = env.storage().instance().get(&to_key).unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&to_key, &(tb.checked_add(amount).unwrap()));
+
+            // Re-enter the registry when delivering tokens to the target.
+            let target: Option<Address> = env.storage().instance().get(&Symbol::new(&env, "tgt"));
+            let registry: Option<Address> = env.storage().instance().get(&Symbol::new(&env, "reg"));
+            if let (Some(target), Some(registry)) = (target, registry) {
+                if to == target {
+                    let client = crate::PayoutRegistryClient::new(&env, &registry);
+                    client.claim_payout(&target);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_reentrancy_guard_blocks_reentrant_claim() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Register the malicious token and configure it to re-enter the
+        // registry whenever it delivers tokens to the claiming maintainer.
+        let token_id = env.register_contract(None, MaliciousToken);
+        let token_client = MaliciousTokenClient::new(&env, &token_id);
+
+        let contract_id = env.register_contract(None, PayoutRegistry);
+        let client = PayoutRegistryClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let mut admins = Vec::new(&env);
+        admins.push_back(admin1.clone());
+        client.init(&token_id, &admins, &1);
+
+        let maintainer = Address::generate(&env);
+        token_client.init(&contract_id, &maintainer);
+
+        let org_sym = symbol_short!("reorg");
+        client.register_org(&org_sym, &String::from_str(&env, "Re Org"), &admin1);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        let donor = Address::generate(&env);
+        token_client.mint(&donor, &20_000_000);
+        client.fund_org(&org_sym, &donor, &20_000_000);
+        client.allocate_payout(&org_sym, &admin1, &maintainer, &5_000_000_i128, &0_u64);
+
+        assert_eq!(client.get_claimable_balance(&maintainer), 5_000_000);
+        assert_eq!(token_client.balance(&maintainer), 0);
+
+        // Claiming transfers tokens through the malicious token, which re-enters
+        // `claim_payout`. The reentrancy guard must reject the re-entrant call
+        // and abort the whole transaction.
+        let result = client.try_claim_payout(&maintainer);
+        assert!(result.is_err());
+
+        // The aborted transaction leaves state untouched.
+        assert_eq!(client.get_claimable_balance(&maintainer), 5_000_000);
+        assert_eq!(token_client.balance(&maintainer), 0);
+    }
+
+    #[test]
+    fn test_reentrancy_guard_allows_sequential_calls() {
+        // Guards are released at the end of every call, so unrelated
+        // state-mutating operations must not falsely block each other.
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("seqorg");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let m1 = Address::generate(&env);
+        let m2 = Address::generate(&env);
+        client.add_maintainer(&org_sym, &m1);
+        client.add_maintainer(&org_sym, &m2);
+
+        let donor = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+        token.mint(&donor, &40_000_000);
+
+        // Fund, allocate, and claim for m1 — then do the same for m2. Every
+        // guarded call must succeed because the guard is released each time.
+        client.fund_org(&org_sym, &donor, &40_000_000);
+
+        client.allocate_payout(&org_sym, &admin, &m1, &10_000_000_i128, &0_u64);
+        let claimed1 = client.claim_payout(&m1);
+        assert_eq!(claimed1, 10_000_000);
+        assert_eq!(token_client.balance(&m1), 10_000_000);
+
+        client.allocate_payout(&org_sym, &admin, &m2, &10_000_000_i128, &0_u64);
+        let claimed2 = client.claim_payout(&m2);
+        assert_eq!(claimed2, 10_000_000);
+        assert_eq!(token_client.balance(&m2), 10_000_000);
+
+        // Each claim reset the claimable balance to 0.
+        assert_eq!(client.get_claimable_balance(&m1), 0);
+        assert_eq!(client.get_claimable_balance(&m2), 0);
     }
 }

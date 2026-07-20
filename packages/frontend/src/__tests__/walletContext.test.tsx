@@ -1,4 +1,4 @@
-// packages/frontend/src/__tests__/walletContext.test.ts
+// packages/frontend/src/__tests__/walletContext.test.tsx
 import { renderHook, act } from '@testing-library/react-hooks';
 import { WalletProvider, useWallet } from '../contexts/WalletContext';
 import freighterApi from '@stellar/freighter-api';

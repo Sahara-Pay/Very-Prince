@@ -89,6 +89,7 @@ import {
 } from "../utils/horizonFallback.js";
 import { decodeI128ToBigInt, stroopsToXlm } from "../utils/xdrDecoder.js";
 import { getSorobanRpcClient } from "./sorobanRpcService.js";
+import { logger } from "../utils/logger.js";
 import type { AccountInfo, ContractCallResult, PayoutEvent, ProfileStats } from "@very-prince/types";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -146,9 +147,9 @@ export class StellarService {
     return withRetry(fn, {
       onRetry: (_, attempt) => {
         if (attempt >= 3) {
-          console.error(`[CRITICAL] High-priority: Rate limit backoff exceeded 3 times! (Attempt ${attempt})`);
+          logger.error({ attempt }, "[Stellar] CRITICAL: Rate limit backoff exceeded 3 times");
         } else {
-          console.warn(`[Stellar] Rate limited. Retrying... (Attempt ${attempt})`);
+          logger.warn({ attempt }, "[Stellar] Rate limited, retrying");
         }
       }
     });
@@ -177,13 +178,14 @@ export class StellarService {
         throw rpcError;
       }
 
-      console.warn(
-        `[Stellar] Soroban RPC failed, attempting Horizon fallback: ${(rpcError as Error).message}`
+      logger.warn(
+        { err: (rpcError as Error).message },
+        "[Stellar] Soroban RPC failed, attempting Horizon fallback"
       );
 
       const fallbackResult = await fallbackFn(this.fallback);
       if (fallbackResult.ok) {
-        console.info("[Stellar] Horizon fallback succeeded");
+        logger.info("[Stellar] Horizon fallback succeeded");
         return fallbackResult.value;
       }
 
@@ -453,7 +455,7 @@ export class StellarService {
         timestamp: new Date().toISOString(),
       };
     } catch (error) {
-      console.error('Error fetching contract state:', error);
+      logger.error({ err: error, contractId }, "Error fetching contract state");
       throw error;
     }
   }
@@ -868,7 +870,7 @@ export class StellarService {
       } catch (rpcError) {
         // If RPC fails and we have a fallback, try Horizon
         if (this.fallback && isFallbackEligibleError(rpcError)) {
-          console.warn("[Stellar] RPC getTransaction failed, trying Horizon fallback");
+          logger.warn({ hash }, "[Stellar] RPC getTransaction failed, trying Horizon fallback");
           const fallbackResult = await this.fallback.getTransaction(hash);
           if (fallbackResult.ok) {
             // Horizon doesn't provide Soroban return values, but it can confirm success

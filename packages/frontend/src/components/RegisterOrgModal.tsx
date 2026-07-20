@@ -6,6 +6,7 @@
 "use client";
 
 import { useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { registerOrganization } from "@/lib/api";
 import { useFreighter } from "@/hooks/useFreighter";
 import { GlassPanel } from "@/components/GlassPanel";
@@ -21,8 +22,17 @@ export function RegisterOrgModal({ onClose, onSuccess }: RegisterOrgModalProps) 
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [signerSecret, setSignerSecret] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const registerMutation = useMutation({
+    mutationFn: () => registerOrganization(id, name, publicKey!, signerSecret),
+    onSuccess,
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Registration failed.");
+    },
+  });
+
+  const isSubmitting = registerMutation.isPending;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -47,17 +57,8 @@ export function RegisterOrgModal({ onClose, onSuccess }: RegisterOrgModalProps) 
       return;
     }
 
-    setIsSubmitting(true);
     setError(null);
-
-    try {
-      await registerOrganization(id, name, publicKey, signerSecret);
-      onSuccess();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Registration failed.");
-    } finally {
-      setIsSubmitting(false);
-    }
+    registerMutation.mutate();
   };
 
   return (

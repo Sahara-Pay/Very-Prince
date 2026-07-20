@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { useUnifiedWallet } from "../hooks/useUnifiedWallet";
 import toast from "react-hot-toast";
 
@@ -35,13 +36,11 @@ const defaultDictionary = {
 export function EmailPreferences({ dictionary = defaultDictionary }: EmailPreferencesProps) {
   const { publicKey, signAuthMessage } = useUnifiedWallet();
   const [email, setEmail] = useState("");
-  const [isSaving, setIsSaving] = useState(false);
 
-  const handleSave = async () => {
-    if (!publicKey || !email) return;
-    
-    setIsSaving(true);
-    try {
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      if (!publicKey || !email) return;
+
       const message = `Opt-in to Very-prince notifications for wallet: ${publicKey}\nTimestamp: ${Date.now()}`;
       const signature = await signAuthMessage(message);
 
@@ -57,20 +56,19 @@ export function EmailPreferences({ dictionary = defaultDictionary }: EmailPrefer
       });
 
       if (!response.ok) throw new Error("Failed to save");
-
+    },
+    onSuccess: () => {
       toast.success(dictionary.opted_in);
-    } catch (error) {
+    },
+    onError: () => {
       toast.error("Failed to verify ownership or save email.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
+    },
+  });
 
-  const handleDelete = async () => {
-    if (!publicKey || !confirm("Are you sure? This will permanently delete your email from our records.")) return;
-    
-    setIsSaving(true);
-    try {
+  const deleteMutation = useMutation({
+    mutationFn: async () => {
+      if (!publicKey) return;
+
       const message = `Delete my email notification data for wallet: ${publicKey}\nTimestamp: ${Date.now()}`;
       const signature = await signAuthMessage(message);
 
@@ -85,13 +83,26 @@ export function EmailPreferences({ dictionary = defaultDictionary }: EmailPrefer
       });
 
       if (!response.ok) throw new Error("Failed to delete");
+    },
+    onSuccess: () => {
       setEmail("");
       toast.success("Data deleted successfully.");
-    } catch (error) {
+    },
+    onError: () => {
       toast.error("Failed to delete data.");
-    } finally {
-      setIsSaving(false);
-    }
+    },
+  });
+
+  const isSaving = saveMutation.isPending || deleteMutation.isPending;
+
+  const handleSave = async () => {
+    if (!publicKey || !email) return;
+    saveMutation.mutate();
+  };
+
+  const handleDelete = async () => {
+    if (!publicKey || !confirm("Are you sure? This will permanently delete your email from our records.")) return;
+    deleteMutation.mutate();
   };
 
   return (

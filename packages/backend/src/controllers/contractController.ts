@@ -7,7 +7,7 @@ import { stellarService } from "../services/stellarService.js";
 import type {
   OrgResponse,
   MaintainersResponse,
-  BalanceResponse,
+  MaintainerBalanceResponse,
   BudgetResponse,
   FundResponse,
   PayoutResponse,
@@ -47,10 +47,12 @@ export const contractController = {
 
     return {
       success: result.success,
-      transactionHash: result.transactionHash,
       orgId: id,
       donor: admin,
       amountStroops: "0",
+      ...(result.transactionHash !== undefined
+        ? { transactionHash: result.transactionHash }
+        : {}),
     };
   },
 
@@ -103,7 +105,7 @@ export const contractController = {
    */
   async getClaimableBalance(
     maintainerAddress: string,
-  ): Promise<BalanceResponse> {
+  ): Promise<MaintainerBalanceResponse> {
     return payoutService.getClaimableBalance(maintainerAddress);
   },
 
@@ -124,10 +126,12 @@ export const contractController = {
     );
     return {
       success: result.success,
-      transactionHash: result.transactionHash,
       orgId,
       donor: fromAddress,
       amountStroops,
+      ...(result.transactionHash !== undefined
+        ? { transactionHash: result.transactionHash }
+        : {}),
     };
   },
 
@@ -148,10 +152,12 @@ export const contractController = {
     );
     return {
       success: result.success,
-      transactionHash: result.transactionHash,
       orgId,
       maintainer: maintainerAddress,
       amountStroops,
+      ...(result.transactionHash !== undefined
+        ? { transactionHash: result.transactionHash }
+        : {}),
     };
   },
 
@@ -178,7 +184,9 @@ export const contractController = {
     const result = await stellarService.submitTransaction(signedTransaction);
     return {
       success: result.success,
-      transactionHash: result.transactionHash,
+      ...(result.transactionHash !== undefined
+        ? { transactionHash: result.transactionHash }
+        : {}),
     };
   },
 } as const;

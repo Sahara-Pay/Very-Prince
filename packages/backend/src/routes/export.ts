@@ -15,7 +15,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import csv from "fast-csv";
-import { prisma } from "../services/db.ts";
+import { prisma } from "../services/db.js";
 import type { ExportRecord } from "@very-prince/types";
 
 const ExportQuerySchema = z.object({

@@ -112,6 +112,10 @@ pub enum PrinceError {
     NotPendingAdmin = 26,
     /// The amount provided exceeds the maximum allowed limit.
     AmountExceedsLimit = 27,
+    /// A re-entrant call was detected. State-mutating functions acquire a
+    /// global mutex on entry; this is raised if the contract is re-entered
+    /// before the original call returns (e.g. via a malicious token transfer).
+    Reentrancy = 28,
 }
 
 #[contracttype]
@@ -131,6 +135,9 @@ pub enum DataKey {
     ProtocolState,
     /// Pending admin address proposed via propose_admin (two-step transfer).
     PendingAdmin,
+    /// Reentrancy mutex flag (stored in instance storage). Set while a
+    /// state-mutating function is executing to reject re-entrant calls.
+    ReentrancyLock,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +157,55 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
 /// Maximum allowed amount for funding or payout (1 trillion tokens in stroops).
 const MAX_AMOUNT_LIMIT: i128 = 10_000_000_000_000_000_000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reentrancy Guard
+//
+// Soroban executes cross-contract calls synchronously. `fund_org` and
+// `claim_payout` invoke the token contract, and a malicious/compromised token
+// (or any maintainer that is itself a contract receiving a transfer) can
+// re-enter this contract before the original call returns. Every
+// state-mutating entry point serialises on a single global mutex held in
+// instance storage:
+//
+//   * `acquire` — sets the flag; panics with `Reentrancy` if it is already set.
+//   * `Drop`    — clears the flag when the guarded call returns or unwinds.
+//
+// Soroban transactions are atomic, so a call that panics reverts the flag write
+// along with everything else; the guard can therefore never dead-lock the
+// contract. Combined with the existing Check-Effects-Interactions ordering
+// (state updated before any token transfer), this makes double-spend or
+// state-corruption through reentrancy structurally unreachable.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct ReentrancyGuard<'a> {
+    env: &'a Env,
+    held: bool,
+}
+
+impl<'a> ReentrancyGuard<'a> {
+    /// Acquire the global mutex. Panics with `Reentrancy` if it is already held.
+    fn acquire(env: &'a Env) -> Self {
+        if env.storage().instance().has(&DataKey::ReentrancyLock) {
+            panic_with_error!(env, PrinceError::Reentrancy);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::ReentrancyLock, &true);
+        ReentrancyGuard { env, held: true }
+    }
+}
+
+impl<'a> Drop for ReentrancyGuard<'a> {
+    fn drop(&mut self) {
+        if self.held {
+            self.env
+                .storage()
+                .instance()
+                .remove(&DataKey::ReentrancyLock);
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Technical Design Notes: Soroban Storage Model
@@ -192,6 +248,7 @@ impl PayoutRegistry {
     /// * `EmptyAdminList` - If the provided list of administrators is empty.
     /// * `InvalidThreshold` - If the multisig threshold is 0 or greater than the number of administrators.
     pub fn init(env: Env, token: Address, admins: Vec<Address>, threshold: u32) {
+        let _guard = ReentrancyGuard::acquire(&env);
         if env.storage().persistent().has(&DataKey::Token) {
             panic_with_error!(&env, PrinceError::AlreadyInitialized);
         }
@@ -352,6 +409,7 @@ impl PayoutRegistry {
     /// # Panics
     /// * `OrgAlreadyRegistered` - If an organization with this ID already exists.
     pub fn register_org(env: Env, id: Symbol, name: String, admin: Address) {
+        let _guard = ReentrancyGuard::acquire(&env);
         admin.require_auth();
 
         let org_key = DataKey::Organization(id.clone());
@@ -436,6 +494,7 @@ impl PayoutRegistry {
     /// Update the IPFS CID for an organization's metadata (Logo/Description).
     /// Requires authorization from the specified organization admin.
     pub fn update_org_metadata(env: Env, id: Symbol, admin: Address, metadata_cid: String) {
+        let _guard = ReentrancyGuard::acquire(&env);
         admin.require_auth();
 
         let org_key = DataKey::Organization(id.clone());
@@ -490,6 +549,7 @@ impl PayoutRegistry {
     /// * `OrgNotFound` - If the organization is not registered.
     /// * `BudgetOverflow` - If the added amount causes the budget to overflow.
     pub fn fund_org(env: Env, org_id: Symbol, from: Address, amount: i128) {
+        let _guard = ReentrancyGuard::acquire(&env);
         Self::assert_active(&env);
 
         // Strict authorization: bind the signature to the exact parameters
@@ -552,6 +612,7 @@ impl PayoutRegistry {
     /// * `MaxAdminLimitReached` - If the organization already has 10 administrators.
     /// * `AdminAlreadyExists` - If `new_admin` is already an administrator of this organization.
     pub fn add_admin(env: Env, org_id: Symbol, admin: Address, new_admin: Address) {
+        let _guard = ReentrancyGuard::acquire(&env);
         admin.require_auth();
         let mut org = Self::get_org(env.clone(), org_id.clone());
 
@@ -602,6 +663,7 @@ impl PayoutRegistry {
     /// * `CannotRemoveLastAdmin` - If the organization has only 1 administrator left.
     /// * `NotAnAdmin` - If `admin_to_remove` is not an administrator of this organization.
     pub fn remove_admin(env: Env, org_id: Symbol, admin: Address, admin_to_remove: Address) {
+        let _guard = ReentrancyGuard::acquire(&env);
         admin.require_auth();
         let mut org = Self::get_org(env.clone(), org_id.clone());
 
@@ -678,6 +740,7 @@ impl PayoutRegistry {
     /// * `OrgNotFound` - If the organization does not exist.
     /// * `MaintainerAlreadyRegistered` - If the maintainer address is already registered.
     pub fn add_maintainer(env: Env, org_id: Symbol, maintainer: Address) {
+        let _guard = ReentrancyGuard::acquire(&env);
         let admin: Address = env
             .storage()
             .persistent()
@@ -813,6 +876,7 @@ impl PayoutRegistry {
         amount: i128,
         unlock_timestamp: u64,
     ) {
+        let _guard = ReentrancyGuard::acquire(&env);
         Self::assert_active(&env);
         let org = Self::get_org(env.clone(), org_id.clone());
 
@@ -902,6 +966,7 @@ impl PayoutRegistry {
     /// The total sum of all payouts must not exceed the organization's current budget.
     /// Maximum batch size is 100 entries to stay within Soroban CPU/instruction limits.
     pub fn batch_allocate(env: Env, admin: Address, org_id: Symbol, payouts: Vec<PayoutParams>) {
+        let _guard = ReentrancyGuard::acquire(&env);
         // Require admin auth once for the entire batch
         admin.require_auth();
 
@@ -1035,6 +1100,7 @@ impl PayoutRegistry {
     /// * `NoClaimableBalance` - If the maintainer's claimable balance is zero.
     /// * `PayoutLocked` - If the current ledger timestamp is less than the payout's unlock timestamp.
     pub fn claim_payout(env: Env, maintainer: Address) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
         Self::assert_active(&env);
 
         // Strict authorization: ensure the maintainer is the one claiming
@@ -1103,6 +1169,7 @@ impl PayoutRegistry {
     /// # Arguments
     /// * `env` - The contract environment
     pub fn pause_protocol(env: Env, signers: Vec<Address>) {
+        let _guard = ReentrancyGuard::acquire(&env);
         // Verify multisig authorization
         Self::verify_multisig_auth(&env, &signers);
 
@@ -1133,6 +1200,7 @@ impl PayoutRegistry {
     /// # Arguments
     /// * `env` - The contract environment
     pub fn unpause_protocol(env: Env, signers: Vec<Address>) {
+        let _guard = ReentrancyGuard::acquire(&env);
         // Verify multisig authorization
         Self::verify_multisig_auth(&env, &signers);
 
@@ -1169,6 +1237,7 @@ impl PayoutRegistry {
     /// # Panics
     /// * If multisig authorization is insufficient.
     pub fn propose_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
+        let _guard = ReentrancyGuard::acquire(&env);
         Self::verify_multisig_auth(&env, &signers);
         env.storage()
             .persistent()
@@ -1191,6 +1260,7 @@ impl PayoutRegistry {
     /// * If there is no pending admin proposal.
     /// * If the caller is not the pending admin.
     pub fn accept_admin(env: Env, new_admin: Address) {
+        let _guard = ReentrancyGuard::acquire(&env);
         new_admin.require_auth();
         let pending: Address = env
             .storage()
@@ -1237,6 +1307,7 @@ impl PayoutRegistry {
     /// * If insufficient multisig signatures are provided
     /// * If the WASM hash is invalid
     pub fn upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
+        let _guard = ReentrancyGuard::acquire(&env);
         // Verify multisig authorization
         Self::verify_multisig_auth(&env, &signers);
 

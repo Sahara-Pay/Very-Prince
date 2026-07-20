@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
-import useSWR from "swr";
+import { useQuery } from "@tanstack/react-query";
 import { RegisterOrgModal } from "@/components/RegisterOrgModal";
 import { GlassButton } from "@/components/GlassButton";
 import type { Org } from "@/lib/api";
@@ -32,8 +32,7 @@ export default function DashboardOrganizationsPage() {
     return () => clearTimeout(timer);
   }, [searchTerm]);
 
-  // SWR fetcher function
-  const fetcher = async ([url]: [string]) => {
+  const fetchOrganizationsPage = async (url: string) => {
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`Failed to fetch organizations: ${response.statusText}`);
@@ -53,8 +52,9 @@ export default function DashboardOrganizationsPage() {
     return `${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"}/api/v1/organizations/paginate?${params.toString()}`;
   }, [debouncedSearch, page]);
 
-  const { data, error, isLoading } = useSWR([apiUrl], fetcher, {
-    revalidateOnFocus: false,
+  const { data, error, isLoading } = useQuery({
+    queryKey: ["organizations", "dashboard", page, debouncedSearch],
+    queryFn: () => fetchOrganizationsPage(apiUrl),
   });
 
   return (

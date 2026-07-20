@@ -43,6 +43,22 @@ const pwaConfig = withPWA({
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // Vercel's edge network optimizes and caches images automatically once
+  // `images` is configured — this keeps optimization off the Node server.
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "**.veryprince.com",
+      },
+      {
+        protocol: "https",
+        hostname: "res.cloudinary.com",
+      },
+    ],
+    formats: ["image/avif", "image/webp"],
+  },
+
   // Expose network config to the browser bundle.
   env: {
     NEXT_PUBLIC_HORIZON_URL:

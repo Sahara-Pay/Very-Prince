@@ -10,3 +10,18 @@ project_name             = "very-prince"
 environment              = "shared"
 state_bucket_name        = "very-prince-terraform-state"
 dynamodb_lock_table_name = "very-prince-terraform-locks"
+
+# ──── Monitoring & ECS Variables ──────────────────────────────────────────────
+# Uncomment and customize these for your deployment:
+# alert_email_addresses  = ["ops@example.com"]
+# cpu_threshold_pct      = 80
+# memory_threshold_pct   = 80
+# log_retention_days      = 30
+# service_name            = "very-prince-backend"
+# task_cpu                = 512
+# task_memory             = 1024
+# desired_count           = 2
+# private_subnet_ids      = ["subnet-abc123", "subnet-def456"]
+# service_sg_id           = "sg-xyz789"
+# image_uri               = "ghcr.io/your-org/very-prince-backend:latest"
+# target_group_arn        = ""

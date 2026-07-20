@@ -22,7 +22,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 4.0"
     }
   }
 }
@@ -91,5 +91,90 @@ resource "aws_dynamodb_table" "terraform_locks" {
 
   server_side_encryption {
     enabled = true
+  }
+}
+
+# ──── Module Compositions ─────────────────────────────────────────────────────
+
+module "ecs_cluster" {
+  source = "./modules/ecs-cluster"
+  name   = var.project_name
+
+  tags = {
+    Project     = var.project_name
+    Environment = var.environment
+  }
+}
+
+module "cloudwatch_logs" {
+  source         = "./modules/cloudwatch-logs"
+  name           = var.service_name
+  retention_days = var.log_retention_days
+
+  tags = {
+    Project     = var.project_name
+    Environment = var.environment
+  }
+}
+
+module "sns_topics" {
+  source          = "./modules/sns-topics"
+  name            = "${var.project_name}-${var.environment}-critical-alerts"
+  email_addresses = var.alert_email_addresses
+
+  tags = {
+    Project     = var.project_name
+    Environment = var.environment
+  }
+}
+
+module "ecs_service" {
+  source             = "./modules/ecs-service"
+  name               = var.service_name
+  cluster_id         = module.ecs_cluster.cluster_id
+  cluster_name       = module.ecs_cluster.cluster_name
+  log_group_name     = module.cloudwatch_logs.log_group_name
+  image_uri          = var.image_uri
+  task_cpu           = var.task_cpu
+  task_memory        = var.task_memory
+  desired_count      = var.desired_count
+  private_subnet_ids = var.private_subnet_ids
+  service_sg_id      = var.service_sg_id
+  target_group_arn   = var.target_group_arn
+  aws_region         = var.aws_region
+
+  tags = {
+    Project     = var.project_name
+    Environment = var.environment
+  }
+}
+
+module "cloudwatch_alarms" {
+  source               = "./modules/cloudwatch-alarms"
+  cluster_name         = module.ecs_cluster.cluster_name
+  service_name         = module.ecs_service.service_name
+  sns_topic_arn        = module.sns_topics.topic_arn
+  cpu_threshold_pct    = var.cpu_threshold_pct
+  memory_threshold_pct = var.memory_threshold_pct
+  evaluation_periods   = 2
+  period_seconds       = 60
+
+  tags = {
+    Project     = var.project_name
+    Environment = var.environment
+  }
+}
+
+module "cloudwatch_dashboard" {
+  source         = "./modules/cloudwatch-dashboard"
+  dashboard_name = "${var.project_name}-${var.environment}-${var.service_name}"
+  cluster_name   = module.ecs_cluster.cluster_name
+  service_name   = module.ecs_service.service_name
+  log_group_name = module.cloudwatch_logs.log_group_name
+  region         = var.aws_region
+
+  tags = {
+    Project     = var.project_name
+    Environment = var.environment
   }
 }

@@ -45,3 +45,21 @@ coverage/
 identity.json
 
 AGENTS.md
+
+# ─── Terraform ───────────────────────────────────────────────────────────────
+# Working directory containing downloaded providers and modules
+.terraform/
+
+# Local state files (state lives in the S3 backend once bootstrapped)
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+terraform.tfvars.json
+# Exception: keep example var files in version control
+!*.tfvars.example
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Note: .terraform.lock.hcl is intentionally tracked for reproducibility.

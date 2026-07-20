@@ -1,0 +1,12 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Example Terraform variable values
+# Copy this file to `terraform.tfvars` and customize the values before running
+# `terraform apply`. Do NOT commit `terraform.tfvars` if it contains sensitive
+# values.
+# ─────────────────────────────────────────────────────────────────────────────
+
+aws_region               = "us-east-1"
+project_name             = "very-prince"
+environment              = "shared"
+state_bucket_name        = "very-prince-terraform-state"
+dynamodb_lock_table_name = "very-prince-terraform-locks"

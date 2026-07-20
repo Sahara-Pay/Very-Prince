@@ -1,21 +1,25 @@
 // packages/frontend/src/__tests__/walletContext.test.tsx
-import { renderHook, act } from '@testing-library/react-hooks';
+import { renderHook, act } from '@testing-library/react';
 import { WalletProvider, useWallet } from '../contexts/WalletContext';
 import freighterApi from '@stellar/freighter-api';
+import { vi, describe, test, expect, beforeEach } from 'vitest';
+import React from 'react';
 
-jest.mock('@stellar/freighter-api', () => ({
-  isConnected: jest.fn(),
-  getPublicKey: jest.fn(),
-  getNetwork: jest.fn(),
+vi.mock('@stellar/freighter-api', () => ({
+  default: {
+    isConnected: vi.fn(),
+    getPublicKey: vi.fn(),
+    getNetwork: vi.fn(),
+  }
 }));
 
-const mockIsConnected = freighterApi.isConnected as jest.Mock;
-const mockGetPublicKey = freighterApi.getPublicKey as jest.Mock;
-const mockGetNetwork = freighterApi.getNetwork as jest.Mock;
+const mockIsConnected = freighterApi.isConnected as any;
+const mockGetPublicKey = freighterApi.getPublicKey as any;
+const mockGetNetwork = freighterApi.getNetwork as any;
 
 describe('WalletContext network validation', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   test('connectWallet throws when not on testnet', async () => {

@@ -21,7 +21,8 @@ import {
   isAllowed,
   setAllowed,
 } from "@stellar/freighter-api";
-import toast from "react-hot-toast";
+import { toast } from "sonner";
+import { toastTransaction } from "../lib/transactionToast";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -339,13 +340,12 @@ export function useUnifiedWallet(): UnifiedWalletState & WalletActions {
 
         const result = await submitResponse.json();
 
-        toast.success(`Successfully claimed payout! Transaction: ${result.transactionHash}`);
+        toastTransaction.success("Successfully claimed payout!", result.transactionHash);
         return result;
 
       } catch (error) {
         console.error('Error claiming payout:', error);
-        const message = error instanceof Error ? error.message : 'Failed to claim payout';
-        toast.error(message);
+        toastTransaction.error(error, 'Failed to claim payout');
         throw error;
       } finally {
         setState(prev => ({ ...prev, isSigning: false }));

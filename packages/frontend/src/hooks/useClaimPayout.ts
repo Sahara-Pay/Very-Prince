@@ -4,7 +4,8 @@
  */
 
 import { useState } from 'react';
-import toast from 'react-hot-toast';
+import { toast } from 'sonner';
+import { toastTransaction } from '../lib/transactionToast';
 
 export function useClaimPayout() {
   const [isClaiming, setIsClaiming] = useState(false);
@@ -66,12 +67,12 @@ export function useClaimPayout() {
 
       const result = await submitResponse.json();
 
-      toast.success(`Successfully claimed payout! Transaction: ${result.transactionHash}`);
+      toastTransaction.success('Successfully claimed payout!', result.transactionHash);
       return result;
 
     } catch (error) {
       console.error('Error claiming payout:', error);
-      toast.error(error instanceof Error ? error.message : 'Failed to claim payout');
+      toastTransaction.error(error, 'Failed to claim payout');
       throw error;
     } finally {
       setIsClaiming(false);

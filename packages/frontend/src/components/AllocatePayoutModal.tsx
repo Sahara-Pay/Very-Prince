@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { useFreighter } from "@/hooks/useFreighter";
 import { buildAllocatePayoutTransaction, submitSignedTransaction } from "@/lib/sorobanClient";
-import { toast } from "sonner";
+import { toastTransaction } from "@/lib/transactionToast";
 
 interface AllocatePayoutModalProps {
   orgId: string;
@@ -47,10 +47,10 @@ export function AllocatePayoutModal({ orgId, onClose, onSuccess }: AllocatePayou
 
       // 4. Submit to blockchain (background)
       await submitSignedTransaction(signedXdr);
-      toast.success("Allocation confirmed on-chain!");
+      toastTransaction.success("Allocation confirmed on-chain!");
     } catch (err) {
       console.error(err);
-      toast.error(err instanceof Error ? err.message : "Allocation failed");
+      toastTransaction.error(err, "Allocation failed");
       setIsSubmitting(false);
     }
   };

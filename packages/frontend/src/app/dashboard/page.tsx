@@ -434,7 +434,7 @@ function DashboardPageInner() {
 
 export default function DashboardPage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense fallback={<DashboardLoading />}>
       <DashboardPageInner />
     </Suspense>
   );

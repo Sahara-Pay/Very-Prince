@@ -10,7 +10,7 @@
 
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import { signInWithStellar, storeAuthToken, removeAuthToken, getAuthToken, AuthResponse } from '@/lib/authService';
 
 // ── Type Definitions ───────────────────────────────────────────────────────
@@ -152,13 +152,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // ── Context Value ─────────────────────────────────────────────────────────
 
-  const contextValue: AuthContextType = {
-    ...authState,
-    signIn,
-    signOut,
-    checkAuth,
-  };
-
+  const contextValue: AuthContextType = useMemo(
+    () => ({
+      ...authState,
+      signIn,
+      signOut,
+      checkAuth,
+    }),
+    [authState, signIn, signOut, checkAuth]
+  );
   return (
     <AuthContext.Provider value={contextValue}>
       {children}

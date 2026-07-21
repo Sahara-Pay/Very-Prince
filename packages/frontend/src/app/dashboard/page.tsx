@@ -9,9 +9,17 @@ import { useState, useEffect, useCallback, Suspense, useOptimistic, useTransitio
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { WalletButton } from "@/components/WalletButton";
+import dynamic from "next/dynamic";
 import { PayoutCard } from "@/components/PayoutCard";
-import { FundOrgModal } from "@/components/FundOrgModal";
-import { AllocatePayoutModal } from "@/components/AllocatePayoutModal";
+
+const FundOrgModal = dynamic(
+  () => import("@/components/FundOrgModal").then((mod) => mod.FundOrgModal),
+  { ssr: false }
+);
+const AllocatePayoutModal = dynamic(
+  () => import("@/components/AllocatePayoutModal").then((mod) => mod.AllocatePayoutModal),
+  { ssr: false }
+);
 import { EmptyMaintainersState } from "@/components/EmptyMaintainersState";
 import { WebhookSettings } from "@/components/WebhookSettings";
 import { ApiKeySettings } from "@/components/ApiKeySettings";

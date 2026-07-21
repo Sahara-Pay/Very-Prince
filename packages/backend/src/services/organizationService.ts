@@ -1,10 +1,10 @@
 import { organizationRepository } from "../repositories/OrganizationRepository.js";
 import { stellarService } from "../services/stellarService.js";
 import { redis } from "../services/cache.js";
-import type { PaginatedOrgsResponse } from "@very-prince/types";
+import type { PaginatedOrgsResponse, CursorPaginatedOrgsResponse } from "@very-prince/types";
 import { ipfsService } from "./ipfsService.js";
 
-export type { PaginatedOrgsResponse };
+export type { PaginatedOrgsResponse, CursorPaginatedOrgsResponse };
 
 export class OrganizationService {
   async getOrganizations(page: number, limit: number, search?: string): Promise<PaginatedOrgsResponse> {
@@ -59,6 +59,66 @@ export class OrganizationService {
 
     // 4. Cache the first page for 5 minutes
     if (page === 1) {
+      await redis.set(cacheKey, JSON.stringify(response), "EX", 300);
+    }
+
+    return response;
+  }
+
+  async getOrganizationsCursor(
+    cursor: string | undefined,
+    limit: number,
+    search?: string
+  ): Promise<CursorPaginatedOrgsResponse> {
+    const cacheKey = `orgs:cursor:${cursor || ''}:limit:${limit}:search:${search || ''}`;
+
+    if (!cursor) {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        return JSON.parse(cached);
+      }
+    }
+
+    const [repoResult, totalCount] = await Promise.all([
+      organizationRepository.findManyCursor(cursor, limit, search),
+      organizationRepository.count(search),
+    ]);
+
+    const data = await Promise.all(
+      repoResult.data.map(async (org) => {
+        try {
+          const budget = await stellarService.readOrgBudget(org.id);
+          return {
+            id: org.id,
+            name: org.name,
+            admin: org.admin,
+            publicBudget: budget.toString(),
+          };
+        } catch {
+          return {
+            id: org.id,
+            name: org.name,
+            admin: org.admin,
+          };
+        }
+      })
+    );
+
+    const startCursor = data.length > 0 ? OrganizationRepository.encodeCursor(repoResult.data[0]) : undefined;
+    const endCursor = data.length > 0 ? OrganizationRepository.encodeCursor(repoResult.data[data.length - 1]) : undefined;
+
+    const response: CursorPaginatedOrgsResponse = {
+      data,
+      meta: {
+        totalCount,
+        hasNextPage: repoResult.hasNextPage,
+        hasPrevPage: repoResult.hasPrevPage,
+        startCursor,
+        endCursor,
+      },
+    };
+
+    if (!cursor) {
       await redis.set(cacheKey, JSON.stringify(response), "EX", 300);
     }
 

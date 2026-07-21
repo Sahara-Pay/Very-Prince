@@ -8,18 +8,36 @@
 
 // ── Common response primitives ────────────────────────────────────────────────
 
-/** Standard pagination metadata returned by all paginated endpoints. */
-export interface PaginationMeta {
+/** Standard offset pagination metadata returned by paginated endpoints. */
+export interface OffsetPaginationMeta {
   totalPages: number;
   currentPage: number;
   totalCount: number;
 }
 
-/** Generic paginated response wrapper. */
-export interface PaginatedResponse<T> {
-  data: T[];
-  meta: PaginationMeta;
+/** Cursor-based pagination metadata. */
+export interface CursorPaginationMeta {
+  totalCount: number;
+  hasNextPage: boolean;
+  hasPrevPage: boolean;
+  startCursor?: string;
+  endCursor?: string;
 }
+
+/** Generic offset paginated response wrapper. */
+export interface OffsetPaginatedResponse<T> {
+  data: T[];
+  meta: OffsetPaginationMeta;
+}
+
+/** Generic cursor paginated response wrapper. */
+export interface CursorPaginatedResponse<T> {
+  data: T[];
+  meta: CursorPaginationMeta;
+}
+
+/** Generic paginated response wrapper (kept for backwards compatibility). */
+export interface PaginatedResponse<T> extends OffsetPaginatedResponse<T> {}
 
 /** Standard success envelope. */
 export interface SuccessResponse {
@@ -503,7 +521,16 @@ export interface SSEContractUpgradedEvent {
 export type TRPCOrganizationResponse = OrganizationDetailsResponse;
 
 /** tRPC: organization.list response. */
-export type TRPCOrganizationListResponse = OrgListResponse;
+export interface TRPCOrganizationListResponse {
+  data: OrgListItem[];
+  meta: {
+    totalCount: number;
+    hasNextPage: boolean;
+    hasPrevPage: boolean;
+    startCursor?: string;
+    endCursor?: string;
+  };
+}
 
 /** tRPC: organization.create response. */
 export interface TRPCOrganizationCreateResponse {

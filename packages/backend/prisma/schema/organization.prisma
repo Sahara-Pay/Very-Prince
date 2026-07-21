@@ -6,6 +6,7 @@ model Organization {
   updatedAt   DateTime @updatedAt // Last time the metadata was updated
 
   @@index([createdAt])
+  @@unique([createdAt, id])
 }
 
 model Maintainer {

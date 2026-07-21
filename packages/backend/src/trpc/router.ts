@@ -11,6 +11,7 @@ import { logger } from '../utils/logger.js';
 import { t } from './trpc.js';
 import { withTrpcCache } from './cacheMiddleware.js';
 import { TRPC_CACHE_TTL, trpcCacheKeys } from './cacheKeys.js';
+import { organizationService } from '../services/organizationService.js';
 
 import {
   fundOrgInputSchema,
@@ -48,19 +49,16 @@ export const appRouter = t.router({
 
     list: t.procedure
       .input(z.object({
-        page: z.number().default(1),
+        cursor: z.string().optional(),
         limit: z.number().default(10),
         search: z.string().optional(),
       }))
       .query(async ({ input }) => {
-        return {
-          data: [],
-          meta: {
-            totalPages: 0,
-            currentPage: input.page,
-            totalCount: 0,
-          },
-        };
+        return await organizationService.getOrganizationsCursor(
+          input.cursor,
+          input.limit,
+          input.search
+        );
       }),
 
     create: t.procedure

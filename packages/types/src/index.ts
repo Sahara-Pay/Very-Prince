@@ -47,13 +47,25 @@ export interface OrganizationWithBudget extends Organization {
   budgetXlm: string;
 }
 
-/** Paginated list of organisations returned by GET /api/org. */
+/** Offset paginated list of organisations (kept for backwards compatibility). */
 export interface PaginatedOrgsResponse {
   data: { id: string; name: string; admin: string; publicBudget?: string }[];
   meta: {
     totalPages: number;
     currentPage: number;
     totalCount: number;
+  };
+}
+
+/** Cursor paginated list of organisations. */
+export interface CursorPaginatedOrgsResponse {
+  data: { id: string; name: string; admin: string; publicBudget?: string }[];
+  meta: {
+    totalCount: number;
+    hasNextPage: boolean;
+    hasPrevPage: boolean;
+    startCursor?: string;
+    endCursor?: string;
   };
 }
 

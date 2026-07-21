@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execSync } from "child_process";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync as _readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { gzipSync } from "zlib";
@@ -186,7 +186,7 @@ describe("verify-backup.sh — Post-backup Integrity Verification", () => {
     const backupPath = join(tmpDir, "very_prince_backup_2026-07-16_12-00-00.sql.gz");
     writeFileSync(backupPath, gzipString(sql));
 
-    const { exitCode, stdout } = runScript(tmpDir + "/../nonexistent");
+    const { exitCode, stdout: _stdout } = runScript(tmpDir + "/../nonexistent");
 
     expect(exitCode).toBe(1);
   });

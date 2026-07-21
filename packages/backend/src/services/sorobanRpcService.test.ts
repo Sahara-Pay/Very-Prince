@@ -9,7 +9,7 @@
  * - Error handling for missing configuration
  */
 
-import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, vi as _vi, afterEach } from "vitest";
 import {
   getSorobanRpcClient,
   resetSorobanRpcClient,
@@ -138,7 +138,7 @@ describe("sorobanRpcService", () => {
 
   describe("resetSorobanRpcClient()", () => {
     it("should allow re-initialization after reset", () => {
-      const client1 = getSorobanRpcClient();
+      getSorobanRpcClient();
       
       resetSorobanRpcClient();
       

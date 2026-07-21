@@ -2,6 +2,7 @@ import * as cron from 'node-cron';
 import { CONTRACT_ID, DEPLOYMENT_LEDGER } from '../config/env.js';
 import { stellarService } from './stellarService.js';
 import { prisma } from './db.js';
+import { invalidateOnFundingEvent, invalidateOnTransactionEvent } from './cacheInvalidation.js';
 import { emitSSEEvent } from './sse.js';
 import { webhookService } from './webhookService.js';
 import { logger } from '../utils/logger.js';
@@ -218,6 +219,7 @@ export class IndexerService {
           ],
           skipDuplicates: true,
         });
+        void invalidateOnFundingEvent(fundEvent.orgId);
         break;
       }
       case 'OrgRegistered': {
@@ -263,6 +265,7 @@ export class IndexerService {
       update: {},
       create: { txHash: event.txHash, eventIndex, walletAddress, volumeUSD: volumeUSD.toString(), type: event.eventName, ledger: event.ledger, rawData: JSON.stringify(event), createdAt },
     });
+    void invalidateOnTransactionEvent();
   }
 
   getStatus(): { isRunning: boolean; lastProcessedLedger?: number; consecutiveFailures: number; currentBackoffMs: number } {

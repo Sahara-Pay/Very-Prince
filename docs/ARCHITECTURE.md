@@ -24,6 +24,10 @@ flowchart TD
         end
         
         State["Terraform State\nS3 + DynamoDB"]
+        StateBucket["S3 Bucket\nvery-prince-terraform-state\n(KMS SSE, versioning,\nSSL-only bucket policy)"]
+        LockTable["DynamoDB Table\nvery-prince-terraform-locks\n(Pay-per-request,\nLockID hash key,\nPITR + SSE)"]
+        State --- StateBucket
+        State --- LockTable
     end
     
     Jenkins["Jenkins Pipeline\nBuild → Trivy scan → Terraform"] -->|terraform apply| State
@@ -38,6 +42,60 @@ flowchart TD
     SNSTopic -->|email| Email
     Jenkins -->|deploy| Service
 ```
+
+## Terraform State Management
+
+The very-prince Terraform state lives in Amazon S3 and is protected against
+concurrent writes by a DynamoDB-backed lock table. The same root module
+provisions both resources on the first bootstrap run, then subsequent plans
+and applies read/write state remotely with serialized locking.
+
+### Resources
+
+| Resource | Type | Name | Notes |
+|---|---|---|---|
+| State bucket | `aws_s3_bucket` | `very-prince-terraform-state` | Versioning enabled, KMS SSE with bucket key, public access fully blocked |
+| Bucket policy | `aws_s3_bucket_policy` | (attached to state bucket) | Denies any `s3:*` action when `aws:SecureTransport = false` |
+| Lock table | `aws_dynamodb_table` | `very-prince-terraform-locks` | `PAY_PER_REQUEST`, `LockID` (String) hash key, PITR + SSE enabled |
+
+### Bootstrap workflow (first-time only)
+
+The S3 backend references resources that this same Terraform configuration
+creates, so a one-time bootstrap is required before `init` can talk to S3:
+
+1. Comment out the `backend "s3" { ... }` block in `terraform/backend.tf`.
+2. From the `terraform/` directory, run:
+   - `terraform init -backend=false -input=false`
+   - `terraform apply -auto-approve -input=false`
+3. Uncomment the backend block in `terraform/backend.tf`.
+4. Run the platform-appropriate bootstrap script:
+   - **Linux/macOS/WSL**: `scripts/bootstrap-terraform-backend.sh`
+   - **Native Windows (PowerShell)**: `scripts/bootstrap-terraform-backend.ps1`
+
+These scripts verify the bucket and DynamoDB table exist, then run
+`terraform init -migrate-state -input=false -force-copy` followed by a
+`plan`/`apply` cycle with `-lock=true -lock-timeout=300s` to prove that
+DynamoDB locking is enforced on every run.
+
+### Locking semantics
+
+- Terraform acquires a lock on the `LockID` row in the DynamoDB table before
+  any state read/write.
+- Concurrent `terraform apply` invocations fail fast with a lock error
+  rather than corrupting the state file.
+- Jenkins passes `-lock=true` to every `plan` and `apply`, so the lock is
+  always asserted during CI/CD execution.
+- Lock TTL is 300 seconds; if a prior run crashed, `terraform force-unlock`
+  may be used to release the lock.
+
+### Outputs
+
+| Output | Description |
+|---|---|
+| `state_bucket_arn` / `state_bucket_name` | Reference the state S3 bucket |
+| `dynamodb_lock_table_name` / `dynamodb_lock_table_arn` | Reference the lock table |
+| `state_backend_type` | Returns `"s3"` |
+| `state_locking_enabled` | Returns `true` |
 
 ## Components
 
@@ -93,11 +151,40 @@ flowchart TD
 
 ## Jenkins Pipeline (`Jenkinsfile`)
 - Declarative syntax
-- Stages: Setup → Build Docker Image → Scan Docker Image → Init → Validate → Plan → Apply (gated)
+- Stages: Setup → Build Docker Image → Scan Docker Image → **Init** → **Verify Backend Lock** → Validate → Plan → Apply (gated)
 - The image build uses `packages/backend/Dockerfile` and is tagged `very-prince-backend:$BUILD_NUMBER`.
 - Trivy runs `trivy image --exit-code 1 --severity HIGH,CRITICAL` against the compiled image. Any High or Critical CVE makes the scan command return a non-zero status, stopping the pipeline before Terraform apply/deployment.
 - OS detection: `isUnix()` → `sh` on Linux, `bat` on Windows. Jenkins agents require native Docker and Trivy CLIs on their `PATH`.
 - Artifact: `tfplan` passed between Plan/Apply
+
+### State Locking in CI
+
+The `Init` stage calls `terraform init` with explicit `-backend-config`
+flags so the S3 bucket, DynamoDB lock table, region, and `encrypt=true`
+settings are always passed to the backend (matching the values in
+`terraform/backend.tf`):
+
+```
+terraform init \
+  -input=false \
+  -backend-config="bucket=${STATE_BUCKET_NAME}" \
+  -backend-config="dynamodb_table=${DYNAMODB_LOCK_TABLE}" \
+  -backend-config="region=${AWS_DEFAULT_REGION}" \
+  -backend-config="encrypt=true"
+```
+
+Immediately after `Init`, the `Verify Backend Lock` stage probes the
+DynamoDB lock table by running `terraform force-unlock -force
+nonexistent-lock-id`. Terraform contacts the configured lock table and
+returns an error referencing the missing lock. The stage asserts that
+the output contains the word `lock` (case-insensitive) — this proves the
+S3 backend and DynamoDB lock table are both reachable from the Jenkins
+agent. The stage intentionally tolerates the non-zero exit code from
+`force-unlock`; only the absence of the word `lock` in the output fails
+the build.
+
+Both `Plan` and `Apply` use `-lock=true -lock-timeout=300s` so every CI
+run asserts DynamoDB-side locks during execution.
 
 ## Windows Support
 - `scripts/terraform-setup.ps1`: Chocolatey/Scoop/Zip install

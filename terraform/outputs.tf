@@ -58,3 +58,15 @@ output "cloudfront_distribution_domain_name" {
   description = "CloudFront domain name for immutable Next.js assets."
   value       = module.asset_cdn.distribution_domain_name
 }
+
+# ──── State Backend Outputs ──────────────────────────────────────────────────
+
+output "state_backend_type" {
+  description = "Type of Terraform state backend configured for this root module."
+  value       = "s3"
+}
+
+output "state_locking_enabled" {
+  description = "Indicates whether DynamoDB-based state locking is configured for this root module."
+  value       = true
+}

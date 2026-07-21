@@ -20,5 +20,10 @@ terraform {
     region         = "us-east-1"
     encrypt        = true
     dynamodb_table = "very-prince-terraform-locks"
+
+    # Rely on DynamoDB for state locking (declared above) rather than the
+    # S3-native lockfile feature, which is only supported by Terraform >= 1.10
+    # and is not required when a DynamoDB lock table is configured.
+    use_lockfile = false
   }
 }

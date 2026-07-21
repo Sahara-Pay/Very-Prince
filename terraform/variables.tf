@@ -120,3 +120,17 @@ variable "cloudfront_price_class" {
     error_message = "cloudfront_price_class must be PriceClass_100, PriceClass_200, or PriceClass_All."
   }
 }
+
+# ──── State Backend Variables ────────────────────────────────────────────────
+
+variable "enable_state_bucket_policy" {
+  description = "When true, attaches an S3 bucket policy that denies non-SSL access to the Terraform state bucket. Disable only if running on a private network without TLS endpoints."
+  type        = bool
+  default     = true
+}
+
+variable "state_key" {
+  description = "S3 object key under which the Terraform state file is stored. Override this only when provisioning additional workspaces or environments that share the state bucket."
+  type        = string
+  default     = "infrastructure/terraform.tfstate"
+}

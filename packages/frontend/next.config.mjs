@@ -49,6 +49,7 @@ const pwaConfig = withPWA({
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: "standalone",
   // Vercel's edge network optimizes and caches images automatically once
   // `images` is configured — this keeps optimization off the Node server.
   images: {

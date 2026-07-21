@@ -89,3 +89,17 @@ To execute this script automatically every day at 2:00 AM UTC, add the following
 0 2 * * * source /path/to/.env && /path/to/very-prince/scripts/backup.sh >> /var/log/very-prince-backup.log 2>&1
 ```
 Note: Ensure PGUSER, PGPASSWORD, PGDATABASE, and BACKUP_S3_BUCKET are set in the environment where the cron job executes, and that the AWS CLI is configured with the correct IAM roles.
+
+## Multi-arch Docker builds
+
+Backend and frontend images build for both `linux/amd64` and `linux/arm64` via Docker Buildx:
+
+```bash
+docker buildx bake
+```
+
+Requires a Buildx builder with QEMU emulation enabled for cross-platform builds:
+```bash
+docker buildx create --use --name very-prince-builder
+docker run --privileged --rm tonistiigi/binfmt --install all
+```

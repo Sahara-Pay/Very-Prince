@@ -20,6 +20,7 @@ import { analyticsRoutes } from './routes/analytics.js';
 import { indexerService } from './services/indexerService.js';
 import { notificationController } from './controllers/notificationController.js';
 import { configureTRPC } from './trpc/server.js';
+import { createUwsGateway } from './ws/uwsGateway.js';
 import { webhookWorker } from './workers/WebhookWorker.js';
 import * as Sentry from '@sentry/node';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
@@ -101,6 +102,16 @@ await server.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
 
 await configureTRPC(server);
 
+const WS_PORT = parseInt(process.env['WS_PORT'] || '3002', 10);
+const uwsApp = createUwsGateway();
+uwsApp.listen(WS_PORT, (listenSocket: unknown) => {
+  if (listenSocket) {
+    server.log.info('uWebSockets.js WebSocket gateway listening on ws://0.0.0.0:' + WS_PORT);
+  } else {
+    server.log.error('Failed to start uWebSockets.js WebSocket gateway on port ' + WS_PORT);
+  }
+});
+
 server.post('/api/v1/notifications/preferences', {
   config: {
     rateLimit: {
@@ -152,6 +163,7 @@ try {
     server.log.info('Received ' + signal + ', shutting down gracefully...');
     indexerService.stop();
     await webhookWorker.stop();
+    uwsApp.close();
     server.close(() => { server.log.info('Server closed'); process.exit(0); });
   };
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

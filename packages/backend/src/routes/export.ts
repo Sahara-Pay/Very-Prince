@@ -15,7 +15,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import csv from "fast-csv";
-import { prisma } from "../services/db.js";
+import { prismaRead } from "../services/db.js";
 import type { ExportRecord } from "@very-prince/types";
 
 const ExportQuerySchema = z.object({
@@ -67,7 +67,7 @@ export const exportRoutes: FastifyPluginAsync = async (fastify) => {
         if (startDate) dateFilter.gte = new Date(startDate);
         if (endDate) dateFilter.lte = new Date(endDate);
 
-        const transactions = await prisma.transaction.findMany({
+        const transactions = await prismaRead.transaction.findMany({
           where: {
             walletAddress: address,
             type: { in: ['PAYOUT_CLAIMED', 'PAYOUT_ALLOCATED'] },
@@ -77,7 +77,7 @@ export const exportRoutes: FastifyPluginAsync = async (fastify) => {
         });
 
         const orgIds = [...new Set(transactions.map(tx => tx.rawData ? JSON.parse(tx.rawData).orgId : null).filter(Boolean))];
-        const organizations = await prisma.organization.findMany({
+        const organizations = await prismaRead.organization.findMany({
           where: { id: { in: orgIds } },
           select: { id: true, name: true },
         });

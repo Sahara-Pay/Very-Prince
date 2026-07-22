@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the AWS infrastructure provisioned via Terraform for the very-prince backend service and its Next.js static-asset CDN. The infrastructure enables CloudWatch log aggregation, metric alarms, dashboards, SNS alert notifications for an ECS Fargate cluster, and global delivery of immutable frontend bundles.
+This document describes the AWS infrastructure provisioned via Terraform for the very-prince backend service and its Next.js static-asset CDN. The infrastructure enables CloudWatch log aggregation, metric alarms, dashboards, SNS alert notifications for an ECS Fargate cluster, global delivery of immutable frontend bundles, and automated lifecycle management for RDS snapshots.
 
 ```mermaid
 flowchart TD
@@ -28,6 +28,12 @@ flowchart TD
         LockTable["DynamoDB Table\nvery-prince-terraform-locks\n(Pay-per-request,\nLockID hash key,\nPITR + SSE)"]
         State --- StateBucket
         State --- LockTable
+        
+        subgraph DataProtection["Data Protection"]
+            EBRule["EventBridge Rule\nvery-prince-shared-prune-schedule"]
+            PruneLambda["Lambda Function\nvery-prince-shared-prune-snapshots"]
+            Snapshots["Manual RDS DB / Cluster\nSnapshots"]
+        end
     end
     
     Jenkins["Jenkins Pipeline\nBuild → Trivy scan → Terraform"] -->|terraform apply| State
@@ -165,6 +171,16 @@ These validations fail `terraform plan` early, before any AWS API call, so misco
 - `_next/static/*` uses a dedicated cache policy with a fixed one-year TTL. These paths contain Next.js content-hashed, immutable bundles.
 - All other paths use a zero-TTL fallback, so immutable caching cannot be applied accidentally to mutable content.
 
+### RDS Snapshot Lifecycle (`terraform/modules/rds-snapshot-lifecycle/`)
+- **Purpose**: prune orphaned manual RDS DB snapshots and DB cluster snapshots that are older than the configured retention period to reduce storage costs.
+- **Trigger**: EventBridge rule (`very-prince-shared-prune-schedule`) on the `rds_snapshot_prune_schedule` expression (default `rate(1 day)`).
+- **Compute**: Python 3.11 Lambda (`very-prince-shared-prune-snapshots`) that paginates through `DescribeDBSnapshots` and `DescribeDBClusterSnapshots` with `SnapshotType = "manual"`, compares `SnapshotCreateTime` to the retention cutoff, and calls `DeleteDBSnapshot` / `DeleteDBClusterSnapshot`.
+- **IAM**: least-privilege inline policy (`rds:DescribeDBSnapshots`, `rds:DescribeDBClusterSnapshots`, `rds:DeleteDBSnapshot`, `rds:DeleteDBClusterSnapshot`) plus CloudWatch Logs permissions.
+- **Configuration as code**:
+  - `rds_snapshot_retention_days` (default `7`) — days to keep manual snapshots
+  - `rds_backup_window` (default `03:00-04:00`) — preferred UTC backup window captured as code
+  - `rds_snapshot_prune_schedule` (default `rate(1 day)`) — EventBridge schedule expression for pruning
+
 ## Data Flow
 
 1. ECS tasks emit stdout/stderr → `awslogs` driver → CloudWatch Log Group
@@ -173,7 +189,12 @@ These validations fail `terraform plan` early, before any AWS API call, so misco
 4. SNS delivers to email subscribers (and any HTTPS/Lambda endpoints added manually)
 5. Dashboard visualizes all metrics in single pane
 6. Browser requests for `/_next/static/*` are served from the nearest CloudFront edge; cache misses are signed and fetched from the private S3 origin.
+HEAD
 7. Jenkins builds and pushes `packages/backend/Dockerfile` as `ghcr.io/.../very-prince-backend:$BUILD_NUMBER` and `packages/frontend/Dockerfile` as `ghcr.io/.../very-prince-frontend:$BUILD_NUMBER`, scanning the backend image with Trivy before Terraform can apply changes.
+
+7. Jenkins builds `packages/backend/Dockerfile` as `very-prince-backend:$BUILD_NUMBER` and scans that exact local image with Trivy before Terraform can apply changes.
+8. EventBridge invokes the snapshot pruning Lambda on its configured schedule; the Lambda deletes manual RDS snapshots older than `rds_snapshot_retention_days`.
+ d8a8e63db1f830d044a2fd34ad48bce8b00e2ae8
 
 ## Jenkins Pipeline (`Jenkinsfile`)
 
@@ -228,6 +249,7 @@ Both `packages/backend/Dockerfile` and `packages/frontend/Dockerfile` use a 6-st
 - The scan stage executes **after** the parallel build and **before** any Terraform stage, ensuring vulnerable images never reach deployment.
 - Frontend images are not scanned by default; add a parallel `Scan Frontend Image` stage if required.
 
+ HEAD
 ### State Locking in CI
 
 The `Init` stage calls `terraform init` with explicit `-backend-config`
@@ -280,12 +302,19 @@ Cache refs in `docker-bake.hcl` align with the Jenkins environment variables:
 - Backend: `ghcr.io/bridgetthnkechi87-cloud/very-prince-backend:buildcache`
 - Frontend: `ghcr.io/bridgetthnkechi87-cloud/very-prince-frontend:buildcache`
 
+=======
+ d8a8e63db1f830d044a2fd34ad48bce8b00e2ae8
 ## Windows Support
 
 - `scripts/terraform-setup.ps1`: Installs Terraform on native Windows via Chocolatey, Scoop, or direct zip download. No WSL or Linux subsystem is required.
 - `scripts/bootstrap-terraform-backend.ps1`: Native Windows bootstrap equivalent of `scripts/bootstrap-terraform-backend.sh`; migrates local state to S3 + DynamoDB using `terraform.exe` directly.
 - The Jenkins pipeline uses `bat` steps on Windows agents and `sh` steps on Unix agents.
 - All Terraform modules use only the AWS provider and run with the native Windows Terraform CLI; WSL is not required.
+- `scripts/terraform-setup.ps1`: Chocolatey/Scoop/Zip install
+- No WSL required
+- Jenkins pipeline uses `bat` on Windows agents
+- The CDN module uses only the Terraform AWS provider and runs with the native Windows Terraform CLI; WSL is not required.
+- The RDS snapshot lifecycle module and its dedicated Jenkinsfile use only native `terraform.exe` / `terraform` commands; WSL is not required.
 
 ## CDN Configuration
 
@@ -306,4 +335,13 @@ https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashbo
 - `very-prince-shared-critical-alerts`
 
 ### Log Group
+ HEAD
 - `/ecs/very-prince-backend`
+=======
+- `/ecs/very-prince-backend`
+
+### RDS Snapshot Lifecycle
+- Lambda function: `very-prince-shared-prune-snapshots`
+- EventBridge rule: `very-prince-shared-prune-schedule`
+- Lambda IAM role: `very-prince-shared-snapshot-prune-role`
+ d8a8e63db1f830d044a2fd34ad48bce8b00e2ae8

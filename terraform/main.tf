@@ -240,3 +240,20 @@ module "asset_cdn" {
     Environment = var.environment
   }
 }
+
+# ──── RDS Snapshot Lifecycle ────────────────────────────────────────────────
+
+module "rds_snapshot_lifecycle" {
+  source = "./modules/rds-snapshot-lifecycle"
+
+  name_prefix             = "${var.project_name}-${var.environment}"
+  snapshot_retention_days = var.rds_snapshot_retention_days
+  preferred_backup_window = var.rds_backup_window
+  schedule_expression     = var.rds_snapshot_prune_schedule
+
+  tags = {
+    Project     = var.project_name
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}

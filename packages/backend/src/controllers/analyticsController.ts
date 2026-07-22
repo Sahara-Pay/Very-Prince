@@ -3,7 +3,7 @@
  * @description Controller for analytics-related operations.
  */
 
-import { prisma } from "../services/db.js";
+import { prismaRead } from "../services/db.js";
 import { safeGet, safeSet } from "../services/cache.js";
 import type { LeaderboardEntry } from "@very-prince/types";
 
@@ -23,7 +23,7 @@ export const analyticsController = {
 
     // 1. Group transactions from the last 7 days by wallet address
     // 2. Sum volumeUSD per wallet
-    const groupedResults = await prisma.transaction.groupBy({
+    const groupedResults = await prismaRead.transaction.groupBy({
       by: ["walletAddress"],
       _sum: {
         volumeUSD: true,

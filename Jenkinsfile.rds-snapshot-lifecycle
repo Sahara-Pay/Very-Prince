@@ -1,0 +1,145 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Jenkinsfile — RDS Snapshot Lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+// Declarative pipeline that plans and applies the
+// terraform/modules/rds-snapshot-lifecycle module which keeps manual RDS
+// snapshots from accumulating forever.
+//
+// Cross-platform notes:
+//   - Uses native Windows `bat` (no WSL, no Git-Bash-only constructs).
+//   - Uses `sh` on Linux/macOS agents.
+//   - Terraform installation on Windows is handled by scripts/terraform-setup.ps1
+//     (chocolatey / scoop / zip), so this pipeline assumes `terraform.exe`
+//     is already on PATH.
+// ─────────────────────────────────────────────────────────────────────────────
+
+pipeline {
+    agent {
+        label 'terraform'
+    }
+
+    environment {
+        TF_VERSION          = '1.9.0'
+        AWS_DEFAULT_REGION  = 'us-east-1'
+        TERRAFORM_DIR       = 'terraform'
+        MODULE_DIR          = 'terraform/modules/rds-snapshot-lifecycle'
+        PLAN_FILE           = 'tfplan-rds-lifecycle'
+    }
+
+    options {
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh 'terraform version'
+                        sh 'aws --version'
+                    } else {
+                        bat 'terraform.exe version'
+                        bat 'aws --version'
+                    }
+                }
+            }
+        }
+
+        stage('Format Check') {
+            steps {
+                dir(env.MODULE_DIR) {
+                    script {
+                        if (isUnix()) {
+                            sh 'terraform fmt -check -recursive'
+                        } else {
+                            bat 'terraform.exe fmt -check -recursive'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Init') {
+            steps {
+                dir(env.TERRAFORM_DIR) {
+                    script {
+                        if (isUnix()) {
+                            sh 'terraform init -input=false'
+                        } else {
+                            bat 'terraform.exe init -input=false'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Validate Module') {
+            steps {
+                dir(env.MODULE_DIR) {
+                    script {
+                        if (isUnix()) {
+                            sh 'terraform init -backend=false -input=false'
+                            sh 'terraform validate'
+                        } else {
+                            bat 'terraform.exe init -backend=false -input=false'
+                            bat 'terraform.exe validate'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Plan') {
+            steps {
+                dir(env.TERRAFORM_DIR) {
+                    script {
+                        if (isUnix()) {
+                            sh "terraform plan -input=false -out=${env.PLAN_FILE} -target=module.rds_snapshot_lifecycle"
+                        } else {
+                            bat "terraform.exe plan -input=false -out=${env.PLAN_FILE} -target=module.rds_snapshot_lifecycle"
+                        }
+                    }
+                    stash includes: "${env.TERRAFORM_DIR}/${env.PLAN_FILE}", name: 'rds-lifecycle-plan'
+                }
+            }
+        }
+
+        stage('Apply') {
+            when {
+                branch 'main'
+            }
+            input {
+                message 'Apply RDS snapshot lifecycle changes to production?'
+                ok 'Apply'
+                submitterParameter 'APPROVER'
+            }
+            steps {
+                unstash 'rds-lifecycle-plan'
+                dir(env.TERRAFORM_DIR) {
+                    script {
+                        if (isUnix()) {
+                            sh "terraform apply -input=false -auto-approve ${env.PLAN_FILE}"
+                        } else {
+                            bat "terraform.exe apply -input=false -auto-approve ${env.PLAN_FILE}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs()
+        }
+        success {
+            echo 'RDS snapshot lifecycle pipeline completed successfully'
+        }
+        failure {
+            echo 'RDS snapshot lifecycle pipeline failed'
+        }
+    }
+}

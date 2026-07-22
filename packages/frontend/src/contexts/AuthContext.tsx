@@ -12,6 +12,7 @@
 
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import { signInWithStellar, storeAuthToken, removeAuthToken, getAuthToken, AuthResponse } from '@/lib/authService';
+import { useWallet } from '@/contexts/WalletContext';
 
 // ── Type Definitions ───────────────────────────────────────────────────────
 
@@ -51,6 +52,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     isLoading: true,
     error: null,
   });
+
+  const { isConnected: isWalletConnected, publicKey: walletPublicKey, isInitialized: isWalletInitialized } = useWallet();
 
   // ── Authentication Functions ─────────────────────────────────────────────
 
@@ -118,8 +121,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
       
       // Extract user info from token (this is a simplified approach)
       // In production, you'd decode the JWT or call a validation endpoint
+      let decodedPublicKey = 'decoded-from-token';
+      if (token && token.startsWith('mock-jwt-token-for-')) {
+        decodedPublicKey = token.replace('mock-jwt-token-for-', '');
+      }
       const user: User = {
-        publicKey: 'decoded-from-token', // This would be properly decoded
+        publicKey: decodedPublicKey,
       };
 
       setAuthState({
@@ -143,6 +150,23 @@ export function AuthProvider({ children }: AuthProviderProps) {
       });
     }
   }, []);
+
+  // ── Sync Auth State with Wallet State ─────────────────────────────────────
+
+  useEffect(() => {
+    if (!isWalletInitialized) return;
+
+    if (!isWalletConnected) {
+      if (authState.isAuthenticated) {
+        signOut();
+      }
+    } else if (walletPublicKey && authState.isAuthenticated && authState.user) {
+      // If the authenticated user's public key doesn't match the current wallet public key
+      if (authState.user.publicKey !== walletPublicKey) {
+        signOut();
+      }
+    }
+  }, [isWalletInitialized, isWalletConnected, walletPublicKey, authState.isAuthenticated, authState.user, signOut]);
 
   // ── Initial Auth Check ───────────────────────────────────────────────────
 

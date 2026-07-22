@@ -193,3 +193,33 @@ variable "state_key" {
   type        = string
   default     = "infrastructure/terraform.tfstate"
 }
+
+# ──── RDS Snapshot Lifecycle Variables ──────────────────────────────────────
+
+variable "rds_snapshot_retention_days" {
+  description = "Number of days to retain manual RDS DB snapshots before the prune Lambda deletes them."
+  type        = number
+  default     = 7
+}
+
+variable "rds_backup_window" {
+  description = "Preferred daily time range (UTC) in which RDS automated backups are scheduled. Format: HH:MM-HH:MM."
+  type        = string
+  default     = "03:00-04:00"
+
+  validation {
+    condition     = can(regex("^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$", var.rds_backup_window))
+    error_message = "rds_backup_window must match the HH:MM-HH:MM format in 24-hour UTC time."
+  }
+}
+
+variable "rds_snapshot_prune_schedule" {
+  description = "EventBridge schedule expression that controls how often the RDS snapshot prune Lambda is invoked. Accepts rate(...) or cron(...) syntax."
+  type        = string
+  default     = "rate(1 day)"
+
+  validation {
+    condition     = can(regex("^(rate\\(|cron\\().+", var.rds_snapshot_prune_schedule))
+    error_message = "rds_snapshot_prune_schedule must be a valid EventBridge rate(...) or cron(...) expression."
+  }
+}

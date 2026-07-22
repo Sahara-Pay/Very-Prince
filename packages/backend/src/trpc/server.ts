@@ -1,15 +1,10 @@
-/**
- * @file server.ts
- * @description tRPC server configuration for Fastify integration.
- */
-
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { appRouter } from './router.js';
 import type { AppRouter } from './router.js';
 
-// Create a simple tRPC HTTP handler for Fastify
+const procedures = appRouter._def.procedures as Record<string, unknown>;
+
 export async function configureTRPC(server: FastifyInstance) {
-  // Register tRPC routes manually
   server.post('/trpc/:path', {
     config: {
       rateLimit: {
@@ -20,10 +15,8 @@ export async function configureTRPC(server: FastifyInstance) {
   }, async (request: FastifyRequest, reply: FastifyReply) => {
     const { path } = request.params as { path: string };
     const body = request.body as any;
-    
+
     try {
-      // Simple routing - this is a basic implementation
-      // In a real setup, you'd use the proper tRPC handler
       const result = await handleTRPCRequest(path, body);
       return reply.send(result);
     } catch (error) {
@@ -35,27 +28,25 @@ export async function configureTRPC(server: FastifyInstance) {
   });
 }
 
-// Basic tRPC request handler (simplified)
 async function handleTRPCRequest(path: string, input: any) {
-  const pathParts = path.split('.');
-  const procedure = pathParts.pop();
-  
-  // Navigate through the router structure
-  let current: any = appRouter;
-  for (const part of pathParts) {
-    if (current[part]) {
-      current = current[part];
-    } else {
-      throw new Error(`Procedure ${path} not found`);
-    }
+  // eslint-disable-next-line security/detect-object-injection
+  const procedure = procedures[path] as
+    | { _def: { subscription?: boolean; resolver: (opts: { ctx: object; input: unknown; signal: AbortSignal }) => unknown } }
+    | undefined;
+
+  if (!procedure) {
+    throw new Error(`Procedure ${path} not found`);
   }
-  
-  if (current && procedure && current[procedure]) {
-    return await current[procedure](input);
+
+  if (procedure._def.subscription) {
+    throw new Error('Subscription procedures must be called over WebSocket');
   }
-  
-  throw new Error(`Procedure ${path} not found`);
+
+  return await procedure._def.resolver({
+    ctx: {},
+    input,
+    signal: new AbortController().signal,
+  });
 }
 
-// Export the router type for frontend usage
 export type { AppRouter };

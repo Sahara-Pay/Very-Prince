@@ -17,6 +17,7 @@ const envSchema = z.object({
   CONTRACT_ID: z.string().default(''),
   DEPLOYMENT_LEDGER: z.coerce.number().int().default(0),
   DATABASE_URL: z.string().optional(),
+  DATABASE_REPLICA_URL: z.string().optional(),
   REDIS_URL: z.string().optional(),
 });
 
@@ -33,3 +34,5 @@ export const HORIZON_FALLBACK_URL = config.HORIZON_FALLBACK_URL;
 export const NETWORK_PASSPHRASE = config.NETWORK_PASSPHRASE;
 export const CONTRACT_ID = config.CONTRACT_ID;
 export const DEPLOYMENT_LEDGER = config.DEPLOYMENT_LEDGER;
+export const DATABASE_URL = config.DATABASE_URL;
+export const DATABASE_REPLICA_URL = config.DATABASE_REPLICA_URL;

@@ -1,38 +1,39 @@
-/**
- * @file client.ts
- * @description tRPC client configuration for the Very-prince frontend.
- */
+import { createTRPCProxyClient, httpBatchLink, splitLink, wsLink, createWSClient } from '@trpc/client';
 
-import { createTRPCProxyClient, httpBatchLink } from '@trpc/client';
-
-// Get the backend URL from environment variables
 const getBaseUrl = () => {
   if (typeof window !== 'undefined') {
-    // Browser should use relative URL
     return '';
   }
-  
-  // Server-side rendering should use the backend URL
   if (process.env.NEXT_PUBLIC_BACKEND_URL) {
     return process.env.NEXT_PUBLIC_BACKEND_URL.replace('/api/v1/contract', '');
   }
-  
-  // Default to localhost for development
   return 'http://localhost:3001';
 };
 
-// Create the tRPC client
+const getWsUrl = () => {
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = process.env.NEXT_PUBLIC_WS_URL || (protocol + '//localhost:3002');
+    return host;
+  }
+  return process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3002';
+};
+
+const wsClient = typeof window !== 'undefined'
+  ? createWSClient({ url: getWsUrl() })
+  : null;
+
 export const trpcClient = createTRPCProxyClient<any>({
   links: [
-    httpBatchLink({
-      url: `${getBaseUrl()}/trpc`,
-      headers: () => {
-        // Add any necessary headers here
-        return {};
-      },
+    splitLink({
+      condition: (op) => op.type === 'subscription',
+      true: wsLink({ client: wsClient! }),
+      false: httpBatchLink({
+        url: getBaseUrl() + '/trpc',
+        headers: () => ({}),
+      }),
     }),
   ],
 }) as any;
 
-// Export the client for use in components
 export default trpcClient;

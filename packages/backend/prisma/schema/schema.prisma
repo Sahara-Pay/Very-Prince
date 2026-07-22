@@ -8,5 +8,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  // Primary (writer) connection — migrations always use DATABASE_URL.
+  // Read replicas are configured in src/services/db.ts via DATABASE_REPLICA_URL.
   url      = env("DATABASE_URL")
 }

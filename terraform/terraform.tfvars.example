@@ -31,3 +31,11 @@ cloudfront_price_class = "PriceClass_All"
 # service_sg_id           = "sg-xyz789"
 # image_uri               = "ghcr.io/your-org/very-prince-backend:latest"
 # target_group_arn        = ""
+
+# ──── RDS Snapshot Lifecycle Variables ──────────────────────────────────────
+# Number of days to retain manual RDS DB snapshots before pruning
+# rds_snapshot_retention_days = 7
+# Preferred daily RDS backup window in UTC (format: HH:MM-HH:MM)
+# rds_backup_window          = "03:00-04:00"
+# EventBridge schedule expression for the prune Lambda
+# rds_snapshot_prune_schedule = "rate(1 day)"

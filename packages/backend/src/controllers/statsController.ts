@@ -8,7 +8,7 @@
 
 import { stellarService } from "../services/stellarService.js";
 import { safeGet, safeSet } from "../services/cache.js";
-import { prisma } from "../services/db.js";
+import { prismaRead } from "../services/db.js";
 import { mapWithConcurrency } from "../utils/concurrency.js";
 import type {
   GlobalStatsResponse,
@@ -112,7 +112,7 @@ export const statsController = {
     }
 
     // Aggregate sum of faceValueUSD for all active invoices
-    const result = await prisma.invoice.aggregate({
+    const result = await prismaRead.invoice.aggregate({
       where: {
         status: "ACTIVE",
       },
@@ -184,7 +184,7 @@ export const statsController = {
       org_count: bigint;
     };
 
-    const [row] = await prisma.$queryRawUnsafe<AggRow[]>(
+    const [row] = await prismaRead.$queryRawUnsafe<AggRow[]>(
       `SELECT
          COALESCE(SUM("amountStroops"), 0)           AS total_stroops,
          COUNT(*)                                     AS event_count,
@@ -292,7 +292,7 @@ export const statsController = {
       return JSON.parse(cached);
     }
 
-    const events = await prisma.fundingEvent.findMany({
+    const events = await prismaRead.fundingEvent.findMany({
       where: {
         orgId,
       },

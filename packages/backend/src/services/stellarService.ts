@@ -542,12 +542,17 @@ export class StellarService {
   // ── Soroban Write Operations ──────────────────────────────────────────────
 
   /**
-   * Initialize the contract with the global Token address.
+   * Initialize the contract with the global Token address and native protocol admin.
    */
   async initContract(tokenAddress: string, signerSecret: string): Promise<ContractCallResult> {
+    const protocolAdmin = Keypair.fromSecret(signerSecret).publicKey();
     return this._submitContractCall(
       "init",
-      [nativeToScVal(tokenAddress, { type: "address" })],
+      [
+        nativeToScVal(tokenAddress, { type: "address" }),
+        nativeToScVal([protocolAdmin], { type: "address" }),
+        nativeToScVal(1, { type: "u32" }),
+      ],
       signerSecret
     );
   }

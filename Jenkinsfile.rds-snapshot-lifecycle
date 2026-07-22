@@ -11,7 +11,14 @@
 //   - Terraform installation on Windows is handled by scripts/terraform-setup.ps1
 //     (chocolatey / scoop / zip), so this pipeline assumes `terraform.exe`
 //     is already on PATH.
+//
+// Build/deploy steps are abstracted into jenkins-shared-library/vars/*.groovy,
+// loaded via load() until the library is extracted into its own repo and
+// registered as a Jenkins Global Pipeline Library (see
+// jenkins-shared-library/README.md).
 // ─────────────────────────────────────────────────────────────────────────────
+
+def lib = [:]
 
 pipeline {
     agent {
@@ -37,72 +44,52 @@ pipeline {
         stage('Setup') {
             steps {
                 script {
-                    if (isUnix()) {
-                        sh 'terraform version'
-                        sh 'aws --version'
-                    } else {
-                        bat 'terraform.exe version'
-                        bat 'aws --version'
-                    }
+                    lib.tfSetup       = load('jenkins-shared-library/vars/tfSetup.groovy')
+                    lib.tfInit        = load('jenkins-shared-library/vars/tfInit.groovy')
+                    lib.tfFormatCheck = load('jenkins-shared-library/vars/tfFormatCheck.groovy')
+                    lib.tfValidate    = load('jenkins-shared-library/vars/tfValidate.groovy')
+                    lib.tfPlan        = load('jenkins-shared-library/vars/tfPlan.groovy')
+                    lib.tfApply       = load('jenkins-shared-library/vars/tfApply.groovy')
+
+                    lib.tfSetup(tools: ['terraform', 'aws'])
                 }
             }
         }
 
         stage('Format Check') {
             steps {
-                dir(env.MODULE_DIR) {
-                    script {
-                        if (isUnix()) {
-                            sh 'terraform fmt -check -recursive'
-                        } else {
-                            bat 'terraform.exe fmt -check -recursive'
-                        }
-                    }
+                script {
+                    lib.tfFormatCheck(dir: env.MODULE_DIR)
                 }
             }
         }
 
         stage('Init') {
             steps {
-                dir(env.TERRAFORM_DIR) {
-                    script {
-                        if (isUnix()) {
-                            sh 'terraform init -input=false'
-                        } else {
-                            bat 'terraform.exe init -input=false'
-                        }
-                    }
+                script {
+                    lib.tfInit(dir: env.TERRAFORM_DIR)
                 }
             }
         }
 
         stage('Validate Module') {
             steps {
-                dir(env.MODULE_DIR) {
-                    script {
-                        if (isUnix()) {
-                            sh 'terraform init -backend=false -input=false'
-                            sh 'terraform validate'
-                        } else {
-                            bat 'terraform.exe init -backend=false -input=false'
-                            bat 'terraform.exe validate'
-                        }
-                    }
+                script {
+                    lib.tfValidate(dir: env.MODULE_DIR, standalone: true)
                 }
             }
         }
 
         stage('Plan') {
             steps {
-                dir(env.TERRAFORM_DIR) {
-                    script {
-                        if (isUnix()) {
-                            sh "terraform plan -input=false -out=${env.PLAN_FILE} -target=module.rds_snapshot_lifecycle"
-                        } else {
-                            bat "terraform.exe plan -input=false -out=${env.PLAN_FILE} -target=module.rds_snapshot_lifecycle"
-                        }
-                    }
-                    stash includes: "${env.TERRAFORM_DIR}/${env.PLAN_FILE}", name: 'rds-lifecycle-plan'
+                script {
+                    lib.tfPlan(
+                        dir: env.TERRAFORM_DIR,
+                        planFile: env.PLAN_FILE,
+                        stashName: 'rds-lifecycle-plan',
+                        target: 'module.rds_snapshot_lifecycle',
+                        inputFalse: true
+                    )
                 }
             }
         }
@@ -117,15 +104,13 @@ pipeline {
                 submitterParameter 'APPROVER'
             }
             steps {
-                unstash 'rds-lifecycle-plan'
-                dir(env.TERRAFORM_DIR) {
-                    script {
-                        if (isUnix()) {
-                            sh "terraform apply -input=false -auto-approve ${env.PLAN_FILE}"
-                        } else {
-                            bat "terraform.exe apply -input=false -auto-approve ${env.PLAN_FILE}"
-                        }
-                    }
+                script {
+                    lib.tfApply(
+                        dir: env.TERRAFORM_DIR,
+                        planFile: env.PLAN_FILE,
+                        stashName: 'rds-lifecycle-plan',
+                        inputFalse: true
+                    )
                 }
             }
         }

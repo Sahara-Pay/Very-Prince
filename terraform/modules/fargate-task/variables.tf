@@ -92,17 +92,6 @@ variable "operating_system_family" {
   }
 }
 
-variable "cpu_architecture" {
-  description = "CPU architecture for the task runtime platform."
-  type        = string
-  default     = "X86_64"
-
-  validation {
-    condition     = contains(["X86_64", "ARM64"], var.cpu_architecture)
-    error_message = "cpu_architecture must be X86_64 or ARM64."
-  }
-}
-
 variable "tags" {
   description = "Tags applied to the task definition."
   type        = map(string)

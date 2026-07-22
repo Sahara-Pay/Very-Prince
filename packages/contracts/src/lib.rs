@@ -66,6 +66,12 @@ pub enum ProtocolState {
     Paused,
 }
 
+/// Native protocol admin authorization config.
+///
+/// The legacy config shape is retained for storage/API compatibility, but
+/// native admin operations are authorized by `admins[0]`. Configure that
+/// address as a Stellar multisig account or Soroban account contract to enforce
+/// signer thresholds outside this contract.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MultisigAdmin {
@@ -81,13 +87,13 @@ pub enum PrinceError {
     AlreadyInitialized = 1,
     /// The provided list of administrators for initialization is empty.
     EmptyAdminList = 2,
-    /// The multisig threshold must be greater than zero and less than or equal to the number of admins.
+    /// The native protocol admin config must contain exactly one admin with threshold 1.
     InvalidThreshold = 3,
     /// Attempted to call a function that requires the contract to be initialized.
     ContractNotInitialized = 4,
     /// The protocol is currently paused by the global administrators.
     ProtocolPaused = 5,
-    /// The number of valid administrator signatures does not meet the required threshold.
+    /// Legacy multisig signer payloads are no longer accepted.
     InsufficientMultisigAuth = 6,
     /// An organization with this ID (or derived from this admin/name) already exists.
     OrgAlreadyRegistered = 7,
@@ -148,7 +154,7 @@ pub enum DataKey {
     MaintainerBalance(Address),
     /// Total budget currently held by this org (in stroops).
     OrgBudget(Symbol),
-    /// Multisig admin configuration for contract upgrades and emergency functions.
+    /// Native protocol admin configuration for contract upgrades and emergency functions.
     MultisigAdmin,
     /// Current protocol state (Active or Paused).
     ProtocolState,
@@ -254,18 +260,18 @@ impl PayoutRegistry {
     // Initialization
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Initializes the contract state including the token address, global admins, multisig threshold, and sets state to Active.
+    /// Initializes the contract state with the token address, native protocol admin, and Active state.
     ///
     /// # Arguments
     /// * `env` - The contract environment.
     /// * `token` - Stellar Asset Contract address for funding/payouts.
-    /// * `admins` - Vector of global administrator addresses.
-    /// * `threshold` - Minimum number of admin signatures required for multisig actions.
+    /// * `admins` - Single native protocol admin address in a vector for storage compatibility.
+    /// * `threshold` - Must be 1. Configure native multisig thresholds on the admin address itself.
     ///
     /// # Panics
     /// * `AlreadyInitialized` - If the contract has already been initialized.
     /// * `EmptyAdminList` - If the provided list of administrators is empty.
-    /// * `InvalidThreshold` - If the multisig threshold is 0 or greater than the number of administrators.
+    /// * `InvalidThreshold` - If `admins` does not contain exactly one address or `threshold` is not 1.
     pub fn init(env: Env, token: Address, admins: Vec<Address>, threshold: u32) {
         let _guard = ReentrancyGuard::acquire(&env);
         if env.storage().persistent().has(&DataKey::Token) {
@@ -276,7 +282,7 @@ impl PayoutRegistry {
             panic_with_error!(&env, PrinceError::EmptyAdminList);
         }
 
-        if threshold == 0 || threshold > admins.len() {
+        if admins.len() != 1 || threshold != 1 {
             panic_with_error!(&env, PrinceError::InvalidThreshold);
         }
 
@@ -336,7 +342,7 @@ impl PayoutRegistry {
             .unwrap_or_else(|| panic_with_error!(&env, PrinceError::ContractNotInitialized))
     }
 
-    /// Retrieve the multisig admin configuration.
+    /// Retrieve the native protocol admin configuration.
     ///
     /// # Panics
     /// If the contract has not been initialized.
@@ -380,37 +386,13 @@ impl PayoutRegistry {
         }
     }
 
-    /// Verify that the caller has sufficient multisig authorization.
-    ///
-    /// This function checks that at least `threshold` admins from the multisig
-    /// configuration have authorized the action. In Soroban, this is handled
-    /// natively by the Stellar network's account structure, but we need to
-    /// verify that the authorization payload contains the required signatures.
-    ///
-    /// # Panics
-    /// If insufficient signatures are provided
-    fn verify_multisig_auth(env: &Env, signers: &Vec<Address>) {
+    /// Return the configured native protocol admin address.
+    fn get_protocol_admin(env: &Env) -> Address {
         let multisig_admin = Self::get_multisig_admin(env.clone());
-
-        // Verify unique signers count meets threshold
-        let mut unique_signers = Vec::new(env);
-        for signer in signers.iter() {
-            if !unique_signers.contains(&signer) {
-                unique_signers.push_back(signer.clone());
-            }
-        }
-
-        if unique_signers.len() < multisig_admin.threshold {
-            panic_with_error!(env, PrinceError::InsufficientMultisigAuth);
-        }
-
-        // Check that each signer is a registered admin and has authorized this call
-        for signer in unique_signers.iter() {
-            if !multisig_admin.admins.contains(&signer) {
-                panic_with_error!(env, PrinceError::NotAuthorized);
-            }
-            signer.require_auth();
-        }
+        multisig_admin
+            .admins
+            .get(0)
+            .unwrap_or_else(|| panic_with_error!(env, PrinceError::EmptyAdminList))
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -563,7 +545,7 @@ impl PayoutRegistry {
         let _guard = ReentrancyGuard::acquire(&env);
         Self::assert_active(&env);
 
-        // Strict authorization: bind the signature to the exact parameters
+        // Strict authorization: bind auth to the exact parameters.
         from.require_auth_for_args((org_id.clone(), from.clone(), amount).into_val(&env));
 
         if amount <= 0 {
@@ -925,7 +907,7 @@ pub fn allocate_payout(
             panic_with_error!(&env, PrinceError::NotAuthorized);
         }
 
-        // Strict auth: bind signature to parameters including tranche schedule.
+        // Strict auth: bind authorization to parameters including tranche schedule.
         // Note: Soroban requires explicit auth-for-args bindings.
         admin.require_auth_for_args(
             (
@@ -1131,12 +1113,17 @@ pub fn allocate_payout(
                 .get(&balance_key)
                 .unwrap_or(MaintainerPayout {
                     amount: 0,
-                    unlock_timestamp: 0,
+                    claimed_amount: 0,
+                    tranches: Vec::new(&env),
                 });
             current_payout.amount = current_payout
                 .amount
                 .checked_add(entry.amount)
                 .unwrap_or_else(|| panic_with_error!(&env, PrinceError::PayoutOverflow));
+            current_payout.tranches.push_back(VestingTranche {
+                unlock_timestamp: 0,
+                amount: entry.amount,
+            });
             env.storage()
                 .persistent()
                 .set(&balance_key, &current_payout);
@@ -1171,14 +1158,15 @@ pub fn allocate_payout(
             .get(&DataKey::MaintainerBalance(maintainer))
             .unwrap_or(MaintainerPayout {
                 amount: 0,
-                unlock_timestamp: 0,
+                claimed_amount: 0,
+                tranches: Vec::new(&env),
             });
         payout.amount
     }
 
     /// Claims all accumulated payout balances for the maintainer, transferring tokens to their wallet.
     ///
-    /// Requires authorization signature from the claiming maintainer.
+    /// Requires authorization from the claiming maintainer.
     ///
     /// # Arguments
     /// * `env` - The contract environment.
@@ -1261,17 +1249,16 @@ pub fn allocate_payout(
     // Protocol Pause/Unpause
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Pause the protocol. Requires multisig authorization from protocol admins.
+    /// Pause the protocol. Requires native authorization from the protocol admin address.
     ///
     /// When paused, all fund_org, allocate_payout, and claim_payout operations
     /// will be blocked with a "protocol is paused" error.
     ///
     /// # Arguments
     /// * `env` - The contract environment
-    pub fn pause_protocol(env: Env, signers: Vec<Address>) {
+    pub fn pause_protocol(env: Env) {
         let _guard = ReentrancyGuard::acquire(&env);
-        // Verify multisig authorization
-        Self::verify_multisig_auth(&env, &signers);
+        Self::get_protocol_admin(&env).require_auth();
 
         // Update the protocol state to paused
         env.storage()
@@ -1293,16 +1280,15 @@ pub fn allocate_payout(
         );
     }
 
-    /// Unpause the protocol. Requires multisig authorization from protocol admins.
+    /// Unpause the protocol. Requires native authorization from the protocol admin address.
     ///
     /// When unpaused, normal operations resume.
     ///
     /// # Arguments
     /// * `env` - The contract environment
-    pub fn unpause_protocol(env: Env, signers: Vec<Address>) {
+    pub fn unpause_protocol(env: Env) {
         let _guard = ReentrancyGuard::acquire(&env);
-        // Verify multisig authorization
-        Self::verify_multisig_auth(&env, &signers);
+        Self::get_protocol_admin(&env).require_auth();
 
         // Update the protocol state to active
         env.storage()
@@ -1328,17 +1314,18 @@ pub fn allocate_payout(
     // Protocol Admin Rotation (two-step ownership transfer)
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Step 1 of admin transfer: the current multisig admin proposes a new admin.
+    /// Step 1 of admin transfer: the current native protocol admin proposes a new admin.
     ///
     /// The new admin is stored as `PendingAdmin` and must call `accept_admin` to
     /// complete the transfer. This prevents accidentally transferring ownership to
     /// an invalid or burned address.
     ///
     /// # Panics
-    /// * If multisig authorization is insufficient.
-    pub fn propose_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
+    /// * If native protocol admin authorization is missing.
+    pub fn propose_admin(env: Env, new_admin: Address) {
         let _guard = ReentrancyGuard::acquire(&env);
-        Self::verify_multisig_auth(&env, &signers);
+        Self::get_protocol_admin(&env)
+            .require_auth_for_args((new_admin.clone(),).into_val(&env));
         env.storage()
             .persistent()
             .set(&DataKey::PendingAdmin, &new_admin);
@@ -1353,8 +1340,8 @@ pub fn allocate_payout(
 
     /// Step 2 of admin transfer: the proposed new admin accepts ownership.
     ///
-    /// Replaces the multisig admin list with a single-member list containing
-    /// `new_admin` and clears the pending admin slot.
+    /// Replaces the native protocol admin address with `new_admin` and clears
+    /// the pending admin slot.
     ///
     /// # Panics
     /// * If there is no pending admin proposal.
@@ -1370,7 +1357,7 @@ pub fn allocate_payout(
         if pending != new_admin {
             panic_with_error!(&env, PrinceError::NotPendingAdmin);
         }
-        // Build a new single-member multisig with threshold 1
+        // Keep the legacy config shape while authorizing through one native admin address.
         let mut admins = Vec::new(&env);
         admins.push_back(new_admin.clone());
         let multisig_admin = MultisigAdmin {
@@ -1396,7 +1383,7 @@ pub fn allocate_payout(
 
     /// Upgrade the contract to a new WASM binary.
     ///
-    /// This function requires multisig authorization from protocol admins and allows for
+    /// This function requires native authorization from the protocol admin and allows for
     /// upgrading the contract code while preserving all contract state.
     ///
     /// # Arguments
@@ -1404,12 +1391,12 @@ pub fn allocate_payout(
     /// * `new_wasm_hash` - The 32-byte hash of the new WASM binary
     ///
     /// # Panics
-    /// * If insufficient multisig signatures are provided
+    /// * If native protocol admin authorization is missing
     /// * If the WASM hash is invalid
-    pub fn upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         let _guard = ReentrancyGuard::acquire(&env);
-        // Verify multisig authorization
-        Self::verify_multisig_auth(&env, &signers);
+        Self::get_protocol_admin(&env)
+            .require_auth_for_args((new_wasm_hash.clone(),).into_val(&env));
 
         // Perform the upgrade
         env.deployer()

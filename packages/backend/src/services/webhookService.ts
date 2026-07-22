@@ -1,37 +1,47 @@
 import { webhookRepository } from "../repositories/WebhookRepository.js";
+import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { createHash, randomBytes } from "node:crypto";
 import { Queue } from "bullmq";
+import {
+  AWS_REGION,
+  WEBHOOK_QUEUE_PROVIDER,
+  WEBHOOK_QUEUE_URL,
+} from "../config/env.js";
+import {
+  webhookJobDataSchema,
+  type WebhookEventData,
+  type WebhookJobData,
+} from "../schemas/webhookJobSchemas.js";
 import { bullRedisConnection } from "./cache.js";
 
-export interface WebhookJobData {
-  /** The unique ID of the organization to notify. */
-  organizationId: string;
-  /** The name of the event being dispatched (e.g., 'payout_claimed'). */
-  event: string;
-  /** The JSON-serializable payload data for the webhook. */
-  data: any;
-}
+export type { WebhookJobData } from "../schemas/webhookJobSchemas.js";
 
 /**
- * Service for managing webhook configurations and dispatching events via BullMQ.
+ * Service for managing webhook configurations and dispatching events.
  */
 export class WebhookService {
-  /** The BullMQ queue for background webhook delivery. */
-  private webhookQueue: Queue;
+  private readonly webhookQueue: Queue<WebhookJobData> | null;
+  private readonly sqsClient: SQSClient | null;
 
   constructor() {
-    this.webhookQueue = new Queue("webhook-dispatch", {
-      connection: bullRedisConnection,
-      defaultJobOptions: {
-        attempts: 5,
-        backoff: {
-          type: "exponential",
-          delay: 5000,
+    if (WEBHOOK_QUEUE_PROVIDER === "sqs") {
+      this.sqsClient = new SQSClient({ region: AWS_REGION });
+      this.webhookQueue = null;
+    } else {
+      this.sqsClient = null;
+      this.webhookQueue = new Queue<WebhookJobData>("webhook-dispatch", {
+        connection: bullRedisConnection,
+        defaultJobOptions: {
+          attempts: 5,
+          backoff: {
+            type: "exponential",
+            delay: 5000,
+          },
+          removeOnComplete: true,
+          removeOnFail: false,
         },
-        removeOnComplete: true,
-        removeOnFail: false,
-      },
-    });
+      });
+    }
   }
 
   /**
@@ -93,17 +103,51 @@ export class WebhookService {
    * @param event The event name.
    * @param data The payload data.
    */
-  async queueWebhook(organizationId: string, event: string, data: any) {
+  async queueWebhook(organizationId: string, event: string, data: WebhookEventData) {
     const config = await webhookRepository.getConfig(organizationId);
     if (!config || !config.url) {
       return;
     }
 
-    await this.webhookQueue.add(`webhook:${event}:${organizationId}`, {
+    const jobData = webhookJobDataSchema.parse({
       organizationId,
       event,
       data,
     });
+
+    if (WEBHOOK_QUEUE_PROVIDER === "sqs") {
+      await this.enqueueSqsWebhook(jobData);
+      return;
+    }
+
+    if (!this.webhookQueue) {
+      throw new Error("BullMQ webhook queue is not initialized");
+    }
+
+    await this.webhookQueue.add(`webhook:${event}:${organizationId}`, {
+      ...jobData,
+    });
+  }
+
+  private async enqueueSqsWebhook(jobData: WebhookJobData): Promise<void> {
+    if (!this.sqsClient || !WEBHOOK_QUEUE_URL) {
+      throw new Error("SQS webhook queue is not initialized");
+    }
+
+    await this.sqsClient.send(new SendMessageCommand({
+      QueueUrl: WEBHOOK_QUEUE_URL,
+      MessageBody: JSON.stringify(jobData),
+      MessageAttributes: {
+        organizationId: {
+          DataType: "String",
+          StringValue: jobData.organizationId,
+        },
+        event: {
+          DataType: "String",
+          StringValue: jobData.event,
+        },
+      },
+    }));
   }
 
   /**

@@ -49,6 +49,21 @@ output "cloudwatch_log_group_name" {
   value       = module.cloudwatch_logs.log_group_name
 }
 
+output "webhook_queue_url" {
+  description = "URL of the SQS queue used for webhook dispatches."
+  value       = module.webhook_queue.queue_url
+}
+
+output "webhook_dlq_url" {
+  description = "URL of the SQS DLQ used for exhausted webhook dispatches."
+  value       = module.webhook_queue.dlq_url
+}
+
+output "webhook_dlq_depth_alarm_arn" {
+  description = "ARN of the CloudWatch alarm that tracks visible messages in the webhook DLQ."
+  value       = module.cloudwatch_alarms.webhook_dlq_depth_alarm_arn
+}
+
 output "cloudfront_distribution_id" {
   description = "ID of the CloudFront distribution serving immutable Next.js assets."
   value       = module.asset_cdn.distribution_id

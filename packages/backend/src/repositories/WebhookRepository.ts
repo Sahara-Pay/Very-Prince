@@ -36,7 +36,7 @@ export class WebhookRepository {
     }
   }
 
-  async createDelivery(webhookConfigId: string, payload: any, statusCode?: number, responseBody?: string, errorMessage?: string) {
+  async createDelivery(webhookConfigId: string, payload: unknown, statusCode?: number, responseBody?: string, errorMessage?: string) {
     return prisma.webhookDelivery.create({
       data: {
         webhookConfigId,

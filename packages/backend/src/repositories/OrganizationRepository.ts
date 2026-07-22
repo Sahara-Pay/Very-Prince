@@ -93,6 +93,10 @@ export class OrganizationRepository {
     });
   }
 
+  encodeCursor(org: Organization): string {
+    return OrganizationRepository.encodeCursor(org);
+  }
+
   async count(search?: string): Promise<number> {
     const where = search ? {
       OR: [

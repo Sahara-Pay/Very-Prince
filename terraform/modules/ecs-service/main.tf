@@ -10,6 +10,43 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 locals {
+  container_environment = concat(
+    [
+      {
+        name  = "AWS_REGION"
+        value = var.aws_region
+      },
+    ],
+    var.webhook_queue_url == "" ? [] : [
+      {
+        name  = "WEBHOOK_QUEUE_PROVIDER"
+        value = "sqs"
+      },
+      {
+        name  = "WEBHOOK_QUEUE_URL"
+        value = var.webhook_queue_url
+      },
+      {
+        name  = "WEBHOOK_QUEUE_MAX_RECEIVE_COUNT"
+        value = tostring(var.webhook_queue_max_receive_count)
+      },
+      {
+        name  = "WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS"
+        value = tostring(var.webhook_queue_visibility_timeout_seconds)
+      },
+    ],
+    var.webhook_dlq_url == "" ? [] : [
+      {
+        name  = "WEBHOOK_DLQ_ENABLED"
+        value = "true"
+      },
+      {
+        name  = "WEBHOOK_DLQ_URL"
+        value = var.webhook_dlq_url
+      },
+    ],
+  )
+
   container_definitions = jsonencode([
     {
       name      = var.name
@@ -31,7 +68,7 @@ locals {
           "awslogs-stream-prefix" = "ecs"
         }
       }
-      environment = []
+      environment = local.container_environment
     }
   ])
 }

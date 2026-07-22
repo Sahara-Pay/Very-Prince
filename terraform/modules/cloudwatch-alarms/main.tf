@@ -43,3 +43,27 @@ resource "aws_cloudwatch_metric_alarm" "memory_high" {
 
   tags = var.tags
 }
+
+resource "aws_cloudwatch_metric_alarm" "webhook_dlq_depth_high" {
+  count = var.webhook_dlq_queue_name == "" ? 0 : 1
+
+  alarm_name          = "${var.cluster_name}-${var.service_name}-webhook-dlq-depth-high"
+  alarm_description   = "Webhook DLQ visible messages >= ${var.webhook_dlq_depth_threshold}; manual inspection required"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  namespace           = "AWS/SQS"
+  period              = var.period_seconds
+  statistic           = "Maximum"
+  threshold           = var.webhook_dlq_depth_threshold
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    QueueName = var.webhook_dlq_queue_name
+  }
+
+  alarm_actions = [var.sns_topic_arn]
+  ok_actions    = [var.sns_topic_arn]
+
+  tags = var.tags
+}

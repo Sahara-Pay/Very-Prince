@@ -30,6 +30,16 @@ variable "period_seconds" {
   default = 60
 }
 
+variable "webhook_dlq_queue_name" {
+  type    = string
+  default = ""
+}
+
+variable "webhook_dlq_depth_threshold" {
+  type    = number
+  default = 1
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

@@ -58,6 +58,24 @@ variable "log_retention_days" {
   default     = 30
 }
 
+variable "webhook_queue_visibility_timeout_seconds" {
+  description = "Visibility timeout for webhook SQS worker messages."
+  type        = number
+  default     = 30
+}
+
+variable "webhook_queue_max_receive_count" {
+  description = "Number of failed webhook message receives before redrive to the DLQ."
+  type        = number
+  default     = 5
+}
+
+variable "webhook_dlq_depth_threshold" {
+  description = "Visible message count in the webhook DLQ that triggers an alarm."
+  type        = number
+  default     = 1
+}
+
 variable "service_name" {
   description = "ECS service name (also used for log group prefix)"
   type        = string

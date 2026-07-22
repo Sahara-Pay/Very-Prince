@@ -11,6 +11,8 @@ mod tests {
         env: Env,
         client: PayoutRegistryClient<'static>,
         #[allow(dead_code)]
+        protocol_admin: Address,
+        #[allow(dead_code)]
         token_admin: Address,
         token: token::StellarAssetClient<'static>,
     }
@@ -26,20 +28,17 @@ mod tests {
         let contract_id = env.register_contract(None, PayoutRegistry);
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
-        // Create 3 protocol admins with threshold of 2 for multisig
-        let admin1 = Address::generate(&env);
-        let admin2 = Address::generate(&env);
-        let admin3 = Address::generate(&env);
+        // Native multisig policy belongs to this address, not to signer payloads.
+        let protocol_admin = Address::generate(&env);
         let mut admins = Vec::new(&env);
-        admins.push_back(admin1.clone());
-        admins.push_back(admin2.clone());
-        admins.push_back(admin3.clone());
+        admins.push_back(protocol_admin.clone());
 
-        client.init(&token_contract_id.address(), &admins, &2);
+        client.init(&token_contract_id.address(), &admins, &1);
 
         Setup {
             env,
             client,
+            protocol_admin,
             token_admin,
             token: token_client,
         }
@@ -64,6 +63,23 @@ mod tests {
         let mut admins = Vec::new(&env);
         admins.push_back(Address::generate(&env));
         let result = client.try_init(&additional_token, &admins, &1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_init_rejects_legacy_contract_side_multisig_config() {
+        let env = Env::default();
+        let token_admin = Address::generate(&env);
+        let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+        let contract_id = env.register_contract(None, PayoutRegistry);
+        let client = PayoutRegistryClient::new(&env, &contract_id);
+
+        let mut admins = Vec::new(&env);
+        admins.push_back(Address::generate(&env));
+        admins.push_back(Address::generate(&env));
+
+        let result = client.try_init(&token_contract_id.address(), &admins, &2);
         assert!(result.is_err());
     }
 
@@ -448,10 +464,10 @@ mod tests {
         assert!(result.is_err()); // Limit is 10
     }
 
-    // ── Multisig Protocol Admin Tests ───────────────────────────────────────────
+    // ── Native Protocol Admin Auth Tests ───────────────────────────────────────
 
     #[test]
-    fn test_multisig_upgrade_with_three_keypairs() {
+    fn test_protocol_admin_native_auth_controls_state_mutations() {
         let env = Env::default();
         let token_admin = Address::generate(&env);
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
@@ -460,23 +476,17 @@ mod tests {
         let contract_id = env.register_contract(None, PayoutRegistry);
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
-        // Create 3 unique protocol admin keypairs
-        let admin1 = Address::generate(&env);
-        let admin2 = Address::generate(&env);
-        let admin3 = Address::generate(&env);
-
+        let protocol_admin = Address::generate(&env);
         let mut admins = Vec::new(&env);
-        admins.push_back(admin1.clone());
-        admins.push_back(admin2.clone());
-        admins.push_back(admin3.clone());
+        admins.push_back(protocol_admin.clone());
 
-        // Initialize with threshold of 2 (requires 2-of-3 signatures)
-        client.init(&token_contract_id.address(), &admins, &2);
+        client.init(&token_contract_id.address(), &admins, &1);
 
-        // Verify multisig configuration
+        // Verify native protocol admin configuration.
         let multisig_admin = client.get_multisig_admin();
-        assert_eq!(multisig_admin.admins.len(), 3);
-        assert_eq!(multisig_admin.threshold, 2);
+        assert_eq!(multisig_admin.admins.len(), 1);
+        assert_eq!(multisig_admin.admins.get(0).unwrap(), protocol_admin);
+        assert_eq!(multisig_admin.threshold, 1);
 
         let hash_bytes = [
             0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
@@ -485,128 +495,97 @@ mod tests {
         ];
         let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &hash_bytes);
 
-        // Test 1: Upgrade with only 1 signature should fail
-        let mut signers1 = Vec::new(&env);
-        signers1.push_back(admin1.clone());
+        // Missing native admin auth must fail before mutating protocol state.
+        let result = client.try_pause_protocol();
+        assert!(result.is_err());
+        assert_eq!(client.get_protocol_state(), crate::ProtocolState::Active);
 
+        let outsider = Address::generate(&env);
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &admin1,
+            address: &outsider,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &contract_id,
-                fn_name: "upgrade",
-                args: (signers1.clone(), new_wasm_hash.clone()).into_val(&env),
+                fn_name: "pause_protocol",
+                args: ().into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        let result = client.try_upgrade(&signers1, &new_wasm_hash);
+        let result = client.try_pause_protocol();
         assert!(result.is_err());
+        assert_eq!(client.get_protocol_state(), crate::ProtocolState::Active);
 
-        // Test 2: Upgrade with 2 signatures should succeed
-        let mut signers2 = Vec::new(&env);
-        signers2.push_back(admin1.clone());
-        signers2.push_back(admin2.clone());
-
-        env.mock_auths(&[
-            soroban_sdk::testutils::MockAuth {
-                address: &admin1,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "upgrade",
-                    args: (signers2.clone(), new_wasm_hash.clone()).into_val(&env),
-                    sub_invokes: &[],
-                },
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &protocol_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause_protocol",
+                args: ().into_val(&env),
+                sub_invokes: &[],
             },
-            soroban_sdk::testutils::MockAuth {
-                address: &admin2,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "upgrade",
-                    args: (signers2.clone(), new_wasm_hash.clone()).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-        ]);
+        }]);
 
-        let result = client.try_upgrade(&signers2, &new_wasm_hash);
-        assert!(result.is_ok());
-
-        // Test 3: Pause with 2 signatures should succeed
-        let mut signers_pause = Vec::new(&env);
-        signers_pause.push_back(admin2.clone());
-        signers_pause.push_back(admin3.clone());
-
-        env.mock_auths(&[
-            soroban_sdk::testutils::MockAuth {
-                address: &admin2,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "pause_protocol",
-                    args: (signers_pause.clone(),).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-            soroban_sdk::testutils::MockAuth {
-                address: &admin3,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "pause_protocol",
-                    args: (signers_pause.clone(),).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-        ]);
-
-        let result = client.try_pause_protocol(&signers_pause);
+        let result = client.try_pause_protocol();
         assert!(result.is_ok());
         assert_eq!(client.get_protocol_state(), crate::ProtocolState::Paused);
 
-        // Test 4: Unpause with only 1 signature should fail
-        let mut signers_unpause1 = Vec::new(&env);
-        signers_unpause1.push_back(admin1.clone());
-
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &admin1,
+            address: &protocol_admin,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "unpause_protocol",
-                args: (signers_unpause1.clone(),).into_val(&env),
+                args: ().into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        let result = client.try_unpause_protocol(&signers_unpause1);
-        assert!(result.is_err());
-
-        // Test 5: Unpause with 2 signatures should succeed
-        let mut signers_unpause2 = Vec::new(&env);
-        signers_unpause2.push_back(admin1.clone());
-        signers_unpause2.push_back(admin3.clone());
-
-        env.mock_auths(&[
-            soroban_sdk::testutils::MockAuth {
-                address: &admin1,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "unpause_protocol",
-                    args: (signers_unpause2.clone(),).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-            soroban_sdk::testutils::MockAuth {
-                address: &admin3,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "unpause_protocol",
-                    args: (signers_unpause2.clone(),).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-        ]);
-
-        let result = client.try_unpause_protocol(&signers_unpause2);
+        let result = client.try_unpause_protocol();
         assert!(result.is_ok());
         assert_eq!(client.get_protocol_state(), crate::ProtocolState::Active);
+
+        let new_admin = Address::generate(&env);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &protocol_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_propose_admin(&new_admin);
+        assert!(result.is_ok());
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &new_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_accept_admin(&new_admin);
+        assert!(result.is_ok());
+        let multisig_admin = client.get_multisig_admin();
+        assert_eq!(multisig_admin.admins.len(), 1);
+        assert_eq!(multisig_admin.admins.get(0).unwrap(), new_admin);
+        assert_eq!(multisig_admin.threshold, 1);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &new_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (new_wasm_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_upgrade(&new_wasm_hash);
+        assert!(result.is_ok());
     }
 
     // ── Property-based Fuzz Tests ──────────────────────────────────────────

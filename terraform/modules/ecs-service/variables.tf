@@ -78,6 +78,42 @@ variable "aws_region" {
   type        = string
 }
 
+variable "webhook_queue_arn" {
+  description = "ARN of the SQS queue used for webhook dispatches."
+  type        = string
+  default     = ""
+}
+
+variable "webhook_queue_url" {
+  description = "URL of the SQS queue used for webhook dispatches."
+  type        = string
+  default     = ""
+}
+
+variable "webhook_dlq_arn" {
+  description = "ARN of the SQS dead-letter queue for failed webhook dispatches."
+  type        = string
+  default     = ""
+}
+
+variable "webhook_dlq_url" {
+  description = "URL of the SQS dead-letter queue for failed webhook dispatches."
+  type        = string
+  default     = ""
+}
+
+variable "webhook_queue_max_receive_count" {
+  description = "Number of failed SQS receives before a webhook message is considered exhausted."
+  type        = number
+  default     = 5
+}
+
+variable "webhook_queue_visibility_timeout_seconds" {
+  description = "Visibility timeout used by the SQS webhook worker."
+  type        = number
+  default     = 30
+}
+
 variable "tags" {
   description = "Tags to apply"
   type        = map(string)

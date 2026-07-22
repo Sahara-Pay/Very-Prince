@@ -212,7 +212,7 @@ https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashbo
 
 ## Overview
 
-This document describes the AWS infrastructure provisioned via Terraform for the very-prince backend service and its Next.js static-asset CDN. The infrastructure enables CloudWatch log aggregation, metric alarms, dashboards, SNS alert notifications for an ECS Fargate cluster, global delivery of immutable frontend bundles, and automated lifecycle management for RDS snapshots.
+This document describes the AWS infrastructure provisioned via Terraform for the very-prince backend service and its Next.js static-asset CDN. The infrastructure enables CloudWatch log aggregation, metric alarms, dashboards, SNS alert notifications for an ECS Fargate cluster, durable SQS webhook dispatch with dead-letter handling, global delivery of immutable frontend bundles, and automated lifecycle management for RDS snapshots.
 
 ```mermaid
 flowchart TD
@@ -236,8 +236,11 @@ flowchart TD
         State["Terraform State\nS3 + DynamoDB"]
         StateBucket["S3 Bucket\nvery-prince-terraform-state\n(KMS SSE, versioning,\nSSL-only bucket policy)"]
         LockTable["DynamoDB Table\nvery-prince-terraform-locks\n(Pay-per-request,\nLockID hash key,\nPITR + SSE)"]
+        WebhookQueue["SQS Queue\nwebhook-dispatch"]
+        WebhookDLQ["SQS DLQ\nwebhook-dispatch-dlq"]
         State --- StateBucket
         State --- LockTable
+        WebhookQueue -->|redrive after retries| WebhookDLQ
         
         subgraph DataProtection["Data Protection"]
             EBRule["EventBridge Rule\nvery-prince-shared-prune-schedule"]
@@ -253,8 +256,11 @@ flowchart TD
     Browser["Browser"] -->|HTTPS /_next/static/*| CDN["CloudFront\nGlobal edge network"]
     CDN -->|OAC SigV4| Assets["Private S3 asset bucket\n_next/static/* only"]
     Service -->|awslogs driver| CWLogs
+    Service -->|enqueue/poll/delete| WebhookQueue
+    Service -->|final failure envelope| WebhookDLQ
     CWLogs -->|metric filters| CWDashboard
     CWAlerts -->|alarm actions| SNSTopic
+    WebhookDLQ -->|depth alarm| CWAlerts
     SNSTopic -->|email| Email
     Jenkins -->|deploy| Service
 ```
@@ -360,7 +366,15 @@ These validations fail `terraform plan` early, before any AWS API call, so misco
 ### CloudWatch Alarms (`terraform/modules/cloudwatch-alarms/`)
 - **CPU High**: `CPUUtilization ≥ 80%` for 2 × 60s periods
 - **Memory High**: `MemoryUtilization ≥ 80%` for 2 × 60s periods
+- **Webhook DLQ Depth High**: `ApproximateNumberOfMessagesVisible ≥ 1` for the webhook DLQ
 - Both route to SNS topic for notification
+
+### Webhook SQS Queue (`terraform/modules/sqs-webhook-queue/`)
+- Source queue: `${project_name}-${environment}-webhook-dispatch`
+- Dead-letter queue: `${project_name}-${environment}-webhook-dispatch-dlq`
+- SQS-managed server-side encryption enabled on both queues
+- Redrive policy sends messages to the DLQ after `webhook_queue_max_receive_count` failed receives
+- ECS tasks receive/delete source queue messages and publish final failure envelopes to the DLQ for manual inspection
 
 ### CloudWatch Dashboard (`terraform/modules/cloudwatch-dashboard/`)
 - Cluster CPU/Memory (stacked)
@@ -398,8 +412,9 @@ These validations fail `terraform plan` early, before any AWS API call, so misco
 4. SNS delivers to email subscribers (and any HTTPS/Lambda endpoints added manually)
 5. Dashboard visualizes all metrics in single pane
 6. Browser requests for `/_next/static/*` are served from the nearest CloudFront edge; cache misses are signed and fetched from the private S3 origin.
-7. Jenkins builds `packages/backend/Dockerfile` as `very-prince-backend:$BUILD_NUMBER` and scans that exact local image with Trivy before Terraform can apply changes.
-8. EventBridge invokes the snapshot pruning Lambda on its configured schedule; the Lambda deletes manual RDS snapshots older than `rds_snapshot_retention_days`.
+7. Webhook events enqueue to SQS and are deleted only after successful delivery. Failed receives remain available for retry; exhausted messages are copied to the DLQ with failure metadata, with native SQS redrive as a fallback.
+8. Jenkins builds `packages/backend/Dockerfile` as `very-prince-backend:$BUILD_NUMBER` and scans that exact local image with Trivy before Terraform can apply changes.
+9. EventBridge invokes the snapshot pruning Lambda on its configured schedule; the Lambda deletes manual RDS snapshots older than `rds_snapshot_retention_days`.
 
 ## Jenkins Pipeline (`Jenkinsfile`)
 - Declarative syntax
@@ -434,6 +449,7 @@ https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashbo
 ### Alarm Names
 - `very-prince-very-prince-backend-cpu-high`
 - `very-prince-very-prince-backend-memory-high`
+- `very-prince-very-prince-backend-webhook-dlq-depth-high`
 
 ### SNS Topic
 - `very-prince-shared-critical-alerts`

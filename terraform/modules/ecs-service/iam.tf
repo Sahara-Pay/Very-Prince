@@ -58,8 +58,34 @@ data "aws_iam_policy_document" "execution_policy" {
 }
 
 data "aws_iam_policy_document" "task_policy" {
-  # Add least-privilege permissions for the application here
-  # e.g., SSM parameter read, Secrets Manager read, etc.
+  dynamic "statement" {
+    for_each = var.webhook_queue_arn == "" ? [] : [var.webhook_queue_arn]
+
+    content {
+      sid = "WebhookQueueWorker"
+      actions = [
+        "sqs:ChangeMessageVisibility",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ReceiveMessage",
+        "sqs:SendMessage",
+      ]
+      resources = [statement.value]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.webhook_dlq_arn == "" ? [] : [var.webhook_dlq_arn]
+
+    content {
+      sid = "WebhookDlqWrite"
+      actions = [
+        "sqs:GetQueueAttributes",
+        "sqs:SendMessage",
+      ]
+      resources = [statement.value]
+    }
+  }
 }
 
 resource "aws_iam_role" "execution" {

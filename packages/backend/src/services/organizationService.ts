@@ -105,18 +105,25 @@ export class OrganizationService {
       })
     );
 
-    const startCursor = data.length > 0 ? OrganizationRepository.encodeCursor(repoResult.data[0]) : undefined;
-    const endCursor = data.length > 0 ? OrganizationRepository.encodeCursor(repoResult.data[data.length - 1]) : undefined;
+    const firstOrg = repoResult.data[0];
+    const lastOrg = repoResult.data[data.length - 1];
+    const meta: CursorPaginatedOrgsResponse["meta"] = {
+      totalCount,
+      hasNextPage: repoResult.hasNextPage,
+      hasPrevPage: repoResult.hasPrevPage,
+    };
+
+    if (firstOrg) {
+      meta.startCursor = organizationRepository.encodeCursor(firstOrg);
+    }
+
+    if (lastOrg) {
+      meta.endCursor = organizationRepository.encodeCursor(lastOrg);
+    }
 
     const response: CursorPaginatedOrgsResponse = {
       data,
-      meta: {
-        totalCount,
-        hasNextPage: repoResult.hasNextPage,
-        hasPrevPage: repoResult.hasPrevPage,
-        startCursor,
-        endCursor,
-      },
+      meta,
     };
 
     if (!cursor) {

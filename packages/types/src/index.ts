@@ -151,10 +151,10 @@ export enum PrinceError {
 export const PrinceErrorMessage: Record<PrinceError, string> = {
   [PrinceError.AlreadyInitialized]: "The contract is already initialized.",
   [PrinceError.EmptyAdminList]: "The admin list cannot be empty.",
-  [PrinceError.InvalidThreshold]: "The multisig threshold is invalid.",
+  [PrinceError.InvalidThreshold]: "The native protocol admin config is invalid.",
   [PrinceError.ContractNotInitialized]: "The contract has not been initialized yet.",
   [PrinceError.ProtocolPaused]: "The protocol is currently paused for maintenance.",
-  [PrinceError.InsufficientMultisigAuth]: "Insufficient signatures provided for this multisig action.",
+  [PrinceError.InsufficientMultisigAuth]: "Legacy signer payloads are not accepted for protocol admin actions.",
   [PrinceError.OrgAlreadyRegistered]: "This organization is already registered.",
   [PrinceError.OrgNotFound]: "Organization not found.",
   [PrinceError.NotAuthorized]: "You are not authorized to perform this action.",

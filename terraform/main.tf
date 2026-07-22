@@ -177,6 +177,19 @@ module "sns_topics" {
   }
 }
 
+module "webhook_queue" {
+  source = "./modules/sqs-webhook-queue"
+
+  name                       = "${var.project_name}-${var.environment}-webhook-dispatch"
+  visibility_timeout_seconds = var.webhook_queue_visibility_timeout_seconds
+  max_receive_count          = var.webhook_queue_max_receive_count
+
+  tags = {
+    Project     = var.project_name
+    Environment = var.environment
+  }
+}
+
 module "ecs_service" {
   source             = "./modules/ecs-service"
   name               = var.service_name
@@ -451,6 +464,25 @@ module "ecs_service" {
   service_sg_id      = module.networking.ecs_tasks_security_group_id
   target_group_arn   = module.networking.target_group_arn
   aws_region         = var.aws_region
+  source                                   = "./modules/ecs-service"
+  name                                     = var.service_name
+  cluster_id                               = module.ecs_cluster.cluster_id
+  cluster_name                             = module.ecs_cluster.cluster_name
+  log_group_name                           = module.cloudwatch_logs.log_group_name
+  image_uri                                = var.image_uri
+  task_cpu                                 = var.task_cpu
+  task_memory                              = var.task_memory
+  desired_count                            = var.desired_count
+  private_subnet_ids                       = module.networking.private_subnet_ids
+  service_sg_id                            = module.networking.ecs_tasks_security_group_id
+  target_group_arn                         = module.networking.target_group_arn
+  aws_region                               = var.aws_region
+  webhook_queue_arn                        = module.webhook_queue.queue_arn
+  webhook_queue_url                        = module.webhook_queue.queue_url
+  webhook_dlq_arn                          = module.webhook_queue.dlq_arn
+  webhook_dlq_url                          = module.webhook_queue.dlq_url
+  webhook_queue_max_receive_count          = var.webhook_queue_max_receive_count
+  webhook_queue_visibility_timeout_seconds = var.webhook_queue_visibility_timeout_seconds
 
   tags = {
     Project     = var.project_name
@@ -459,14 +491,16 @@ module "ecs_service" {
 }
 
 module "cloudwatch_alarms" {
-  source               = "./modules/cloudwatch-alarms"
-  cluster_name         = module.ecs_cluster.cluster_name
-  service_name         = module.ecs_service.service_name
-  sns_topic_arn        = module.sns_topics.topic_arn
-  cpu_threshold_pct    = var.cpu_threshold_pct
-  memory_threshold_pct = var.memory_threshold_pct
-  evaluation_periods   = 2
-  period_seconds       = 60
+  source                      = "./modules/cloudwatch-alarms"
+  cluster_name                = module.ecs_cluster.cluster_name
+  service_name                = module.ecs_service.service_name
+  sns_topic_arn               = module.sns_topics.topic_arn
+  cpu_threshold_pct           = var.cpu_threshold_pct
+  memory_threshold_pct        = var.memory_threshold_pct
+  evaluation_periods          = 2
+  period_seconds              = 60
+  webhook_dlq_queue_name      = module.webhook_queue.dlq_name
+  webhook_dlq_depth_threshold = var.webhook_dlq_depth_threshold
 
   tags = {
     Project     = var.project_name

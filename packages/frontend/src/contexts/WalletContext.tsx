@@ -1,18 +1,25 @@
 /**
  * @file WalletContext.tsx
- * @description React Context provider for Freighter wallet integration
- * 
+ * @description React Context provider for wallet integration, backed by the
+ * `walletMachine` XState v5 state machine (see `machines/walletMachine.ts`).
+ *
  * This context provides:
  * - Wallet connection state (public key, network, connection status)
- * - Functions to connect/disconnect wallet
- * - Network change monitoring
- * - Global wallet state management across the app
+ * - Multi-wallet discovery via EIP-6963 + legacy-injected fallbacks
+ * - Hardware wallet (Ledger) timeout recovery prompts
+ * - Session persistence across page reloads
+ * - Functions to connect/disconnect/sign, kept API-compatible with the
+ *   previous Freighter-only implementation so existing consumers
+ *   (AuthContext, useFreighter, WalletTest, ...) keep working unchanged.
  */
 
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
-import freighterApi from '@stellar/freighter-api';
+import React, { createContext, useContext, useEffect, useMemo, useCallback } from 'react';
+import { useMachine } from '@xstate/react';
+import { waitFor } from 'xstate';
+import { walletMachine } from '../machines/walletMachine';
+import { subscribeToProviders, type WalletProviderInfo } from '../lib/web3/eip6963';
 
 // ── Type Definitions ───────────────────────────────────────────────────────
 
@@ -33,32 +40,23 @@ export interface WalletContextType extends WalletState {
   checkConnection: () => Promise<void>;
   signTransaction: (transactionXdr: string) => Promise<string>;
   isLoading: boolean;
+  /** Every wallet extension discovered so far (EIP-6963 + legacy), de-duplicated by rdns. */
+  providers: WalletProviderInfo[];
+  /** Connect to a specific discovered wallet instead of the default (Freighter). */
+  selectWallet: (rdns: string) => void;
+  /** True once the wallet reported a network other than Stellar Testnet while connected. */
+  isWrongNetwork: boolean;
+  /** True while waiting on a hardware wallet (e.g. Ledger) to respond. */
+  isHardwareTimeout: boolean;
+  /** Retry a connect/sign attempt after a hardware wallet timeout. */
+  retryConnection: () => void;
+  /** Cancel a pending hardware wallet wait. */
+  cancelHardwareWait: () => void;
 }
 
 // ── Context Creation ───────────────────────────────────────────────────────
 
 const WalletContext = createContext<WalletContextType | undefined>(undefined);
-
-// ── Helper Functions ───────────────────────────────────────────────────────
-
-const getNetworkFromFreighter = async (): Promise<NetworkType> => {
-  try {
-    const network = await freighterApi.getNetwork();
-    return network === 'PUBLIC' ? 'public' : 'testnet';
-  } catch (error) {
-    console.warn('Failed to get network from Freighter:', error);
-    return 'testnet'; // Default to testnet
-  }
-};
-
-const getPublicKeyFromFreighter = async (): Promise<string | null> => {
-  try {
-    return await freighterApi.getPublicKey();
-  } catch (error) {
-    console.warn('Failed to get public key from Freighter:', error);
-    return null;
-  }
-};
 
 // ── Provider Component ─────────────────────────────────────────────────────
 
@@ -67,235 +65,137 @@ interface WalletProviderProps {
 }
 
 export function WalletProvider({ children }: WalletProviderProps) {
-  const [walletState, setWalletState] = useState<WalletState>({
-    publicKey: null,
-    network: 'testnet',
-    isConnected: false,
-    isConnecting: false,
-    isInitialized: false,
-    error: null,
-  });
+  const [snapshot, send, actorRef] = useMachine(walletMachine, { input: {} });
 
-  // ── Wallet Connection Functions ───────────────────────────────────────────
-
-  const connectWallet = useCallback(async () => {
-    setWalletState(prev => ({ ...prev, isConnecting: true, error: null }));
-
-    try {
-      // Check if Freighter is installed
-      const isInstalled = await freighterApi.isConnected();
-      if (!isInstalled) {
-        throw new Error('Freighter wallet is not installed. Please install it to continue.');
-      }
-
-      // Get public key
-      const publicKey = await getPublicKeyFromFreighter();
-      if (!publicKey) {
-        throw new Error('Failed to get public key from Freighter wallet.');
-      }
-
-      // Get current network
-      const network = await getNetworkFromFreighter();
-
-      // Validate that the network is Testnet
-      if (network !== 'testnet') {
-        throw new Error('Please switch to Stellar Testnet in Freighter.');
-      }
-
-      setWalletState({
-        publicKey,
-        network,
-        isConnected: true,
-        isConnecting: false,
-        isInitialized: true,
-        error: null,
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to connect wallet';
-      setWalletState(prev => ({
-        ...prev,
-        isConnecting: false,
-        isInitialized: true,
-        error: errorMessage,
-      }));
-    }
-  }, []);
-
-  const disconnectWallet = useCallback(() => {
-    setWalletState({
-      publicKey: null,
-      network: 'testnet',
-      isConnected: false,
-      isConnecting: false,
-      isInitialized: true,
-      error: null,
-    });
-  }, []);
-
-  const signTransaction = useCallback(async (transactionXdr: string): Promise<string> => {
-    if (!walletState.isConnected || !walletState.publicKey) {
-      throw new Error('Wallet is not connected. Call connectWallet() first.');
-    }
-
-    setWalletState(prev => ({ ...prev, isConnecting: true, error: null }));
-
-    try {
-      const signedTxXdr = await freighterApi.signTransaction(transactionXdr, {
-        network: walletState.network === 'public' ? 'PUBLIC' : 'TESTNET',
-        networkPassphrase: 
-          walletState.network === 'public' 
-            ? 'Public Global Stellar Network ; September 2015'
-            : 'Test SDF Network ; September 2015',
-      });
-
-      if (!signedTxXdr) {
-        throw new Error('Transaction signing was rejected or failed.');
-      }
-
-      return signedTxXdr;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Transaction signing failed';
-      setWalletState(prev => ({ ...prev, error: errorMessage }));
-      throw new Error(errorMessage);
-    } finally {
-      setWalletState(prev => ({ ...prev, isConnecting: false }));
-    }
-  }, [walletState.isConnected, walletState.publicKey, walletState.network]);
-
-  const checkConnection = useCallback(async () => {
-    try {
-      const isInstalled = await freighterApi.isConnected();
-      if (!isInstalled) {
-        setWalletState(prev => ({
-          ...prev,
-          isConnected: false,
-          publicKey: null,
-          isInitialized: true,
-          error: 'Freighter wallet is not installed',
-        }));
-        return;
-      }
-
-      const allowed = await freighterApi.isAllowed();
-      if (!allowed) {
-        setWalletState(prev => ({
-          ...prev,
-          isConnected: false,
-          publicKey: null,
-          isInitialized: true,
-          error: null,
-        }));
-        return;
-      }
-
-      const publicKey = await getPublicKeyFromFreighter();
-      const network = await getNetworkFromFreighter();
-
-      // Validate that the network is Testnet
-      if (network !== 'testnet') {
-        setWalletState(prev => ({
-          ...prev,
-          isConnected: false,
-          publicKey: null,
-          error: 'Please switch to Stellar Testnet in Freighter.',
-        }));
-        return;
-      }
-
-      if (publicKey) {
-        setWalletState({
-          publicKey,
-          network,
-          isConnected: true,
-          isConnecting: false,
-          isInitialized: true,
-          error: null,
-        });
-      } else {
-        setWalletState(prev => ({
-          ...prev,
-          isConnected: false,
-          publicKey: null,
-          isInitialized: true,
-          error: null,
-        }));
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to check wallet connection';
-      setWalletState(prev => ({
-        ...prev,
-        isConnected: false,
-        publicKey: null,
-        isInitialized: true,
-        error: errorMessage,
-      }));
-    }
-  }, []);
-
-  // ── Network Change Monitoring ─────────────────────────────────────────────
+  // ── Discover installed wallet extensions (EIP-6963 + legacy fallbacks) ───
 
   useEffect(() => {
-    if (!walletState.isConnected) return;
+    const unsubscribe = subscribeToProviders((detail) => {
+      send({ type: 'PROVIDER_DISCOVERED', detail });
+    });
+    return unsubscribe;
+  }, [send]);
 
-    const handleNetworkChange = async () => {
-      const newNetwork = await getNetworkFromFreighter();
-      setWalletState(prev => ({ ...prev, network: newNetwork }));
+  // ── Freighter-specific event bridge (account/network/disconnect) ─────────
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const freighter = (window as any).freighter;
+    if (!freighter?.on) return;
+
+    const handleAccountChanged = async () => {
+      try {
+        const freighterApi = (await import('@stellar/freighter-api')).default;
+        const publicKey = await freighterApi.getPublicKey();
+        send({ type: 'ACCOUNT_CHANGED', publicKey: publicKey ?? null });
+      } catch {
+        send({ type: 'ACCOUNT_CHANGED', publicKey: null });
+      }
     };
+    const handleDisconnected = () => send({ type: 'EXT_DISCONNECTED' });
 
-    // Listen for network changes from Freighter
-    const unsubscribe = (freighterApi as any).onNetworkChange?.(handleNetworkChange);
+    freighter.on('accountChanged', handleAccountChanged);
+    freighter.on('disconnected', handleDisconnected);
 
     return () => {
-      unsubscribe?.();
+      freighter.off?.('accountChanged', handleAccountChanged);
+      freighter.off?.('disconnected', handleDisconnected);
     };
-  }, [walletState.isConnected]);
+  }, [send]);
 
-  // ── Wallet Event Listeners ────────────────────────────────────────────────
+  // ── Derived state ─────────────────────────────────────────────────────────
 
-  useEffect(() => {
-    const handleWalletChange = () => {
-      checkConnection();
-    };
+  const isConnected = snapshot.matches({ connected: 'idle' }) || snapshot.matches({ connected: 'wrongNetwork' });
+  const isConnecting = snapshot.matches('connecting') || snapshot.matches({ connected: 'signing' });
+  const isHardwareTimeout = snapshot.matches('hardwareTimeoutConnect') || snapshot.matches({ connected: 'hardwareTimeoutSign' });
+  const isWrongNetwork = snapshot.matches({ connected: 'wrongNetwork' });
 
-    if (typeof window !== 'undefined' && (window as any).freighter) {
-      const freighter = (window as any).freighter;
-      freighter.on?.('accountChanged', handleWalletChange);
-      freighter.on?.('connected', handleWalletChange);
-      freighter.on?.('disconnected', handleWalletChange);
+  // ── Imperative, Promise-based API (kept compatible with previous version) ─
 
-      return () => {
-        freighter.off?.('accountChanged', handleWalletChange);
-        freighter.off?.('connected', handleWalletChange);
-        freighter.off?.('disconnected', handleWalletChange);
-      };
-    }
-  }, [checkConnection]);
+  const connectWallet = useCallback(async () => {
+    send({ type: 'CONNECT' });
+    await waitFor(
+      actorRef,
+      (s) => s.matches('disconnected') || s.matches({ connected: 'idle' }) || s.matches({ connected: 'wrongNetwork' })
+    );
+  }, [send, actorRef]);
 
-  // ── Initial Connection Check ─────────────────────────────────────────────
+  const disconnectWallet = useCallback(() => {
+    send({ type: 'DISCONNECT' });
+  }, [send]);
 
-  useEffect(() => {
-    checkConnection();
-  }, [checkConnection]);
+  const checkConnection = useCallback(async () => {
+    await connectWallet();
+  }, [connectWallet]);
+
+  const signTransaction = useCallback(
+    async (transactionXdr: string): Promise<string> => {
+      const current = actorRef.getSnapshot();
+      if (!current.matches({ connected: 'idle' }) && !current.matches({ connected: 'wrongNetwork' })) {
+        throw new Error('Wallet is not connected. Call connectWallet() first.');
+      }
+
+      send({ type: 'SIGN_REQUEST', xdr: transactionXdr });
+
+      const settled = await waitFor(
+        actorRef,
+        (s) => s.matches({ connected: 'idle' }) && s.context.pendingSignXdr === null
+      );
+
+      if (settled.context.lastSignedXdr) {
+        return settled.context.lastSignedXdr;
+      }
+      throw new Error(settled.context.error ?? 'Transaction signing failed');
+    },
+    [send, actorRef]
+  );
+
+  const selectWallet = useCallback((rdns: string) => send({ type: 'SELECT_WALLET', rdns }), [send]);
+  const retryConnection = useCallback(() => send({ type: 'RETRY' }), [send]);
+  const cancelHardwareWait = useCallback(() => send({ type: 'CANCEL' }), [send]);
 
   // ── Context Value ─────────────────────────────────────────────────────────
 
   const contextValue: WalletContextType = useMemo(
     () => ({
-      ...walletState,
+      publicKey: snapshot.context.publicKey,
+      network: snapshot.context.network ?? 'testnet',
+      isConnected,
+      isConnecting,
+      isInitialized: true,
+      error: snapshot.context.error,
+      isLoading: isConnecting,
+      providers: snapshot.context.providers,
+      isWrongNetwork,
+      isHardwareTimeout,
       connectWallet,
       disconnectWallet,
       checkConnection,
       signTransaction,
-      isLoading: walletState.isConnecting,
+      selectWallet,
+      retryConnection,
+      cancelHardwareWait,
     }),
-    [walletState, connectWallet, disconnectWallet, checkConnection, signTransaction]
+    [
+      snapshot.context.publicKey,
+      snapshot.context.network,
+      snapshot.context.error,
+      snapshot.context.providers,
+      isConnected,
+      isConnecting,
+      isWrongNetwork,
+      isHardwareTimeout,
+      connectWallet,
+      disconnectWallet,
+      checkConnection,
+      signTransaction,
+      selectWallet,
+      retryConnection,
+      cancelHardwareWait,
+    ]
   );
 
-  return (
-    <WalletContext.Provider value={contextValue}>
-      {children}
-    </WalletContext.Provider>
-  );
+  return <WalletContext.Provider value={contextValue}>{children}</WalletContext.Provider>;
 }
 
 // ── Hook for Using Wallet Context ───────────────────────────────────────────

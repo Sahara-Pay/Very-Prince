@@ -659,6 +659,18 @@ impl PayoutRegistry {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        let budget_key = DataKey::OrgBudget(project_id.clone());
+        let current_budget: i128 = env.storage().persistent().get(&budget_key).unwrap_or(0);
+        let new_budget = current_budget
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+        env.storage().persistent().set(&budget_key, &new_budget);
+        env.storage().persistent().extend_ttl(
+            &budget_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
         let token = Self::get_token(env.clone());
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&contributor, &env.current_contract_address(), &amount);

@@ -142,6 +142,7 @@ mod tests {
         assert_eq!(stats.sqrt_sum, 10);
         assert_eq!(stats.contributor_count, 1);
         assert_eq!(stats.weight, 100);
+        assert_eq!(client.get_org_budget(&org_sym), 100);
     }
 
     #[test]
@@ -189,8 +190,8 @@ mod tests {
         let allocations = client.qf_distribute(&protocol_admin, &projects);
         assert_eq!(allocations.get(0).unwrap().matching_amount, 500);
         assert_eq!(allocations.get(1).unwrap().matching_amount, 500);
-        assert_eq!(client.get_org_budget(&org_a), 500);
-        assert_eq!(client.get_org_budget(&org_b), 500);
+        assert_eq!(client.get_org_budget(&org_a), 700);
+        assert_eq!(client.get_org_budget(&org_b), 900);
         assert_eq!(client.get_qf_matching_pool(), 0);
     }
 

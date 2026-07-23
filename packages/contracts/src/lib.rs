@@ -561,6 +561,9 @@ impl PayoutRegistry {
     /// Return whether an address holds an active proof-of-humanity token.
     pub fn has_humanity(env: Env, human: Address) -> bool {
         let key = DataKey::HumanityVerification(human);
+        if !env.storage().persistent().has(&key) {
+            return false;
+        }
         env.storage().persistent().extend_ttl(
             &key,
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -575,6 +578,9 @@ impl PayoutRegistry {
     /// Return the stored proof-of-humanity record, if present.
     pub fn get_humanity_proof(env: Env, human: Address) -> Option<HumanityProof> {
         let key = DataKey::HumanityVerification(human);
+        if !env.storage().persistent().has(&key) {
+            return None;
+        }
         env.storage().persistent().extend_ttl(
             &key,
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -734,6 +740,9 @@ impl PayoutRegistry {
 
     /// Return the current undistributed QF matching pool.
     pub fn get_qf_matching_pool(env: Env) -> i128 {
+        if !env.storage().persistent().has(&DataKey::QfMatchingPool) {
+            return 0;
+        }
         env.storage().persistent().extend_ttl(
             &DataKey::QfMatchingPool,
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -748,6 +757,9 @@ impl PayoutRegistry {
     /// Return cumulative QF stats for a project.
     pub fn get_qf_project_stats(env: Env, project_id: Symbol) -> QfProjectStats {
         let key = DataKey::QfProjectStats(project_id);
+        if !env.storage().persistent().has(&key) {
+            return Self::empty_qf_stats();
+        }
         env.storage().persistent().extend_ttl(
             &key,
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -762,6 +774,9 @@ impl PayoutRegistry {
     /// Return one human contributor's cumulative amount for a project.
     pub fn get_qf_contribution(env: Env, project_id: Symbol, contributor: Address) -> i128 {
         let key = DataKey::QfContribution(project_id, contributor);
+        if !env.storage().persistent().has(&key) {
+            return 0;
+        }
         env.storage().persistent().extend_ttl(
             &key,
             PERSISTENT_LIFETIME_THRESHOLD,

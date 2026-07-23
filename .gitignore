@@ -38,6 +38,7 @@ Thumbs.db
 # ─── Test Coverage ───────────────────────────────────────────────────────────
 coverage/
 .nyc_output/
+test_snapshots/
 
 # ─── Soroban / Stellar CLI ───────────────────────────────────────────────────
 *.wasm

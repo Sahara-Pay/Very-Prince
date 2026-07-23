@@ -72,6 +72,9 @@ RUN --mount=type=cache,target=/root/.npm,id=npm-cache \
 # ─────────────────────────────────────────────────────────────────────────────
 FROM deps AS builder
 
+# Supplied by Jenkins so the pipeline controls the Turborepo build scope.
+ARG TURBO_FILTER=--filter=@very-prince/frontend...
+
 # Copy build configuration and source. Source is copied AFTER `npm ci` so
 # changes to application code do not invalidate the deps layer.
 COPY tsconfig.base.json turbo.json ./
@@ -85,7 +88,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN --mount=type=cache,target=/app/node_modules/.cache,sharing=locked \
     --mount=type=cache,target=/app/packages/frontend/.turbo,sharing=locked \
     --mount=type=cache,target=/root/.npm,id=npm-cache \
-    npx turbo run build --filter=@very-prince/frontend...
+    npx turbo run build ${TURBO_FILTER}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 5: Minimal production runtime (Next.js standalone)

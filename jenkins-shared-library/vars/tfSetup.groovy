@@ -9,6 +9,11 @@ def call(Map params) {
         terraform: [sh: 'terraform -version', bat: 'terraform.exe -version'],
         aws      : [sh: 'aws --version', bat: 'aws --version'],
         docker   : [sh: 'docker --version', bat: 'docker --version'],
+        // turbo ships as a local devDependency in package.json; `npx turbo`
+        // resolves it through the workspace on both Unix and Windows.
+        // On Windows `bat` runs in cmd.exe, where `npx` resolves the
+        // `turbo.cmd` shim from node_modules/.bin transparently.
+        turbo    : [sh: 'npx turbo --version', bat: 'npx turbo --version'],
         trivy    : [sh: 'trivy --version', bat: 'trivy --version'],
     ]
 

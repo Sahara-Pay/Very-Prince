@@ -6,6 +6,11 @@ variable "REGISTRY" {
   default = "ghcr.io/bridgetthnkechi87-cloud"
 }
 
+variable "TURBO_FILTER" {
+  default = ""
+  description = "Optional Turborepo filter (e.g. '--filter=@very-prince/backend...'). Passed as --build-arg to Dockerfiles."
+}
+
 group "default" {
   targets = ["backend", "frontend"]
 }
@@ -22,6 +27,12 @@ target "backend" {
   cache-from = ["type=registry,ref=${REGISTRY}/very-prince-backend:buildcache"]
   cache-to   = ["type=registry,ref=${REGISTRY}/very-prince-backend:buildcache,mode=max"]
   output     = ["type=registry"]
+  // TURBO_FILTER is passed as --build-arg so the Dockerfile's turbo runs
+  // only build the target workspace + its deps (matches Jenkins behavior).
+  // Override at build time: docker buildx bake --set "backend.args.TURBO_FILTER=--filter=@very-prince/backend..."
+  args = {
+    TURBO_FILTER = "${TURBO_FILTER}"
+  }
 }
 
 target "frontend" {
@@ -32,6 +43,9 @@ target "frontend" {
   cache-from = ["type=registry,ref=${REGISTRY}/very-prince-frontend:buildcache"]
   cache-to   = ["type=registry,ref=${REGISTRY}/very-prince-frontend:buildcache,mode=max"]
   output     = ["type=registry"]
+  args = {
+    TURBO_FILTER = "${TURBO_FILTER}"
+  }
 }
 
 // Usage examples (run from repo root):
@@ -50,6 +64,10 @@ target "frontend" {
 //
 // 5. Build only backend:
 //    docker buildx bake backend
+//
+// 6. Build with Turborepo filter (matches Jenkins dynamic behavior):
+//    docker buildx bake --set "*.args.TURBO_FILTER=--filter=@very-prince/backend..." backend
+//    docker buildx bake --set "*.args.TURBO_FILTER=--filter=@very-prince/frontend..." frontend
 //
 // Notes:
 // - The registry cache refs must be accessible from the build host.

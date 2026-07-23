@@ -1,0 +1,37 @@
+enum SagaStatus {
+  PREPARED
+  SUBMITTED
+  SUCCESS
+  FAILED
+}
+
+model ClaimSaga {
+  id                String     @id // Idempotency key/Saga ID
+  orgId             String
+  maintainerAddress String
+  amountStroops     BigInt
+  status            SagaStatus @default(PREPARED)
+  txHash            String?
+  unsignedXdr       String     @db.Text
+  signedXdr         String?    @db.Text
+  errorMessage      String?    @db.Text
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  @@index([maintainerAddress])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model SagaAuditLog {
+  id        String   @id @default(cuid())
+  sagaId    String
+  fromState String
+  toState   String
+  event     String
+  payload   String?  @db.Text
+  createdAt DateTime @default(now())
+
+  @@index([sagaId])
+  @@index([createdAt])
+}

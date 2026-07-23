@@ -3,7 +3,7 @@ import {
   PaginatedOrgsResponse,
 } from "../services/organizationService.js";
 import { payoutService } from "../services/payoutService.js";
-import { stellarService } from "../services/stellarService.js";
+import { claimSagaService } from "../services/claimSagaService.js";
 import type {
   OrgResponse,
   MaintainersResponse,
@@ -168,7 +168,7 @@ export const contractController = {
     orgId: string,
     maintainerAddress: string,
   ): Promise<ClaimTransactionResponse> {
-    const transactionXdr = await stellarService.createClaimPayoutTransaction(
+    const { transactionXdr } = await claimSagaService.prepareClaim(
       orgId,
       maintainerAddress,
     );
@@ -181,12 +181,13 @@ export const contractController = {
   async submitTransaction(
     signedTransaction: string,
   ): Promise<SubmitTransactionResponse> {
-    const result = await stellarService.submitTransaction(signedTransaction);
+    const result = await claimSagaService.submitClaim(signedTransaction);
     return {
       success: result.success,
       ...(result.transactionHash !== undefined
         ? { transactionHash: result.transactionHash }
         : {}),
+      ...(result.message !== undefined ? { message: result.message } : {}),
     };
   },
 } as const;

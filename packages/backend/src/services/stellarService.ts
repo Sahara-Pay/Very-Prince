@@ -894,6 +894,49 @@ export class StellarService {
   }
 
   /**
+   * Check transaction status on-chain.
+   */
+  async getTransactionStatus(hash: string): Promise<{ status: string; success: boolean }> {
+    try {
+      const result = await this.rpcServer.getTransaction(hash);
+      if (result.status === "SUCCESS") {
+        return { status: "SUCCESS", success: true };
+      }
+      if (result.status === "FAILED") {
+        return { status: "FAILED", success: false };
+      }
+      if (result.status === "NOT_FOUND") {
+        if (this.fallback) {
+          const fallbackResult = await this.fallback.getTransaction(hash);
+          if (fallbackResult.ok) {
+            return {
+              status: fallbackResult.value.status,
+              success: fallbackResult.value.status === "SUCCESS",
+            };
+          }
+        }
+        return { status: "NOT_FOUND", success: false };
+      }
+      return { status: (result as any).status || "UNKNOWN", success: false };
+    } catch (error) {
+      if (this.fallback) {
+        try {
+          const fallbackResult = await this.fallback.getTransaction(hash);
+          if (fallbackResult.ok) {
+            return {
+              status: fallbackResult.value.status,
+              success: fallbackResult.value.status === "SUCCESS",
+            };
+          }
+        } catch (fbError) {
+          logger.error({ err: fbError, hash }, "[Stellar] Fallback getTransaction failed");
+        }
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Helper to retrieve all payouts for a maintainer address.
    */
   async getMaintainerPayouts(address: string) {

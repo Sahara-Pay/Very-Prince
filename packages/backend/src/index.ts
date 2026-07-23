@@ -22,6 +22,8 @@ import { notificationController } from './controllers/notificationController.js'
 import { configureTRPC } from './trpc/server.js';
 import { createUwsGateway } from './ws/uwsGateway.js';
 import { webhookWorker } from './workers/WebhookWorker.js';
+import { claimSagaService } from './services/claimSagaService.js';
+import * as cron from 'node-cron';
 import * as Sentry from '@sentry/node';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
 
@@ -155,12 +157,33 @@ server.post('/indexer/sync', {
   },
 }, async () => { await indexerService.triggerSync(); return { message: 'Sync triggered' }; });
 
+let recoveryJob: cron.ScheduledTask | null = null;
+
 try {
   await server.listen({ port: SERVER_PORT, host: SERVER_HOST });
   server.log.info('Very-prince backend listening on http://' + SERVER_HOST + ':' + SERVER_PORT);
   indexerService.start();
+
+  // Start the Saga recovery worker to check for stalled/timed out transactions every minute
+  const recoveryCronExpr = process.env['SAGA_RECOVERY_CRON_EXPRESSION'] || '*/1 * * * *';
+  recoveryJob = cron.schedule(recoveryCronExpr, async () => {
+    try {
+      server.log.info('[Saga Recovery] Running stalled sagas check...');
+      const result = await claimSagaService.recoverStalledSagas();
+      if (result.processedCount > 0) {
+        server.log.info(result, '[Saga Recovery] Completed check');
+      }
+    } catch (err) {
+      server.log.error(err, '[Saga Recovery] Error during stalled sagas check');
+    }
+  });
+
   const gracefulShutdown = async (signal: string) => {
     server.log.info('Received ' + signal + ', shutting down gracefully...');
+    if (recoveryJob) {
+      recoveryJob.stop();
+      recoveryJob = null;
+    }
     indexerService.stop();
     await webhookWorker.stop();
     uwsApp.close();

@@ -8,6 +8,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import useSWR from "swr";
 import { WalletButton } from "@/components/WalletButton";
 import { useSSEWithSWR } from "@/hooks/useSSE";
 import { useUnifiedWallet } from "@/hooks/useUnifiedWallet";
@@ -78,11 +79,10 @@ export default function PayoutsPage() {
         amountXlm: (Number(payout.amountStroops) / 10_000_000).toFixed(2),
       }));
     },
-    {
-      revalidateOnFocus: false,
-      revalidateOnReconnect: true,
-    }
-  );
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: true,
+  });
 
   // Fetch transaction history (claimed payouts) for the connected wallet
   const { data: historyData, error: historyError, isLoading: isHistoryLoading } = useSWR<ProfileStats>(
@@ -104,7 +104,7 @@ export default function PayoutsPage() {
     try {
       await claimPayout(orgId);
       // Refresh the payouts list after successful claim
-      await mutate();
+      await refetch();
     } catch (error) {
       console.error("Failed to claim payout:", error);
     }
@@ -150,16 +150,6 @@ export default function PayoutsPage() {
       alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     },
   });
-
-  const handleClaimPayout = async (orgId: string) => {
-    try {
-      await claimPayout(orgId);
-      // Refresh the payouts list after successful claim
-      await refetch();
-    } catch (error) {
-      console.error("Failed to claim payout:", error);
-    }
-  };
 
   const handleExportData = async (format: 'csv' | 'json') => {
     if (!publicKey) return;

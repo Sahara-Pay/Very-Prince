@@ -69,6 +69,13 @@ pub struct QfAllocation {
     pub weight: i128,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HumanityProof {
+    pub verified_by: Address,
+    pub verified_at: u64,
+}
+
 /// Single-tranche legacy shape used for backward compatibility.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,6 +173,8 @@ pub enum PrinceError {
     EmptyMatchingPool = 31,
     /// The quadratic round has no positive project weight.
     EmptyQuadraticRound = 32,
+    /// A project list cannot contain the same project more than once.
+    DuplicateProject = 33,
 }
 
 #[contracttype]
@@ -477,6 +486,21 @@ impl PayoutRegistry {
         }
     }
 
+    fn assert_unique_projects(env: &Env, projects: &Vec<Symbol>) {
+        if projects.len() > 100 {
+            panic_with_error!(env, PrinceError::BatchSizeExceeded);
+        }
+
+        for i in 0..projects.len() {
+            let left = projects.get(i).unwrap();
+            for j in (i + 1)..projects.len() {
+                if left == projects.get(j).unwrap() {
+                    panic_with_error!(env, PrinceError::DuplicateProject);
+                }
+            }
+        }
+    }
+
     /// Compute floor(sqrt(value)) with integer arithmetic only.
     pub fn isqrt(env: Env, value: i128) -> i128 {
         checked_isqrt_i128(&env, value)
@@ -490,8 +514,12 @@ impl PayoutRegistry {
         }
         admin.require_auth_for_args((human.clone(),).into_val(&env));
 
+        let proof = HumanityProof {
+            verified_by: admin.clone(),
+            verified_at: env.ledger().timestamp(),
+        };
         let key = DataKey::HumanityVerification(human.clone());
-        env.storage().persistent().set(&key, &true);
+        env.storage().persistent().set(&key, &proof);
         env.storage().persistent().extend_ttl(
             &key,
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -503,7 +531,7 @@ impl PayoutRegistry {
                 Symbol::new(&env, "VeryPrince"),
                 Symbol::new(&env, "HumanityVerified"),
             ),
-            human,
+            (human, proof.verified_at),
         );
     }
 
@@ -536,7 +564,21 @@ impl PayoutRegistry {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
-        env.storage().persistent().get(&key).unwrap_or(false)
+        env.storage()
+            .persistent()
+            .get::<DataKey, HumanityProof>(&key)
+            .is_some()
+    }
+
+    /// Return the stored proof-of-humanity record, if present.
+    pub fn get_humanity_proof(env: Env, human: Address) -> Option<HumanityProof> {
+        let key = DataKey::HumanityVerification(human);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().get(&key)
     }
 
     /// Deposit tokens into the quadratic matching pool held by this contract.
@@ -685,7 +727,7 @@ impl PayoutRegistry {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Organisation Management & Funding
+    // Quadratic Funding Views & Distribution
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Return the current undistributed QF matching pool.
@@ -731,6 +773,7 @@ impl PayoutRegistry {
         if projects.is_empty() {
             panic_with_error!(&env, PrinceError::EmptyBatch);
         }
+        Self::assert_unique_projects(&env, &projects);
 
         let pool = Self::get_qf_matching_pool(env.clone());
         if pool <= 0 {
@@ -823,6 +866,10 @@ impl PayoutRegistry {
 
         allocations
     }
+
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Organisation Management & Funding
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /// Registers a new organization with a unique ID, human-readable name, and initial administrator address.
     ///

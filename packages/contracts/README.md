@@ -14,7 +14,7 @@ The contracts package contains the Soroban smart contract implementation for the
 
 The contract exposes a quadratic funding flow that stays fully deterministic on-chain:
 
-- `verify_humanity` and `revoke_humanity` let the protocol admin issue non-transferable proof-of-humanity verification records.
+- `verify_humanity` and `revoke_humanity` let the protocol admin issue non-transferable proof-of-humanity verification records with issuer and timestamp metadata.
 - `qf_deposit_matching_pool` transfers tokens into the shared matching pool.
 - `qf_contribute` accepts verified-human project contributions, stores each human's cumulative contribution, and updates project `sqrt_sum` incrementally.
 - `qf_preview_distribution` computes `pool * project_weight / total_weight`, where `project_weight = sum(isqrt(cumulative_human_contribution))^2`.

@@ -131,6 +131,8 @@ mod tests {
 
         let contributor = Address::generate(&env);
         client.verify_humanity(&protocol_admin, &contributor);
+        let proof = client.get_humanity_proof(&contributor).unwrap();
+        assert_eq!(proof.verified_by, protocol_admin);
         token.mint(&contributor, &1_000);
 
         client.qf_contribute(&org_sym, &contributor, &25);
@@ -193,6 +195,35 @@ mod tests {
         assert_eq!(client.get_org_budget(&org_a), 700);
         assert_eq!(client.get_org_budget(&org_b), 900);
         assert_eq!(client.get_qf_matching_pool(), 0);
+    }
+
+    #[test]
+    fn test_qf_distribution_rejects_duplicate_projects() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("qfdupe");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let sponsor = Address::generate(&env);
+        token.mint(&sponsor, &1_000);
+        client.qf_deposit_matching_pool(&sponsor, &1_000);
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &100);
+        client.qf_contribute(&org_sym, &contributor, &100);
+
+        let mut projects = Vec::new(&env);
+        projects.push_back(org_sym.clone());
+        projects.push_back(org_sym.clone());
+
+        let result = client.try_qf_preview_distribution(&projects);
+        assert!(result.is_err());
     }
 
     #[test]

@@ -8,6 +8,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import useSWR from "swr";
 import { WalletButton } from "@/components/WalletButton";
 import { useSSEWithSWR } from "@/hooks/useSSE";
 import { useUnifiedWallet } from "@/hooks/useUnifiedWallet";

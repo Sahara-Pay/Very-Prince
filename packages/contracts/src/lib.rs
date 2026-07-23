@@ -218,6 +218,46 @@ const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
 /// Maximum allowed amount for funding or payout (1 trillion tokens in stroops).
 const MAX_AMOUNT_LIMIT: i128 = 10_000_000_000_000_000_000;
 
+fn isqrt_u128(n: u128) -> u128 {
+    let mut op = n;
+    let mut res = 0_u128;
+    let mut one = 1_u128 << 126;
+
+    while one > op {
+        one >>= 2;
+    }
+
+    while one != 0 {
+        if op >= res + one {
+            op -= res + one;
+            res = (res >> 1) + one;
+        } else {
+            res >>= 1;
+        }
+        one >>= 2;
+    }
+
+    res
+}
+
+fn checked_isqrt_i128(env: &Env, value: i128) -> i128 {
+    if value < 0 {
+        panic_with_error!(env, PrinceError::InvalidAmount);
+    }
+
+    let root = isqrt_u128(value as u128);
+    if root > i128::MAX as u128 {
+        panic_with_error!(env, PrinceError::QuadraticOverflow);
+    }
+    root as i128
+}
+
+fn checked_square_i128(env: &Env, value: i128) -> i128 {
+    value
+        .checked_mul(value)
+        .unwrap_or_else(|| panic_with_error!(env, PrinceError::QuadraticOverflow))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Reentrancy Guard
 //

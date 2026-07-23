@@ -56,6 +56,140 @@ mod tests {
 
     // ── Existing Tests ────────────────────────────────────────────────────────
 
+    fn python_reference_isqrt(value: i128) -> i128 {
+        let mut lo = 0_i128;
+        let mut hi = value;
+        let mut ans = 0_i128;
+        while lo <= hi {
+            let mid = lo + ((hi - lo) / 2);
+            let sq = mid.checked_mul(mid);
+            if sq.is_some() && sq.unwrap() <= value {
+                ans = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        ans
+    }
+
+    #[test]
+    fn test_qf_isqrt_matches_python_reference_vectors() {
+        let Setup { client, .. } = setup();
+        let vectors = [
+            0_i128,
+            1,
+            2,
+            3,
+            4,
+            8,
+            9,
+            10,
+            15,
+            16,
+            24,
+            25,
+            99,
+            100,
+            10_000_000_000_000_000_000,
+        ];
+
+        for value in vectors {
+            assert_eq!(client.isqrt(&value), python_reference_isqrt(value));
+        }
+    }
+
+    #[test]
+    fn test_qf_contribution_requires_humanity_verification() {
+        let Setup { env, client, token, .. } = setup();
+        let org_sym = symbol_short!("qfhuman");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        token.mint(&contributor, &1_000);
+
+        let result = client.try_qf_contribute(&org_sym, &contributor, &100);
+        assert!(result.is_err());
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 0);
+    }
+
+    #[test]
+    fn test_qf_repeated_human_updates_cumulative_sqrt_once() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("qfrepeat");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        client.qf_contribute(&org_sym, &contributor, &25);
+        client.qf_contribute(&org_sym, &contributor, &75);
+
+        let stats = client.get_qf_project_stats(&org_sym);
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 100);
+        assert_eq!(stats.direct_contributions, 100);
+        assert_eq!(stats.sqrt_sum, 10);
+        assert_eq!(stats.contributor_count, 1);
+        assert_eq!(stats.weight, 100);
+    }
+
+    #[test]
+    fn test_qf_distribution_matches_python_reference_formula() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_a = symbol_short!("qfa");
+        let org_b = symbol_short!("qfb");
+        register_test_org(&env, &client, org_a.clone());
+        register_test_org(&env, &client, org_b.clone());
+
+        let sponsor = Address::generate(&env);
+        token.mint(&sponsor, &1_000);
+        client.qf_deposit_matching_pool(&sponsor, &1_000);
+
+        let c1 = Address::generate(&env);
+        let c2 = Address::generate(&env);
+        let c3 = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &c1);
+        client.verify_humanity(&protocol_admin, &c2);
+        client.verify_humanity(&protocol_admin, &c3);
+        token.mint(&c1, &100);
+        token.mint(&c2, &100);
+        token.mint(&c3, &400);
+
+        client.qf_contribute(&org_a, &c1, &100);
+        client.qf_contribute(&org_a, &c2, &100);
+        client.qf_contribute(&org_b, &c3, &400);
+
+        let mut projects = Vec::new(&env);
+        projects.push_back(org_a.clone());
+        projects.push_back(org_b.clone());
+
+        let preview = client.qf_preview_distribution(&projects);
+        assert_eq!(preview.get(0).unwrap().weight, 400);
+        assert_eq!(preview.get(1).unwrap().weight, 400);
+        assert_eq!(preview.get(0).unwrap().matching_amount, 500);
+        assert_eq!(preview.get(1).unwrap().matching_amount, 500);
+
+        let allocations = client.qf_distribute(&protocol_admin, &projects);
+        assert_eq!(allocations.get(0).unwrap().matching_amount, 500);
+        assert_eq!(allocations.get(1).unwrap().matching_amount, 500);
+        assert_eq!(client.get_org_budget(&org_a), 500);
+        assert_eq!(client.get_org_budget(&org_b), 500);
+        assert_eq!(client.get_qf_matching_pool(), 0);
+    }
+
     #[test]
     fn test_init() {
         let Setup { env, client, .. } = setup();

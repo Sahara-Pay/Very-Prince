@@ -8,6 +8,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import useSWR from "swr";
 import { WalletButton } from "@/components/WalletButton";
 import { useSSEWithSWR } from "@/hooks/useSSE";
 import { useUnifiedWallet } from "@/hooks/useUnifiedWallet";
@@ -71,18 +72,17 @@ export default function PayoutsPage() {
         throw new Error(`Failed to fetch payouts: ${response.statusText}`);
       }
       const data = await response.json();
-      
+
       // Transform data to include XLM amount
       return data.map((payout: any) => ({
         ...payout,
         amountXlm: (Number(payout.amountStroops) / 10_000_000).toFixed(2),
       }));
     },
-    {
-      revalidateOnFocus: false,
-      revalidateOnReconnect: true,
-    }
-  );
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: true,
+  });
 
   // Fetch transaction history (claimed payouts) for the connected wallet
   const { data: historyData, error: historyError, isLoading: isHistoryLoading } = useSWR<ProfileStats>(
@@ -99,16 +99,6 @@ export default function PayoutsPage() {
       revalidateOnReconnect: true,
     }
   );
-
-  const handleClaimPayout = async (orgId: string) => {
-    try {
-      await claimPayout(orgId);
-      // Refresh the payouts list after successful claim
-      await mutate();
-    } catch (error) {
-      console.error("Failed to claim payout:", error);
-    }
-  };
 
   const exportMutation = useMutation({
     mutationFn: async (format: 'csv' | 'json') => {
@@ -163,7 +153,7 @@ export default function PayoutsPage() {
 
   const handleExportData = async (format: 'csv' | 'json') => {
     if (!publicKey) return;
-    
+
     setIsExporting(true);
     exportMutation.mutate(format, {
       onSettled: () => setIsExporting(false),
@@ -210,7 +200,7 @@ export default function PayoutsPage() {
           <div className="flex items-center gap-4">
             <Link href="/" className="flex items-center gap-2 text-white/60 transition-colors hover:text-white">
               <span className="text-sm font-bold">VP</span>
-            </Link>
+              </Link>
             <span className="text-white/20">/</span>
             <Link href="/dashboard" className="text-sm text-white/60 hover:text-white">Dashboard</Link>
             <span className="text-white/20">/</span>
@@ -347,7 +337,7 @@ export default function PayoutsPage() {
         {/* Transaction History Section */}
         <div className="border-t border-white/[0.06] pt-10 space-y-6">
           <h2 className="text-2xl font-bold text-white">Transaction History</h2>
-          
+
           {historyError && (
             <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
               {historyError.message || "Failed to load transaction history"}
@@ -434,4 +424,3 @@ export default function PayoutsPage() {
     </div>
   );
 }
-

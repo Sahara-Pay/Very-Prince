@@ -3,10 +3,20 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { db } from '@/db/db';
-import { persistDocument, getDocument, queryDocuments, deleteDocument, initDocument } from '@/db/crdtManager';
+import {
+  persistDocument,
+  getDocument,
+  queryDocuments,
+  deleteDocument,
+  initDocument,
+  setDocumentField,
+  getDocumentState,
+  onUpdate,
+  type WorkerUpdateEvent,
+} from '@/db/crdtManager';
 import { startSyncEngine, stopSyncEngine, onSyncStatusChange, syncNow, getSyncStatus } from '@/db/syncEngine';
 import { trpcClient } from '@/trpc/client';
-import type { OrganizationCRDT, MaintainerCRDT, PendingTransactionCRDT, SyncState } from '@/lib/crdtTypes';
+import type { OrganizationCRDT, MaintainerCRDT, PendingTransactionCRDT, DraftCRDT } from '@/lib/crdtTypes';
 
 export function useSyncEngine() {
   const [status, setStatus] = useState(getSyncStatus());
@@ -155,4 +165,148 @@ export function useFlushPending() {
   }, []);
 
   return { flush, isFlushing };
+}
+
+/**
+ * useCRDTDraft
+ * ─────────────────────────────────────────────────────────────────────────────
+ * A CRDT-backed draft hook for form state that needs to survive offline use and
+ * merge correctly when the same form is edited concurrently across multiple
+ * browser tabs or devices.
+ *
+ * Architecture:
+ *  • The Yjs document lives inside the dedicated Web Worker (crdt-worker.ts).
+ *  • Each field write is a tiny incremental Y.Map update — not a full snapshot.
+ *  • Local changes are persisted to IndexedDB via crdtManager immediately.
+ *  • Cross-tab updates arrive via the BroadcastChannel inside the Worker and
+ *    are forwarded to this hook through the `onUpdate` listener.
+ *  • When the browser comes back online the sync engine pushes the pending
+ *    updates to the backend automatically.
+ *
+ * @param draftKey - Stable identifier for this draft (e.g. "register-org" or
+ *                   "allocate-payout-<orgId>"). Used as the Yjs document ID.
+ *
+ * @example
+ * ```tsx
+ * const { fields, setField, isSynced, clearDraft } = useCRDTDraft('register-org');
+ * <input value={fields.name ?? ''} onChange={e => setField('name', e.target.value)} />
+ * ```
+ */
+export function useCRDTDraft<TFields extends Record<string, unknown> = Record<string, unknown>>(
+  draftKey: string,
+) {
+  const [fields, setFields] = useState<Partial<TFields>>({});
+  const [isReady, setIsReady] = useState(false);
+  const docId = `draft:${draftKey}`;
+
+  // ── Initialise: load persisted state from IndexedDB into the Worker ───────
+  useEffect(() => {
+    let cancelled = false;
+
+    async function init() {
+      await initDocument(docId);
+      if (cancelled) return;
+
+      // Seed React state from what the Worker reconstructed off of IndexedDB.
+      try {
+        const { data } = await getDocumentState<TFields>(docId);
+        if (!cancelled) {
+          setFields((data as Partial<TFields>) ?? {});
+          setIsReady(true);
+        }
+      } catch {
+        if (!cancelled) setIsReady(true);
+      }
+    }
+
+    init().catch(console.error);
+    return () => { cancelled = true; };
+  }, [docId]);
+
+  // ── Subscribe to Worker update events (local + cross-tab BroadcastChannel) ─
+  useEffect(() => {
+    if (!isReady) return;
+
+    const unsub = onUpdate(docId, (event: WorkerUpdateEvent) => {
+      if (event.data && typeof event.data === 'object') {
+        setFields(event.data as Partial<TFields>);
+      }
+    });
+
+    return unsub;
+  }, [docId, isReady]);
+
+  // ── setField: write a single field through the Worker ─────────────────────
+  const setField = useCallback(
+    async (fieldName: keyof TFields & string, value: TFields[keyof TFields]) => {
+      // Optimistic update — keep the UI snappy.
+      setFields((prev) => ({ ...prev, [fieldName]: value }));
+
+      try {
+        const { data, state } = await setDocumentField(docId, fieldName, value);
+
+        // Persist the Yjs state snapshot + draft data to IndexedDB.
+        await persistDocument<DraftCRDT>(
+          'draft',
+          docId,
+          { draftKey, fields: data as Record<string, unknown>, savedAt: Date.now() },
+          state,
+        );
+
+        // Reflect any CRDT-merged result (may differ from optimistic value
+        // in case of concurrent edits from another tab).
+        if (data && typeof data === 'object') {
+          setFields(data as Partial<TFields>);
+        }
+      } catch (err) {
+        console.error('[useCRDTDraft] setField error:', err);
+      }
+    },
+    [docId, draftKey],
+  );
+
+  // ── clearDraft: delete the doc from IndexedDB and reset Worker state ───────
+  const clearDraft = useCallback(async () => {
+    setFields({});
+    try {
+      await deleteDocument(docId);
+    } catch {
+      // Ignore — the UI is already cleared.
+    }
+  }, [docId]);
+
+  // ── isSynced: true when there are no pending unsynced updates ─────────────
+  const [isSynced, setIsSynced] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function check() {
+      const count = await db.crdtUpdates
+        .where({ docId, synced: 0 })
+        .count()
+        .catch(() => 0);
+      if (alive) setIsSynced(count === 0);
+    }
+
+    check().catch(() => {});
+    const interval = setInterval(check, 5_000);
+    return () => {
+      alive = false;
+      clearInterval(interval);
+    };
+  }, [docId]);
+
+  return {
+    /** Current field values, merged from all CRDT sources. */
+    fields,
+    /** Write a single field. Triggers a Yjs delta and IndexedDB persist. */
+    setField,
+    /** Delete the draft from IndexedDB and reset the Worker state. */
+    clearDraft,
+    /** True once the initial IndexedDB state has been loaded into the Worker. */
+    isReady,
+    /** True when all local changes have been pushed to the backend. */
+    isSynced,
+  };
 }

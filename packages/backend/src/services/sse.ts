@@ -1,5 +1,6 @@
 import type { ServerResponse } from "node:http";
 import { eventBus } from './eventBus.js';
+import { logger } from '../utils/logger.js';
 
 const sseConnections = new Set<ServerResponse>();
 
@@ -24,7 +25,8 @@ export function emitSSEEvent(event: string, data: unknown) {
   for (const connection of sseConnections) {
     try {
       connection.write(payload);
-    } catch {
+    } catch (error) {
+      logger.debug({ err: error, event }, "SSE write failed, dropping connection");
       sseConnections.delete(connection);
     }
   }

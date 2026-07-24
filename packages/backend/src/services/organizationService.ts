@@ -4,6 +4,7 @@ import { redis } from "../services/cache.js";
 import type { PaginatedOrgsResponse, CursorPaginatedOrgsResponse } from "@very-prince/types";
 import { ipfsService } from "./ipfsService.js";
 import { sanitizeText } from "../utils/sanitize.js";
+import { logger } from "../utils/logger.js";
 
 export type { PaginatedOrgsResponse, CursorPaginatedOrgsResponse };
 
@@ -38,7 +39,7 @@ export class OrganizationService {
             publicBudget: budget.toString(),
           };
         } catch (error) {
-          // If budget fetch fails, return org without budget
+          logger.warn({ err: error, orgId: org.id }, "Failed to fetch org budget, returning org without budget");
           return {
             id: org.id,
             name: org.name,
@@ -95,7 +96,8 @@ export class OrganizationService {
             admin: org.admin,
             publicBudget: budget.toString(),
           };
-        } catch {
+        } catch (error) {
+          logger.warn({ err: error, orgId: org.id }, "Failed to fetch org budget, returning org without budget");
           return {
             id: org.id,
             name: org.name,
@@ -164,7 +166,7 @@ export class OrganizationService {
         return JSON.parse(cached);
       }
     } catch (error) {
-      console.error(`Redis error in getOrganization for key ${cacheKey}:`, error);
+      logger.warn({ err: error, cacheKey }, "Redis get failed in getOrganization, falling back to source");
     }
 
     const org = await stellarService.readOrganization(orgId);
@@ -178,7 +180,7 @@ export class OrganizationService {
     try {
       await redis.set(cacheKey, JSON.stringify(orgDetails), "EX", 300);
     } catch (error) {
-      console.error(`Redis set error in getOrganization for key ${cacheKey}:`, error);
+      logger.warn({ err: error, cacheKey }, "Redis set failed in getOrganization");
     }
 
     return orgDetails;

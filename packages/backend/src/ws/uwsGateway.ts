@@ -6,11 +6,18 @@ import {
   registerSubscription,
   unregisterSubscription,
   removeAllSubscriptions,
+  restoreSubscriptions,
 } from './subscriptionManager.js';
+
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const MAX_PAYLOAD_LENGTH = 1024 * 1024;
+const IDLE_TIMEOUT_SEC = 120;
 
 interface WsClientData {
   connectionId: string;
   subscriptions: Map<number, AbortController>;
+  subscriptionPaths: Map<number, { path: string; input: unknown }>;
+  heartbeatTimer: ReturnType<typeof setInterval> | null;
 }
 
 interface JsonRpcRequest {
@@ -22,9 +29,6 @@ interface JsonRpcRequest {
     input?: unknown;
   };
 }
-
-const MAX_PAYLOAD_LENGTH = 1024 * 1024;
-const IDLE_TIMEOUT_SEC = 120;
 
 const procedures: Record<string, unknown> = appRouter._def.procedures as Record<string, unknown>;
 
@@ -41,10 +45,11 @@ function sendJson(
   result?: { type: string; data?: unknown },
   error?: { code: number; message: string; data?: unknown },
 ): void {
-  const msg: Record<string, unknown> = { jsonrpc: '2.0', id };
+  const msg: Record<string, unknown> = {};
+  if (id !== null) msg.id = id;
   if (error) {
     msg.error = error;
-  } else {
+  } else if (result) {
     msg.result = result;
   }
   sendRaw(ws, JSON.stringify(msg));
@@ -75,16 +80,23 @@ export function createUwsGateway(): uWS.TemplatedApp {
     compression: uWS.SHARED_COMPRESSOR,
     maxPayloadLength: MAX_PAYLOAD_LENGTH,
     idleTimeout: IDLE_TIMEOUT_SEC,
-    // uWebSockets.js per-message-deflate is enabled via compression: SHARED_COMPRESSOR
 
     open: (ws) => {
-      ws.getUserData().connectionId = randomUUID();
-      ws.getUserData().subscriptions = new Map();
-      logger.info({ connectionId: ws.getUserData().connectionId }, 'WebSocket connection opened');
-      sendRaw(ws, JSON.stringify({
-        jsonrpc: '2.0',
-        result: { type: 'connected', data: { connectionId: ws.getUserData().connectionId, timestamp: Date.now() } },
-      }));
+      const data = ws.getUserData();
+      data.connectionId = randomUUID();
+      data.subscriptions = new Map();
+      data.subscriptionPaths = new Map();
+
+      data.heartbeatTimer = setInterval(() => {
+        try {
+          ws.ping();
+        } catch {
+          clearInterval(data.heartbeatTimer!);
+          data.heartbeatTimer = null;
+        }
+      }, HEARTBEAT_INTERVAL_MS);
+
+      logger.info({ connectionId: data.connectionId }, 'WebSocket connection opened');
     },
 
     message: (ws, message, isBinary) => {
@@ -96,21 +108,22 @@ export function createUwsGateway(): uWS.TemplatedApp {
       try {
         req = JSON.parse(Buffer.from(message).toString('utf8'));
       } catch {
-        sendError(ws, 0, -32700, 'Parse error');
-        return;
-      }
-      if (req.jsonrpc !== '2.0') {
-        sendError(ws, req.id ?? 0, -32600, 'Invalid JSON-RPC 2.0 request');
+        sendError(ws, null, -32700, 'Parse error');
         return;
       }
       handleMessage(ws, req).catch((err: unknown) => {
         logger.error({ err }, 'Error handling WebSocket message');
-        sendError(ws, req.id ?? 0, -32603, 'Internal error');
+        sendError(ws, req.id ?? null, -32603, 'Internal error');
       });
     },
 
     close: (ws, code, _message) => {
-      const { connectionId, subscriptions } = ws.getUserData();
+      const { connectionId, subscriptions, heartbeatTimer } = ws.getUserData();
+
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
+
       for (const [, ac] of subscriptions) {
         ac.abort();
       }
@@ -120,15 +133,10 @@ export function createUwsGateway(): uWS.TemplatedApp {
     },
 
     drain: (ws) => {
-      logger.debug({ backpressure: ws?.getBufferedAmount() }, 'WebSocket drain event');
-    },
-
-    ping: () => {
-      logger.debug('WebSocket ping received');
-    },
-
-    pong: () => {
-      logger.debug('WebSocket pong received');
+      const buffered = ws?.getBufferedAmount() ?? 0;
+      if (buffered > 0) {
+        logger.warn({ backpressure: buffered }, 'WebSocket drain event - backpressure');
+      }
     },
   });
 
@@ -149,9 +157,32 @@ async function handleMessage(
     await handleSubscriptionStart(ws, id, req.params);
   } else if (req.method === 'subscription.stop') {
     handleSubscriptionStop(ws, id);
+  } else if (req.method === 'reconnect') {
+    handleReconnect(ws, id);
   } else {
     sendError(ws, id, -32601, `Method '${req.method}' not found`);
   }
+}
+
+function handleReconnect(
+  ws: uWS.WebSocket<WsClientData>,
+  id: number,
+): void {
+  const { connectionId } = ws.getUserData();
+  const restored = restoreSubscriptions(connectionId, connectionId);
+  for (const sub of restored) {
+    const ac = ws.getUserData().subscriptions.get(sub.subscriptionId);
+    if (ac) {
+      ac.abort();
+      ws.getUserData().subscriptions.delete(sub.subscriptionId);
+    }
+    handleSubscriptionStart(ws, sub.subscriptionId, { path: sub.path, input: sub.input }).catch(
+      (err: unknown) => {
+        logger.error({ err, path: sub.path }, 'Error restoring subscription on reconnect');
+      },
+    );
+  }
+  sendResult(ws, id, { type: 'started' });
 }
 
 async function handleSubscriptionStart(
@@ -167,7 +198,22 @@ async function handleSubscriptionStart(
 
   // eslint-disable-next-line security/detect-object-injection
   const procedure = procedures[path] as
-    | { _def: { subscription: boolean; resolver: (opts: { ctx: object; input: unknown; signal: AbortSignal }) => { subscribe: (observer: { next: (data: unknown) => void; error: (err: Error) => void; complete: () => void }) => { unsubscribe: () => void } } } }
+    | {
+        _def: {
+          subscription: boolean;
+          resolver: (opts: {
+            ctx: object;
+            input: unknown;
+            signal: AbortSignal;
+          }) => {
+            subscribe: (observer: {
+              next: (data: unknown) => void;
+              error: (err: Error) => void;
+              complete: () => void;
+            }) => { unsubscribe: () => void };
+          };
+        };
+      }
     | undefined;
 
   if (!procedure) {
@@ -198,6 +244,7 @@ async function handleSubscriptionStart(
     }
 
     ws.getUserData().subscriptions.set(id, ac);
+    ws.getUserData().subscriptionPaths.set(id, { path, input: params?.input });
 
     sendResult(ws, id, { type: 'started' });
 
@@ -212,11 +259,13 @@ async function handleSubscriptionStart(
       error: (err: Error) => {
         sendError(ws, id, -32000, err.message ?? 'Subscription error', err);
         ws.getUserData().subscriptions.delete(id);
+        ws.getUserData().subscriptionPaths.delete(id);
         unregisterSubscription(connectionId, id);
       },
       complete: () => {
         sendResult(ws, id, { type: 'stopped' });
         ws.getUserData().subscriptions.delete(id);
+        ws.getUserData().subscriptionPaths.delete(id);
         unregisterSubscription(connectionId, id);
       },
     });
@@ -224,10 +273,12 @@ async function handleSubscriptionStart(
     ac.signal.addEventListener('abort', () => {
       sub.unsubscribe();
       ws.getUserData().subscriptions.delete(id);
+      ws.getUserData().subscriptionPaths.delete(id);
       unregisterSubscription(connectionId, id);
     });
   } catch (err) {
     ws.getUserData().subscriptions.delete(id);
+    ws.getUserData().subscriptionPaths.delete(id);
     unregisterSubscription(connectionId, id);
     sendError(ws, id, -32000, err instanceof Error ? err.message : 'Subscription failed', err);
   }
@@ -241,7 +292,10 @@ function handleSubscriptionStop(
   if (ac) {
     ac.abort();
     ws.getUserData().subscriptions.delete(id);
+    ws.getUserData().subscriptionPaths.delete(id);
     unregisterSubscription(ws.getUserData().connectionId, id);
   }
   sendResult(ws, id, { type: 'stopped' });
 }
+
+

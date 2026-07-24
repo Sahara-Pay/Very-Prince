@@ -50,6 +50,45 @@ const pwaConfig = withPWA({
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+
+  /**
+   * HTTP security headers required for SharedArrayBuffer support (Issue #381).
+   *
+   * SharedArrayBuffer is only available in "cross-origin isolated" contexts.
+   * A page is cross-origin isolated when the server sends:
+   *   Cross-Origin-Opener-Policy: same-origin
+   *   Cross-Origin-Embedder-Policy: require-corp
+   *
+   * These headers are applied to every HTML page response.  Static assets
+   * (scripts, images) do not need them because the isolation applies at the
+   * page level.
+   *
+   * References:
+   *   https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#security_requirements
+   *   https://nextjs.org/docs/app/api-reference/next-config-js/headers
+   */
+  async headers() {
+    return [
+      {
+        // Apply to every route.
+        source: "/(.*)",
+        headers: [
+          {
+            // Prevents other origins from gaining a reference to this window,
+            // which is required for cross-origin isolation.
+            key: "Cross-Origin-Opener-Policy",
+            value: "same-origin",
+          },
+          {
+            // Ensures all sub-resources explicitly grant permission to be loaded,
+            // completing the cross-origin isolation requirement.
+            key: "Cross-Origin-Embedder-Policy",
+            value: "require-corp",
+          },
+        ],
+      },
+    ];
+  },
   // Vercel's edge network optimizes and caches images automatically once
   // `images` is configured — this keeps optimization off the Node server.
   images: {

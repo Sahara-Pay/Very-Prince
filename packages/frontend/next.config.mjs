@@ -47,9 +47,41 @@ const pwaConfig = withPWA({
   ],
 });
 
+/**
+ * Cross-origin isolation headers (COOP / COEP) required for `SharedArrayBuffer`
+ * support. They are applied project-wide so any page that mounts the
+ * off-main-thread crypto-signing sandbox (#381) can construct the
+ * `SharedArrayBuffer` it uses for IP C with the dedicated signing worker.
+ *
+ * - `Cross-Origin-Opener-Policy: same-origin` puts the page in a fresh
+ *   browsing-context group, isolated from other origins.
+ * - `Cross-Origin-Embedder-Policy: require-corp` requires any subresource
+ *   to opt-in via CORP / CORS before being loaded.
+ *
+ * Without both, `self.crossOriginIsolated` is `false` and the sandbox
+ * will refuse to boot.
+ */
+const CROSS_ORIGIN_ISOLATION_HEADERS = [
+  { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+  { key: 'Cross-Origin-Embedder-Policy', value: 'require-corp' },
+  { key: 'Cross-Origin-Resource-Policy', value: 'same-origin' },
+];
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
+  // Cross-origin isolation — required for the off-main-thread
+  // SharedArrayBuffer/Atomics crypto-signing sandbox
+  // (see `src/crypto-sandbox/`). Applied to every route via `headers()`
+  // below so dev mode AND production get the same isolation guarantees.
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: CROSS_ORIGIN_ISOLATION_HEADERS,
+      },
+    ];
+  },
   // Vercel's edge network optimizes and caches images automatically once
   // `images` is configured — this keeps optimization off the Node server.
   images: {

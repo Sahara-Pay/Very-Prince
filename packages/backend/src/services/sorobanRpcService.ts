@@ -34,6 +34,7 @@
 
 import { SorobanRpc } from "@stellar/stellar-sdk";
 import { RPC_URL } from "../config/env.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * Configuration options for Soroban RPC client initialization.
@@ -59,6 +60,7 @@ let rpcServerInstance: SorobanRpc.Server | null = null;
  * @internal
  */
 function createSorobanRpcServer(config: SorobanRpcConfig): SorobanRpc.Server {
+  logger.info({ url: config.url, allowHttp: config.allowHttp }, "Initializing Soroban RPC client");
   return new SorobanRpc.Server(config.url, {
     allowHttp: config.allowHttp,
   });

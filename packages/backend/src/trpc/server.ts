@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { appRouter } from './router.js';
 import type { AppRouter } from './router.js';
+import { logger } from '../utils/logger.js';
 
 const procedures = appRouter._def.procedures as Record<string, unknown>;
 
@@ -20,6 +21,7 @@ export async function configureTRPC(server: FastifyInstance) {
       const result = await handleTRPCRequest(path, body);
       return reply.send(result);
     } catch (error) {
+      logger.error({ err: error, path }, 'tRPC HTTP request failed');
       return reply.status(500).send({
         error: 'Internal Server Error',
         message: error instanceof Error ? error.message : 'Unknown error',

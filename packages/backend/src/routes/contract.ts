@@ -574,6 +574,7 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
         );
         return reply.send({ transactionXdr });
       } catch (error) {
+        request.log.warn({ err: error, orgId, maintainerAddress }, "Failed to create claim transaction");
         return reply.status(400).send({
           error: "Failed to create claim transaction",
           message: error instanceof Error ? error.message : "Unknown error",
@@ -615,6 +616,7 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
           await contractController.submitTransaction(signedTransaction);
         return reply.send(result);
       } catch (error) {
+        request.log.warn({ err: error }, "Failed to submit transaction");
         return reply.status(400).send({
           error: "Failed to submit transaction",
           message: error instanceof Error ? error.message : "Unknown error",
@@ -691,6 +693,7 @@ export const contractRoutes: FastifyPluginAsync = async (fastify) => {
           message: "Authentication verified.",
         });
       } catch (err) {
+        request.log.warn({ err, publicKey }, "Signature verification failed");
         return reply
           .status(401)
           .send({ error: "Signature verification failed." });

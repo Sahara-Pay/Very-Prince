@@ -1,5 +1,6 @@
 import { prisma } from "../services/db.js";
 import { Organization } from "@prisma/client";
+import { logger } from "../utils/logger.js";
 
 interface Cursor {
   createdAt: string;
@@ -13,7 +14,8 @@ function encodeCursor(cursor: Cursor): string {
 function decodeCursor(cursor: string): Cursor | null {
   try {
     return JSON.parse(Buffer.from(cursor, "base64").toString("utf-8"));
-  } catch {
+  } catch (error) {
+    logger.warn({ err: error }, "Received malformed pagination cursor");
     return null;
   }
 }

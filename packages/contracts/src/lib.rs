@@ -1920,5 +1920,285 @@ impl PayoutRegistry {
         );
     }
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-chain state proof verifier modules
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub mod rlp;
+pub mod keccak;
+pub mod mpt;
+pub mod cross_chain_verifier;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-chain contract entrypoints (added to the existing PayoutRegistry)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contractimpl]
+impl PayoutRegistry {
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cross-chain state proof verification
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Store a trusted block header for a given chain ID.
+    ///
+    /// Only callable by the protocol admin. The header's `state_root` is later
+    /// used as the trust anchor for MPT proof verification.
+    ///
+    /// # Arguments
+    /// * `chain_id`     — 4-byte chain identifier (e.g. 1 = Ethereum mainnet).
+    /// * `block_number` — The block number of the trusted header.
+    /// * `state_root`   — 32-byte Keccak-256 state root from the block header.
+    pub fn register_trusted_header(
+        env: Env,
+        chain_id: u32,
+        block_number: u64,
+        state_root: BytesN<32>,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        Self::get_protocol_admin(&env)
+            .require_auth_for_args(
+                (chain_id, block_number, state_root.clone()).into_val(&env),
+            );
+
+        let key = Self::trusted_header_key(&env, chain_id);
+        // Encode as (block_number, state_root) — store as two separate ledger entries.
+        env.storage().persistent().set(
+            &(Symbol::new(&env, "cc_blk"), chain_id),
+            &block_number,
+        );
+        env.storage().persistent().set(&key, &state_root);
+
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "HeaderRegistered")),
+            (chain_id, block_number, state_root),
+        );
+    }
+
+    /// Verify a Merkle Patricia Trie inclusion proof against a previously
+    /// registered trusted block header and return the decoded value bytes.
+    ///
+    /// If verification succeeds, the function emits a `ProofVerified` event and
+    /// returns the raw value as a `soroban_sdk::Bytes`.
+    ///
+    /// # Arguments
+    /// * `chain_id`       — Chain the proof originates from.
+    /// * `key`            — Raw key bytes (Keccak-256 hashed internally).
+    /// * `expected_value` — Expected RLP-encoded value at `key`.
+    /// * `proof_nodes`    — Ordered Vec of RLP-encoded trie nodes.
+    ///
+    /// # Panics / Errors
+    /// Panics with `PrinceError::NotAuthorized` if no trusted header is found for
+    /// `chain_id`. Panics with `PrinceError::NotAuthorized` if proof verification
+    /// fails (invalid proof → no state change is committed).
+    pub fn verify_cross_chain_state(
+        env: Env,
+        chain_id: u32,
+        key: soroban_sdk::Bytes,
+        expected_value: soroban_sdk::Bytes,
+        proof_nodes: soroban_sdk::Vec<soroban_sdk::Bytes>,
+    ) -> soroban_sdk::Bytes {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        // ── Load trusted header ───────────────────────────────────────────────
+        let header_key = Self::trusted_header_key(&env, chain_id);
+        let state_root: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&header_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NotAuthorized));
+        let block_number: u64 = env
+            .storage()
+            .persistent()
+            .get(&(Symbol::new(&env, "cc_blk"), chain_id))
+            .unwrap_or(0u64);
+
+        // ── Convert Soroban Bytes → &[u8] slices ─────────────────────────────
+        // We copy into fixed-size stack buffers to stay no_std / no-heap.
+        const MAX_KEY: usize = 128;
+        const MAX_VAL: usize = 256;
+        const MAX_NODE: usize = 1024;
+        const MAX_NODES: usize = 16;
+
+        let key_len = key.len() as usize;
+        if key_len == 0 || key_len > MAX_KEY {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+        let val_len = expected_value.len() as usize;
+        if val_len > MAX_VAL {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+
+        // Copy Soroban Bytes into fixed stack arrays byte-by-byte.
+        let mut key_slice = [0u8; MAX_KEY];
+        for i in 0..key_len {
+            key_slice[i] = key.get(i as u32).unwrap_or(0);
+        }
+        let mut val_slice = [0u8; MAX_VAL];
+        for i in 0..val_len {
+            val_slice[i] = expected_value.get(i as u32).unwrap_or(0);
+        }
+
+        let root_arr: [u8; 32] = state_root.into();
+
+        // Collect proof nodes into a fixed stack buffer.
+        if proof_nodes.len() as usize > MAX_NODES {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+
+        // Stack storage for up to 16 nodes × 1024 bytes
+        let mut node_store = [[0u8; MAX_NODE]; MAX_NODES];
+        let mut node_lens = [0usize; MAX_NODES];
+        let node_count = proof_nodes.len() as usize;
+
+        for i in 0..node_count {
+            let node: soroban_sdk::Bytes = proof_nodes.get(i as u32).unwrap();
+            if node.len() as usize > MAX_NODE {
+                panic_with_error!(&env, PrinceError::NotAuthorized);
+            }
+            let nlen = node.len() as usize;
+            for j in 0..nlen {
+                node_store[i][j] = node.get(j as u32).unwrap_or(0);
+            }
+            node_lens[i] = nlen;
+        }
+
+        // Build a slice of &[u8] references into `node_store`.
+        let mut proof_refs: [&[u8]; MAX_NODES] = [&[]; MAX_NODES];
+        for i in 0..node_count {
+            proof_refs[i] = &node_store[i][..node_lens[i]];
+        }
+
+        let header = cross_chain_verifier::BlockHeader {
+            state_root: root_arr,
+            block_number,
+            chain_id,
+        };
+
+        let verified = cross_chain_verifier::verify_state_proof(
+            &header,
+            &key_slice[..key_len],
+            &val_slice[..val_len],
+            &proof_refs[..node_count],
+        )
+        .unwrap_or_else(|_| panic_with_error!(&env, PrinceError::NotAuthorized));
+
+        // ── Emit success event ────────────────────────────────────────────────
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "ProofVerified")),
+            (chain_id, verified.block_number),
+        );
+
+        // Return the verified value as Soroban Bytes.
+        soroban_sdk::Bytes::from_slice(&env, &verified.value[..verified.value_len])
+    }
+
+    /// Verify a Merkle Patricia Trie *exclusion* (non-inclusion) proof.
+    ///
+    /// Returns `true` if the key is provably absent from the trie, panics otherwise.
+    pub fn verify_cross_chain_exclusion(
+        env: Env,
+        chain_id: u32,
+        key: soroban_sdk::Bytes,
+        proof_nodes: soroban_sdk::Vec<soroban_sdk::Bytes>,
+    ) -> bool {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        let header_key = Self::trusted_header_key(&env, chain_id);
+        let state_root: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&header_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NotAuthorized));
+        let block_number: u64 = env
+            .storage()
+            .persistent()
+            .get(&(Symbol::new(&env, "cc_blk"), chain_id))
+            .unwrap_or(0u64);
+
+        const MAX_KEY: usize = 128;
+        const MAX_NODE: usize = 1024;
+        const MAX_NODES: usize = 16;
+
+        let key_len = key.len() as usize;
+        if key_len == 0 || key_len > MAX_KEY {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+        let mut key_slice = [0u8; MAX_KEY];
+        for i in 0..key_len {
+            key_slice[i] = key.get(i as u32).unwrap_or(0);
+        }
+        let root_arr: [u8; 32] = state_root.into();
+
+        if proof_nodes.len() as usize > MAX_NODES {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+
+        let mut node_store = [[0u8; MAX_NODE]; MAX_NODES];
+        let mut node_lens = [0usize; MAX_NODES];
+        let node_count = proof_nodes.len() as usize;
+
+        for i in 0..node_count {
+            let node: soroban_sdk::Bytes = proof_nodes.get(i as u32).unwrap();
+            if node.len() as usize > MAX_NODE {
+                panic_with_error!(&env, PrinceError::NotAuthorized);
+            }
+            let nlen = node.len() as usize;
+            for j in 0..nlen {
+                node_store[i][j] = node.get(j as u32).unwrap_or(0);
+            }
+            node_lens[i] = nlen;
+        }
+
+        let mut proof_refs: [&[u8]; MAX_NODES] = [&[]; MAX_NODES];
+        for i in 0..node_count {
+            proof_refs[i] = &node_store[i][..node_lens[i]];
+        }
+
+        let header = cross_chain_verifier::BlockHeader {
+            state_root: root_arr,
+            block_number,
+            chain_id,
+        };
+
+        cross_chain_verifier::verify_exclusion(
+            &header,
+            &key_slice[..key_len],
+            &proof_refs[..node_count],
+        )
+        .unwrap_or_else(|_| panic_with_error!(&env, PrinceError::NotAuthorized));
+
+        true
+    }
+
+    /// Compute the Keccak-256 hash of `data`.
+    ///
+    /// Exposed as a contract function so off-chain clients can verify the exact
+    /// hash used internally without re-implementing it.
+    pub fn keccak256(env: Env, data: soroban_sdk::Bytes) -> BytesN<32> {
+        const MAX_LEN: usize = 4096;
+        let dlen = data.len() as usize;
+        if dlen > MAX_LEN {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+        let mut buf = [0u8; MAX_LEN];
+        for i in 0..dlen {
+            buf[i] = data.get(i as u32).unwrap_or(0);
+        }
+        let hash = keccak::keccak256(&buf[..dlen]);
+        BytesN::from_array(&env, &hash)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Private helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn trusted_header_key(env: &Env, chain_id: u32) -> (Symbol, u32) {
+        (Symbol::new(env, "cc_root"), chain_id)
+    }
+}
+
 #[cfg(test)]
 mod tests;

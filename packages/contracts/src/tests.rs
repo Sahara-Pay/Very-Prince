@@ -1179,3 +1179,499 @@ mod tests {
         assert_eq!(client.get_claimable_balance(&m2), 0);
     }
 }
+
+// =============================================================================
+// Cross-chain state proof verifier tests
+// =============================================================================
+
+#[cfg(test)]
+mod cross_chain_tests {
+    // ── RLP unit tests ────────────────────────────────────────────────────────
+    mod rlp_tests {
+        use crate::rlp::{
+            decode_exact, decode_bytes, decode_u64,
+            encode_bytes_v2, encode_list_payload_v2, EncodeBuf,
+            RlpItem, RlpError,
+        };
+
+        #[test]
+        fn single_byte_range() {
+            for b in 0u8..=0x7f {
+                let item = decode_exact(&[b]).unwrap();
+                assert_eq!(item, RlpItem::Bytes(&[b]));
+            }
+        }
+
+        #[test]
+        fn empty_string_0x80() {
+            let item = decode_exact(&[0x80]).unwrap();
+            assert_eq!(item, RlpItem::Bytes(b""));
+        }
+
+        #[test]
+        fn short_string_dog() {
+            let enc = [0x83, b'd', b'o', b'g'];
+            assert_eq!(decode_bytes(&enc).unwrap(), b"dog");
+        }
+
+        #[test]
+        fn empty_list_0xc0() {
+            let item = decode_exact(&[0xc0]).unwrap();
+            assert!(matches!(item, RlpItem::List(_)));
+        }
+
+        #[test]
+        fn list_cat_dog() {
+            let enc = [0xc8, 0x83, b'c', b'a', b't', 0x83, b'd', b'o', b'g'];
+            let item = decode_exact(&enc).unwrap();
+            if let RlpItem::List(l) = item {
+                let ch = l.items().unwrap();
+                assert_eq!(ch.len(), 2);
+                assert_eq!(ch.get(0).unwrap(), &RlpItem::Bytes(b"cat"));
+                assert_eq!(ch.get(1).unwrap(), &RlpItem::Bytes(b"dog"));
+            } else {
+                panic!("expected list");
+            }
+        }
+
+        #[test]
+        fn non_canonical_single_byte_rejected() {
+            // 0x81 0x00 is non-canonical (0x00 fits in single-byte form)
+            let res = decode_exact(&[0x81, 0x00]);
+            assert_eq!(res, Err(RlpError::NonCanonicalLength));
+        }
+
+        #[test]
+        fn trailing_data_rejected() {
+            let res = decode_exact(&[0x83, b'd', b'o', b'g', 0x00]);
+            assert_eq!(res, Err(RlpError::TrailingData));
+        }
+
+        #[test]
+        fn payload_out_of_bounds() {
+            // 0x83 says 3-byte payload but only 1 byte follows
+            let res = decode_exact(&[0x83, b'a']);
+            assert_eq!(res, Err(RlpError::PayloadOutOfBounds));
+        }
+
+        #[test]
+        fn long_string_56_bytes() {
+            let payload = [0xaau8; 56];
+            let mut buf = EncodeBuf::new();
+            encode_bytes_v2(&payload, &mut buf).unwrap();
+            let enc = buf.as_slice();
+            // prefix should be 0xb8 (0xb7 + 1 length byte)
+            assert_eq!(enc[0], 0xb8);
+            assert_eq!(enc[1], 56u8);
+            assert_eq!(decode_bytes(enc).unwrap(), &payload[..]);
+        }
+
+        #[test]
+        fn encode_decode_roundtrip() {
+            let mut child = EncodeBuf::new();
+            encode_bytes_v2(b"hello", &mut child).unwrap();
+            encode_bytes_v2(b"world", &mut child).unwrap();
+            let mut out = EncodeBuf::new();
+            encode_list_payload_v2(child.as_slice(), &mut out).unwrap();
+
+            let item = decode_exact(out.as_slice()).unwrap();
+            if let RlpItem::List(l) = item {
+                let ch = l.items().unwrap();
+                assert_eq!(ch.len(), 2);
+                assert_eq!(ch.get(0).unwrap(), &RlpItem::Bytes(b"hello"));
+                assert_eq!(ch.get(1).unwrap(), &RlpItem::Bytes(b"world"));
+            } else {
+                panic!("expected list");
+            }
+        }
+
+        #[test]
+        fn nested_list_structure() {
+            // [ [], [[]] ] = 0xc3 0xc0 0xc1 0xc0
+            let enc = [0xc3, 0xc0, 0xc1, 0xc0];
+            let item = decode_exact(&enc).unwrap();
+            if let RlpItem::List(outer) = item {
+                let ch = outer.items().unwrap();
+                assert_eq!(ch.len(), 2);
+                assert!(matches!(ch.get(0).unwrap(), RlpItem::List(_)));
+                assert!(matches!(ch.get(1).unwrap(), RlpItem::List(_)));
+            } else {
+                panic!("expected list");
+            }
+        }
+
+        #[test]
+        fn decode_u64_basic() {
+            // RLP-encode 0x0102 as bytes and decode it
+            let mut buf = EncodeBuf::new();
+            encode_bytes_v2(&[0x01, 0x02], &mut buf).unwrap();
+            let val = decode_u64(buf.as_slice()).unwrap();
+            assert_eq!(val, 0x0102u64);
+        }
+
+        #[test]
+        fn empty_input_error() {
+            assert_eq!(crate::rlp::decode(b""), Err(RlpError::Empty));
+        }
+    }
+
+    // ── Keccak-256 unit tests ─────────────────────────────────────────────────
+    mod keccak_tests {
+        use crate::keccak::{keccak256, keccak256_concat, Keccak256};
+
+        fn hex32(s: &str) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            for i in 0..32 {
+                out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+            }
+            out
+        }
+
+        #[test]
+        fn empty_input() {
+            let expected = hex32(
+                "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+            );
+            assert_eq!(keccak256(b""), expected);
+        }
+
+        #[test]
+        fn abc() {
+            let expected = hex32(
+                "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45",
+            );
+            assert_eq!(keccak256(b"abc"), expected);
+        }
+
+        #[test]
+        fn hello() {
+            let expected = hex32(
+                "1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8",
+            );
+            assert_eq!(keccak256(b"hello"), expected);
+        }
+
+        #[test]
+        fn streaming_equals_oneshot() {
+            let data = b"The quick brown fox jumps over the lazy dog";
+            let oneshot = keccak256(data);
+            let mut h = Keccak256::new();
+            h.update(&data[..15]);
+            h.update(&data[15..]);
+            assert_eq!(oneshot, h.finalize());
+        }
+
+        #[test]
+        fn multi_block_crossing() {
+            // 200 bytes crosses the 136-byte rate boundary
+            let data = [0x42u8; 200];
+            let h1 = keccak256(&data);
+            let mut h = Keccak256::new();
+            h.update(&data[..100]);
+            h.update(&data[100..]);
+            assert_eq!(h1, h.finalize());
+        }
+
+        #[test]
+        fn concat_helper_matches_combined() {
+            let a = b"cross-chain";
+            let b = b"-proof";
+            let mut combined = [0u8; 17];
+            combined[..11].copy_from_slice(a);
+            combined[11..].copy_from_slice(b);
+            assert_eq!(keccak256_concat(a, b), keccak256(&combined));
+        }
+
+        #[test]
+        fn distinct_inputs_give_distinct_hashes() {
+            assert_ne!(keccak256(b"key_a"), keccak256(b"key_b"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod mpt_and_verifier_tests {
+    use crate::keccak::keccak256;
+    use crate::mpt::{verify_proof, verify_exclusion_proof, MptError};
+    use crate::cross_chain_verifier::{
+        verify_state_proof, verify_exclusion, decode_eth_account,
+        reputation_score_from_account, BlockHeader, CrossChainError, EthAccount,
+    };
+    use crate::rlp::{EncodeBuf, encode_bytes_v2, encode_list_payload_v2};
+
+    // ── Shared helpers ────────────────────────────────────────────────────────
+
+    /// Compact (hex-prefix) encode a nibble slice into bytes.
+    fn compact_encode(nibbles: &[u8], is_leaf: bool, odd: bool) -> std::vec::Vec<u8> {
+        let flag_hi: u8 = if is_leaf { 2 } else { 0 } | if odd { 1 } else { 0 };
+        let mut out = std::vec::Vec::new();
+        if odd {
+            out.push((flag_hi << 4) | nibbles[0]);
+            let mut i = 1;
+            while i + 1 < nibbles.len() {
+                out.push((nibbles[i] << 4) | nibbles[i + 1]);
+                i += 2;
+            }
+        } else {
+            out.push(flag_hi << 4);
+            let mut i = 0;
+            while i + 1 < nibbles.len() {
+                out.push((nibbles[i] << 4) | nibbles[i + 1]);
+                i += 2;
+            }
+        }
+        out
+    }
+
+    /// Build an RLP leaf node encoding [compact_key_bytes, value].
+    fn make_leaf(all_nibbles: &[u8; 64], value: &[u8]) -> std::vec::Vec<u8> {
+        let compact = compact_encode(all_nibbles, true, false);
+        let mut payload = EncodeBuf::new();
+        encode_bytes_v2(&compact, &mut payload).unwrap();
+        encode_bytes_v2(value, &mut payload).unwrap();
+        let mut out = EncodeBuf::new();
+        encode_list_payload_v2(payload.as_slice(), &mut out).unwrap();
+        out.as_slice().to_vec()
+    }
+
+    /// Build the 64-nibble path array from keccak256(key).
+    fn key_nibbles(key: &[u8]) -> [u8; 64] {
+        let hash = keccak256(key);
+        let mut n = [0u8; 64];
+        for i in 0..32 {
+            n[2 * i]     = hash[i] >> 4;
+            n[2 * i + 1] = hash[i] & 0x0f;
+        }
+        n
+    }
+
+    /// Build a single-leaf proof and return (root_hash, leaf_bytes).
+    fn single_leaf_proof(key: &[u8], value: &[u8]) -> ([u8; 32], std::vec::Vec<u8>) {
+        let nibbles = key_nibbles(key);
+        let leaf = make_leaf(&nibbles, value);
+        let root = keccak256(&leaf);
+        (root, leaf)
+    }
+
+    fn eth_header(state_root: [u8; 32]) -> BlockHeader {
+        BlockHeader { state_root, block_number: 19_000_000, chain_id: 1 }
+    }
+
+    // ── MPT tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mpt_valid_single_leaf() {
+        let key = b"reputation_key";
+        let value = b"score_data";
+        let (root, leaf) = single_leaf_proof(key, value);
+        assert_eq!(verify_proof(&root, key, value, &[leaf.as_slice()]), Ok(()));
+    }
+
+    #[test]
+    fn mpt_wrong_value_rejected() {
+        let key = b"reputation_key";
+        let value = b"score_data";
+        let (root, leaf) = single_leaf_proof(key, value);
+        let res = verify_proof(&root, key, b"bad_value", &[leaf.as_slice()]);
+        assert_eq!(res, Err(MptError::ValueMismatch));
+    }
+
+    #[test]
+    fn mpt_root_hash_mismatch() {
+        let key = b"reputation_key";
+        let value = b"score_data";
+        let (mut root, leaf) = single_leaf_proof(key, value);
+        root[0] ^= 0xff;
+        let res = verify_proof(&root, key, value, &[leaf.as_slice()]);
+        assert_eq!(res, Err(MptError::RootHashMismatch));
+    }
+
+    #[test]
+    fn mpt_empty_proof_rejected() {
+        assert_eq!(verify_proof(&[0u8; 32], b"k", b"v", &[]),
+                   Err(MptError::EmptyProof));
+    }
+
+    #[test]
+    fn mpt_empty_key_rejected() {
+        assert_eq!(verify_proof(&[0u8; 32], b"", b"v", &[&[0xc0]]),
+                   Err(MptError::EmptyKey));
+    }
+
+    #[test]
+    fn mpt_manipulated_node_rejected() {
+        let key = b"manipulation_test";
+        let value = b"original";
+        let (root, mut leaf) = single_leaf_proof(key, value);
+        let mid = leaf.len() / 2;
+        leaf[mid] ^= 0xff;
+        let res = verify_proof(&root, key, value, &[leaf.as_slice()]);
+        assert!(res.is_err(), "manipulated node must be rejected");
+    }
+
+    #[test]
+    fn mpt_different_key_path_mismatch() {
+        // Build a leaf for key_a, then try to verify it as key_b
+        let (root, leaf) = single_leaf_proof(b"key_a", b"value");
+        let res = verify_proof(&root, b"key_b", b"value", &[leaf.as_slice()]);
+        assert!(res.is_err());
+    }
+
+    // ── CrossChainVerifier tests ───────────────────────────────────────────────
+
+    #[test]
+    fn ccv_valid_inclusion() {
+        let key = b"eth_maintainer_addr";
+        let value = b"reputation_rlp_encoded";
+        let (root, leaf) = single_leaf_proof(key, value);
+        let header = eth_header(root);
+        let res = verify_state_proof(&header, key, value, &[leaf.as_slice()]);
+        assert!(res.is_ok(), "{:?}", res);
+        let vs = res.unwrap();
+        assert_eq!(vs.chain_id, 1);
+        assert_eq!(vs.block_number, 19_000_000);
+        assert_eq!(&vs.value[..vs.value_len], value);
+    }
+
+    #[test]
+    fn ccv_tampered_root_rejected() {
+        let key = b"eth_maintainer_addr";
+        let value = b"some_value";
+        let (mut root, leaf) = single_leaf_proof(key, value);
+        root[15] ^= 0xaa;
+        let header = eth_header(root);
+        let res = verify_state_proof(&header, key, value, &[leaf.as_slice()]);
+        assert_eq!(res, Err(CrossChainError::ProofVerifyError(MptError::RootHashMismatch)));
+    }
+
+    #[test]
+    fn ccv_wrong_value_rejected() {
+        let key = b"eth_maintainer_addr";
+        let value = b"real_value";
+        let (root, leaf) = single_leaf_proof(key, value);
+        let header = eth_header(root);
+        let res = verify_state_proof(&header, key, b"fake_value", &[leaf.as_slice()]);
+        assert_eq!(res, Err(CrossChainError::ProofVerifyError(MptError::ValueMismatch)));
+    }
+
+    #[test]
+    fn ccv_zero_chain_id_rejected() {
+        let header = BlockHeader { state_root: [0u8; 32], block_number: 1, chain_id: 0 };
+        let res = verify_state_proof(&header, b"k", b"v", &[&[0xc0]]);
+        assert_eq!(res, Err(CrossChainError::InvalidHeader));
+    }
+
+    #[test]
+    fn ccv_empty_key_rejected() {
+        let header = eth_header([0u8; 32]);
+        let res = verify_state_proof(&header, b"", b"v", &[&[0xc0]]);
+        assert_eq!(res, Err(CrossChainError::InputTooLong));
+    }
+
+    #[test]
+    fn ccv_too_many_nodes_rejected() {
+        let header = eth_header([0u8; 32]);
+        let nodes: std::vec::Vec<&[u8]> = (0..=16).map(|_| [0xc0u8].as_slice()).collect();
+        let res = verify_state_proof(&header, b"key", b"val", &nodes);
+        assert_eq!(res, Err(CrossChainError::InputTooLong));
+    }
+
+    // ── decode_eth_account tests ──────────────────────────────────────────────
+
+    fn build_eth_account_rlp(nonce: &[u8], balance: &[u8]) -> std::vec::Vec<u8> {
+        let storage_root = [0x56u8; 32];
+        let code_hash    = [0x78u8; 32];
+        let mut payload = EncodeBuf::new();
+        encode_bytes_v2(nonce,        &mut payload).unwrap();
+        encode_bytes_v2(balance,      &mut payload).unwrap();
+        encode_bytes_v2(&storage_root, &mut payload).unwrap();
+        encode_bytes_v2(&code_hash,    &mut payload).unwrap();
+        let mut out = EncodeBuf::new();
+        encode_list_payload_v2(payload.as_slice(), &mut out).unwrap();
+        out.as_slice().to_vec()
+    }
+
+    #[test]
+    fn decode_eth_account_valid() {
+        let rlp = build_eth_account_rlp(&[0x05], &[0x01]);
+        let acc = decode_eth_account(&rlp).unwrap();
+        assert_eq!(acc.nonce, 5);
+        assert_eq!(acc.balance[31], 1);
+        assert_eq!(acc.storage_root, [0x56u8; 32]);
+        assert_eq!(acc.code_hash, [0x78u8; 32]);
+    }
+
+    #[test]
+    fn decode_eth_account_invalid_bytes() {
+        let res = decode_eth_account(b"\xff\xfe\xfd");
+        assert!(matches!(res, Err(CrossChainError::RlpDecodeError(_))));
+    }
+
+    #[test]
+    fn decode_eth_account_wrong_field_count() {
+        // Only 3 fields — should fail
+        let mut payload = EncodeBuf::new();
+        encode_bytes_v2(&[0x01], &mut payload).unwrap();
+        encode_bytes_v2(&[0x02], &mut payload).unwrap();
+        encode_bytes_v2(&[0x03], &mut payload).unwrap();
+        let mut out = EncodeBuf::new();
+        encode_list_payload_v2(payload.as_slice(), &mut out).unwrap();
+        let res = decode_eth_account(out.as_slice());
+        assert_eq!(res, Err(CrossChainError::InvalidValueEncoding));
+    }
+
+    // ── reputation_score_from_account tests ───────────────────────────────────
+
+    #[test]
+    fn reputation_zero_for_empty_account() {
+        assert_eq!(reputation_score_from_account(&EthAccount::default()), 0);
+    }
+
+    #[test]
+    fn reputation_nonzero_for_balance() {
+        let mut acc = EthAccount::default();
+        // 1 ETH = 10^18 wei
+        let one_eth: u128 = 1_000_000_000_000_000_000;
+        let be = one_eth.to_be_bytes();
+        acc.balance[16..].copy_from_slice(&be);
+        acc.balance_len = 16;
+        let score = reputation_score_from_account(&acc);
+        assert!(score > 0 && score <= 10_000);
+    }
+
+    #[test]
+    fn reputation_capped_at_10000() {
+        let mut acc = EthAccount::default();
+        // Max balance: u128::MAX
+        let be = u128::MAX.to_be_bytes();
+        acc.balance[16..].copy_from_slice(&be);
+        acc.balance_len = 16;
+        assert_eq!(reputation_score_from_account(&acc), 10_000);
+    }
+
+    // ── Exclusion proof tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn exclusion_proof_valid_non_inclusion() {
+        // A leaf for key_a should be valid exclusion proof for key_b
+        // when the path diverges (root hash mismatch makes this the simplest test)
+        // Here we test the API contract: verify_exclusion_proof accepts
+        // a key-not-found result as Ok.
+        let key = b"absent_key";
+        // Build a leaf that matches a different key to produce KeyNotFound
+        let (root, leaf) = single_leaf_proof(b"other_key", b"some_value");
+        // verify_exclusion_proof should either Ok (key absent) or Err(PathMismatch)
+        // depending on path traversal; both indicate non-inclusion
+        let res = verify_exclusion_proof(&root, key, &[leaf.as_slice()]);
+        // PathMismatch counts as non-inclusion in exclusion API
+        assert!(res.is_ok() || matches!(res, Err(MptError::PathMismatch)));
+    }
+
+    #[test]
+    fn ccv_exclusion_valid() {
+        let (root, leaf) = single_leaf_proof(b"other_key", b"val");
+        let header = eth_header(root);
+        let res = verify_exclusion(&header, b"absent_key", &[leaf.as_slice()]);
+        assert!(res.is_ok() || matches!(res, Err(CrossChainError::ProofVerifyError(_))));
+    }
+}

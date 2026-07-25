@@ -2,10 +2,13 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { appRouter } from './router.js';
 import type { AppRouter } from './router.js';
 import { logger } from '../utils/logger.js';
+import { etagCachePlugin } from '../plugins/etagCache.js';
 
 const procedures = appRouter._def.procedures as Record<string, unknown>;
 
 export async function configureTRPC(server: FastifyInstance) {
+  await server.register(etagCachePlugin);
+
   server.post('/trpc/:path', {
     config: {
       rateLimit: {
@@ -18,7 +21,12 @@ export async function configureTRPC(server: FastifyInstance) {
     const body = request.body as any;
 
     try {
-      const result = await handleTRPCRequest(path, body);
+      const { result, cacheable } = await handleTRPCRequest(path, body);
+      // Only queries are safe to serve as 304 Not Modified: mutations must
+      // always return their actual result body to the caller.
+      if (cacheable) {
+        request.etagCacheable = true;
+      }
       return reply.send(result);
     } catch (error) {
       logger.error({ err: error, path }, 'tRPC HTTP request failed');
@@ -30,10 +38,19 @@ export async function configureTRPC(server: FastifyInstance) {
   });
 }
 
-async function handleTRPCRequest(path: string, input: any) {
+async function handleTRPCRequest(
+  path: string,
+  input: any,
+): Promise<{ result: unknown; cacheable: boolean }> {
   // eslint-disable-next-line security/detect-object-injection
   const procedure = procedures[path] as
-    | { _def: { subscription?: boolean; resolver: (opts: { ctx: object; input: unknown; signal: AbortSignal }) => unknown } }
+    | {
+        _def: {
+          query?: boolean;
+          subscription?: boolean;
+          resolver: (opts: { ctx: object; input: unknown; signal: AbortSignal }) => unknown;
+        };
+      }
     | undefined;
 
   if (!procedure) {
@@ -44,11 +61,13 @@ async function handleTRPCRequest(path: string, input: any) {
     throw new Error('Subscription procedures must be called over WebSocket');
   }
 
-  return await procedure._def.resolver({
+  const result = await procedure._def.resolver({
     ctx: {},
     input,
     signal: new AbortController().signal,
   });
+
+  return { result, cacheable: procedure._def.query === true };
 }
 
 export type { AppRouter };

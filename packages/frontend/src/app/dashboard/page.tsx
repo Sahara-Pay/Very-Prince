@@ -11,6 +11,7 @@ import Link from "next/link";
 import { WalletButton } from "@/components/WalletButton";
 import dynamic from "next/dynamic";
 import { PayoutCard } from "@/components/PayoutCard";
+import DashboardLoading from "./loading";
 
 const FundOrgModal = dynamic(
   () => import("@/components/FundOrgModal").then((mod) => mod.FundOrgModal),

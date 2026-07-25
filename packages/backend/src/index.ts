@@ -41,6 +41,11 @@ const server = Fastify({
     level: process.env['NODE_ENV'] === 'production' ? 'warn' : 'info',
     transport: process.env['NODE_ENV'] !== 'production' ? { target: 'pino-pretty', options: { colorize: true } } : undefined,
   } as any,
+  // The tRPC httpBatchLink joins multiple procedure names into the
+  // /trpc/:path route param (comma-separated). The router's default
+  // maxParamLength (100) is too small for realistic batches and would
+  // 414 them before the query complexity analyzer ever runs.
+  maxParamLength: 2000,
 });
 
 await server.register(helmet, { contentSecurityPolicy: false });

@@ -12,6 +12,7 @@ import { Toaster } from "sonner";
 import { WalletProvider } from "@/contexts/WalletContext";
 import { AuthProvider } from "@/contexts/AuthContext";
 import DebugToggleClient from "@/components/DebugToggleClient";
+import RoutePrefetcher from "@/components/RoutePrefetcher";
 import { TRPCProvider } from "@/trpc/provider";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
@@ -104,6 +105,7 @@ export default function RootLayout({
               {/* Page content */}
               <div className="relative">{children}</div>
               <DebugToggleClient />
+              <RoutePrefetcher />
 
               {/* Toast notifications */}
               <Toaster

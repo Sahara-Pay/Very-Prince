@@ -59,6 +59,12 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     "/nonce",
     {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         description: "Generate SIWS nonce and formatted message for wallet authentication",
         tags: ["Authentication"],
@@ -154,6 +160,12 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     "/verify",
     {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         description: "Verify wallet signature for SIWS authentication",
         tags: ["Authentication"],

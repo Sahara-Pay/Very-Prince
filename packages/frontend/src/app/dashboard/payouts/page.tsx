@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useUnifiedWallet } from "@/hooks/useUnifiedWallet";
 import { GlassButton } from "@/components/GlassButton";
 import { useSSEWithSWR } from "@/hooks/useSSE";
-import useSWR from "swr";
+import { useQuery } from "@tanstack/react-query";
 
 interface PendingPayout {
   orgId: string;
@@ -25,9 +25,11 @@ export default function DashboardPayoutsPage() {
   useSSEWithSWR();
 
   // Fetch pending payouts for the connected wallet
-  const { data: payouts, error, isLoading, mutate } = useSWR(
-    isConnected && publicKey ? [`/api/v1/contract/maintainer/${publicKey}`] : null,
-    async ([url]) => {
+  const { data: payouts, error, isLoading, refetch } = useQuery({
+    queryKey: ["payouts", publicKey],
+    enabled: isConnected && Boolean(publicKey),
+    queryFn: async () => {
+      const url = `/api/v1/contract/maintainer/${publicKey}`;
       const response = await fetch(
         `${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"}${url}`
       );
@@ -41,11 +43,7 @@ export default function DashboardPayoutsPage() {
         amountXlm: (Number(payout.amountStroops) / 10_000_000).toFixed(2),
       }));
     },
-    {
-      revalidateOnFocus: false,
-      revalidateOnReconnect: true,
-    }
-  );
+  });
 
   const handleClaimAll = async () => {
     if (!payouts || payouts.length === 0) return;
@@ -54,7 +52,7 @@ export default function DashboardPayoutsPage() {
       for (const payout of payouts) {
         await claimPayout(payout.orgId);
       }
-      mutate();
+      void refetch();
     } catch (err) {
       console.error("Error claiming payouts:", err);
     }

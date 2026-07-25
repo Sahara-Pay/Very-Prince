@@ -1,0 +1,358 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Grafana Dashboard ConfigMap – very-prince eBPF Kernel I/O Observability
+#
+# Grafana's sidecar (grafana-sc-dashboard) watches ConfigMaps in all
+# namespaces that carry the label grafana_dashboard: "1" and auto-imports
+# the JSON.  This requires kube-prometheus-stack with:
+#   grafana.sidecar.dashboards.enabled: true
+#   grafana.sidecar.dashboards.searchNamespace: ALL
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: very-prince-ebpf-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    grafana_folder: "very-prince"
+    app.kubernetes.io/name: very-prince-ebpf-dashboard
+    app.kubernetes.io/part-of: very-prince
+data:
+  very-prince-ebpf.json: |
+    {
+      "__inputs": [],
+      "__requires": [
+        { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+        { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" }
+      ],
+      "annotations": { "list": [] },
+      "description": "eBPF kernel-level network & disk I/O profiling for the very-prince backend container (Cilium Hubble + Pixie).",
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 1,
+          "title": "TCP / Network Latency (Cilium Hubble eBPF)",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2 },
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.05 },
+                  { "color": "red", "value": 0.1 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "id": 2,
+          "options": { "tooltip": { "mode": "multi" } },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(hubble_flows_processed_total{verdict='FORWARDED'}[5m])) by (le, source, destination))",
+              "legendFormat": "p50 {{source}} → {{destination}}",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(hubble_flows_processed_total{verdict='FORWARDED'}[5m])) by (le, source, destination))",
+              "legendFormat": "p95 {{source}} → {{destination}}",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(hubble_flows_processed_total{verdict='FORWARDED'}[5m])) by (le, source, destination))",
+              "legendFormat": "p99 {{source}} → {{destination}}",
+              "refId": "C"
+            }
+          ],
+          "title": "TCP Socket Latency (p50 / p95 / p99)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2 },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "id": 3,
+          "targets": [
+            {
+              "expr": "sum(rate(hubble_drop_total[5m])) by (reason, namespace)",
+              "legendFormat": "{{namespace}} – {{reason}}",
+              "refId": "A"
+            }
+          ],
+          "title": "TCP Packet Drop Rate (packets/sec by reason)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2 },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+          "id": 4,
+          "targets": [
+            {
+              "expr": "sum(rate(hubble_flows_processed_total[5m])) by (verdict, type)",
+              "legendFormat": "{{verdict}} / {{type}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Hubble Flow Throughput (flows/sec)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2 },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+          "id": 5,
+          "targets": [
+            {
+              "expr": "sum(rate(hubble_http_requests_total[5m])) by (method, protocol, reporter)",
+              "legendFormat": "{{method}} {{protocol}} ({{reporter}})",
+              "refId": "A"
+            }
+          ],
+          "title": "HTTP Request Rate via eBPF (Hubble L7)",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+          "id": 10,
+          "title": "PostgreSQL Query I/O Bottlenecks (Pixie eBPF)",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2 },
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.2 },
+                  { "color": "red", "value": 0.5 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+          "id": 11,
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum(rate(px_postgres_query_duration_seconds_bucket[5m])) by (le, namespace, pod))",
+              "legendFormat": "p50 {{pod}}",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(px_postgres_query_duration_seconds_bucket[5m])) by (le, namespace, pod))",
+              "legendFormat": "p95 {{pod}}",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum(rate(px_postgres_query_duration_seconds_bucket[5m])) by (le, namespace, pod))",
+              "legendFormat": "p99 {{pod}}",
+              "refId": "C"
+            }
+          ],
+          "title": "PostgreSQL Query Duration (kernel-traced, p50/p95/p99)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2 },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+          "id": 12,
+          "targets": [
+            {
+              "expr": "sum(rate(px_postgres_query_duration_seconds_count[5m])) by (namespace, pod)",
+              "legendFormat": "{{pod}} ({{namespace}})",
+              "refId": "A"
+            }
+          ],
+          "title": "PostgreSQL Queries per Second (kernel-traced)",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+          "id": 20,
+          "title": "Container Disk I/O (cgroup eBPF metrics)",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2 },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+          "id": 21,
+          "targets": [
+            {
+              "expr": "sum(rate(container_fs_reads_bytes_total{namespace=~'$namespace'}[5m])) by (pod, namespace)",
+              "legendFormat": "reads {{pod}}",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(rate(container_fs_writes_bytes_total{namespace=~'$namespace'}[5m])) by (pod, namespace)",
+              "legendFormat": "writes {{pod}}",
+              "refId": "B"
+            }
+          ],
+          "title": "Container Disk Read/Write Throughput",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2 },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+          "id": 22,
+          "targets": [
+            {
+              "expr": "sum(rate(container_fs_reads_total{namespace=~'$namespace'}[5m])) by (pod, namespace)",
+              "legendFormat": "read IOPS {{pod}}",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(rate(container_fs_writes_total{namespace=~'$namespace'}[5m])) by (pod, namespace)",
+              "legendFormat": "write IOPS {{pod}}",
+              "refId": "B"
+            }
+          ],
+          "title": "Container Disk IOPS",
+          "type": "timeseries"
+        },
+        {
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+          "id": 30,
+          "title": "Container CPU Throttling (cgroup eBPF)",
+          "type": "row"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "lineWidth": 2 },
+              "unit": "percentunit",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.1 },
+                  { "color": "red", "value": 0.25 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+          "id": 31,
+          "targets": [
+            {
+              "expr": "sum(increase(container_cpu_cfs_throttled_periods_total{namespace=~'$namespace'}[5m])) by (pod, namespace) / sum(increase(container_cpu_cfs_periods_total{namespace=~'$namespace'}[5m])) by (pod, namespace)",
+              "legendFormat": "{{pod}} ({{namespace}})",
+              "refId": "A"
+            }
+          ],
+          "title": "CPU Throttle Ratio (% of scheduling periods throttled)",
+          "type": "timeseries"
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 38,
+      "tags": ["ebpf", "cilium", "pixie", "very-prince", "kernel"],
+      "templating": {
+        "list": [
+          {
+            "current": {},
+            "hide": 0,
+            "includeAll": false,
+            "name": "datasource",
+            "options": [],
+            "query": "prometheus",
+            "refresh": 1,
+            "type": "datasource",
+            "label": "Prometheus datasource"
+          },
+          {
+            "current": {},
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "definition": "label_values(kube_pod_info, namespace)",
+            "hide": 0,
+            "includeAll": true,
+            "multi": true,
+            "name": "namespace",
+            "options": [],
+            "query": "label_values(kube_pod_info, namespace)",
+            "refresh": 2,
+            "sort": 1,
+            "type": "query",
+            "label": "Namespace"
+          }
+        ]
+      },
+      "time": { "from": "now-1h", "to": "now" },
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "very-prince – eBPF Kernel I/O Observability",
+      "uid": "very-prince-ebpf-kernel-io",
+      "version": 1
+    }

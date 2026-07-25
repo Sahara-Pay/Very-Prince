@@ -1,0 +1,70 @@
+model Transaction {
+  id            String   @default(cuid()) // Internal tracking ID
+  txHash        String   // Stellar blockchain transaction hash
+  eventIndex    Int      // Position of the event within the transaction
+  walletAddress String   // Actor associated with the transaction
+  volumeUSD     Decimal  // Value of the transaction in USD at the time of ledger closure
+  createdAt     DateTime // Exact timestamp of ledger closure (Partition Key)
+  type          String   // Type of event (e.g., "PAYOUT_ALLOCATED")
+  ledger        Int      // Ledger sequence number
+  rawData       String?  // Original JSON payload from the Soroban RPC
+
+  @@id([id, createdAt])
+  @@unique([txHash, eventIndex, createdAt]) // Ensures no duplicate events are indexed
+  @@index([createdAt])
+  @@index([walletAddress])
+  @@index([txHash])
+  @@index([ledger])
+}
+
+model PayoutEvent {
+  id            String   @default(cuid()) // Internal tracking ID
+  orgId         String   // Associated organization ID
+  maintainer    String   // Recipient maintainer address
+  amountStroops BigInt   // Payout amount in stroops (10^-7 XLM)
+  amountXlm     Decimal  // Payout amount converted to XLM
+  ledger        Int      // Ledger sequence number
+  txHash        String   // Stellar transaction hash
+  createdAt     DateTime // Timestamp of the payout (Partition Key)
+
+  @@id([id, createdAt])
+  @@index([orgId])
+  @@index([maintainer])
+  @@index([createdAt])
+}
+
+/// Persisted record of every on-chain OrgFunded event.
+/// Enables a single SQL SUM aggregation for total funds raised,
+/// avoiding N+1 Stellar RPC calls per organisation.
+model FundingEvent {
+  id            String   @default(cuid()) // Internal tracking ID
+  orgId         String   // Target organisation that received the funds
+  from          String   // Sender wallet address
+  amountStroops BigInt   // Amount sent in stroops (10^-7 XLM)
+  amountXlm     Decimal  // Amount converted to XLM at indexing time
+  ledger        Int      // Ledger sequence number
+  txHash        String   // Stellar transaction hash
+  createdAt     DateTime // Timestamp of ledger closure (Partition Key)
+
+  @@id([id, createdAt])
+  @@unique([txHash, orgId, createdAt]) // Idempotency: no duplicate funding events
+  @@index([orgId])
+  @@index([from])
+  @@index([createdAt])
+  @@index([ledger])
+}
+
+model IndexerState {
+  id                  String   @id @default("default")
+  lastProcessedLedger Int
+  updatedAt           DateTime @updatedAt
+}
+
+model VerifiedContract {
+  address    String   @id
+  isVerified Boolean  @default(true)
+  riskLevel  String   @default("LOW") // LOW, MEDIUM, HIGH
+  createdAt  DateTime @default(now())
+
+  @@index([address])
+}

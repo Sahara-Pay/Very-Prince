@@ -1,101 +1,81 @@
-/**
- * @file env.ts
- * @description Centralised environment variable configuration.
- *
- * All environment variables are validated and parsed here. The rest of the
- * application imports from this module rather than accessing `process.env`
- * directly. This single-source-of-truth approach makes it easy for new
- * contributors to understand what configuration is available.
- *
- * Required setup:
- *   1. Copy `.env.example` → `.env` in the repo root.
- *   2. Fill in your values (especially CONTRACT_ID after deploying).
- */
+import { z } from 'zod';
+import dotenv from 'dotenv';
+import { join } from 'path';
 
-import "dotenv/config";
+dotenv.config({ path: join(__dirname, '../../.env') });
 
-// ─── Helper ──────────────────────────────────────────────────────────────────
-
-/**
- * Read an environment variable. If it is missing and no default is provided,
- * throws an error to fail fast during startup rather than at an unexpected
- * runtime point.
- */
-function env(key: string, defaultValue?: string): string {
-  const value = process.env[key] ?? defaultValue;
-  if (value === undefined) {
-    throw new Error(
-      `[config] Missing required environment variable: ${key}. ` +
-        `Copy .env.example → .env and provide a value.`
-    );
+const booleanFromEnv = z.preprocess((value) => {
+  if (typeof value !== "string") {
+    return value;
   }
+
+  const normalized = value.toLowerCase();
+  if (normalized === "true" || normalized === "1") {
+    return true;
+  }
+  if (normalized === "false" || normalized === "0") {
+    return false;
+  }
+
   return value;
+}, z.boolean());
+
+const envSchema = z.object({
+  JWT_SECRET: z.string().min(32),
+  RESEND_API_KEY: z.string().min(1),
+  FRONTEND_URL: z.string().url().default('http://localhost:3000'),
+  PORT: z.coerce.number().int().default(3001),
+  HOST: z.string().default('0.0.0.0'),
+  HORIZON_URL: z.string().url().default('https://horizon-testnet.stellar.org'),
+  RPC_URL: z.string().url().default('https://soroban-testnet.stellar.org'),
+  HORIZON_FALLBACK_URL: z.string().url().optional(),
+  NETWORK_PASSPHRASE: z.string().default('Test SDF Network ; September 2015'),
+  CONTRACT_ID: z.string().default(''),
+  DEPLOYMENT_LEDGER: z.coerce.number().int().default(0),
+  DATABASE_URL: z.string().optional(),
+  DATABASE_REPLICA_URL: z.string().optional(),
+  REDIS_URL: z.string().optional(),
+  AWS_REGION: z.string().min(1).default(process.env["AWS_REGION"] ?? process.env["AWS_DEFAULT_REGION"] ?? "us-east-1"),
+  WEBHOOK_QUEUE_PROVIDER: z.enum(["bullmq", "sqs"]).optional(),
+  WEBHOOK_QUEUE_URL: z.string().url().optional(),
+  WEBHOOK_DLQ_URL: z.string().url().optional(),
+  WEBHOOK_DLQ_ENABLED: booleanFromEnv.default(false),
+  WEBHOOK_QUEUE_MAX_RECEIVE_COUNT: z.coerce.number().int().positive().default(5),
+  WEBHOOK_QUEUE_MAX_MESSAGES: z.coerce.number().int().min(1).max(10).default(5),
+  WEBHOOK_QUEUE_WAIT_TIME_SECONDS: z.coerce.number().int().min(0).max(20).default(20),
+  WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(30),
+});
+
+const config = envSchema.parse(process.env);
+const webhookQueueProvider = config.WEBHOOK_QUEUE_PROVIDER ?? (config.WEBHOOK_QUEUE_URL ? "sqs" : "bullmq");
+
+if (webhookQueueProvider === "sqs" && !config.WEBHOOK_QUEUE_URL) {
+  throw new Error("WEBHOOK_QUEUE_URL is required when WEBHOOK_QUEUE_PROVIDER=sqs");
 }
 
-// ─── Auth & Notifications ────────────────────────────────────────────────────
+if (config.WEBHOOK_DLQ_ENABLED && !config.WEBHOOK_DLQ_URL) {
+  throw new Error("WEBHOOK_DLQ_URL is required when WEBHOOK_DLQ_ENABLED=true");
+}
 
-/**
- * Secret used to sign JWT tokens for one-click unsubscribes.
- */
-export const JWT_SECRET = env("JWT_SECRET");
-
-/**
- * API Key for the Resend transactional email service.
- */
-export const RESEND_API_KEY = env("RESEND_API_KEY");
-
-/**
- * The public URL of the frontend, used to generate absolute links in emails.
- */
-export const FRONTEND_URL = env(
-  "FRONTEND_URL",
-  "http://localhost:3000"
-);
-
-// ─── Server ──────────────────────────────────────────────────────────────────
-
-export const SERVER_PORT = parseInt(env("PORT", "3001"), 10);
-export const SERVER_HOST = env("HOST", "0.0.0.0");
-
-// ─── Stellar Network ─────────────────────────────────────────────────────────
-
-/**
- * Horizon REST API base URL.
- * Defaults to the public Stellar Testnet endpoint.
- */
-export const HORIZON_URL = env(
-  "HORIZON_URL",
-  "https://horizon-testnet.stellar.org"
-);
-
-/**
- * Soroban RPC server URL.
- * Defaults to the public Stellar Testnet Soroban RPC endpoint.
- */
-export const RPC_URL = env(
-  "RPC_URL",
-  "https://soroban-testnet.stellar.org"
-);
-
-/**
- * The network passphrase is included in every transaction envelope to prevent
- * replay attacks across networks.
- */
-export const NETWORK_PASSPHRASE = env(
-  "NETWORK_PASSPHRASE",
-  "Test SDF Network ; September 2015"
-);
-
-// ─── Contract ────────────────────────────────────────────────────────────────
-
-/**
- * The Bech32-encoded contract ID of the deployed PayoutRegistry.
- * Written to .env.contracts by packages/contracts/scripts/deploy.sh.
- */
-export const CONTRACT_ID = env("CONTRACT_ID", "");
-
-/**
- * The ledger sequence number when the contract was deployed.
- * Used to initialize the indexer's cursor.
- */
-export const DEPLOYMENT_LEDGER = parseInt(env("DEPLOYMENT_LEDGER", "0"), 10);
+export const JWT_SECRET = config.JWT_SECRET;
+export const RESEND_API_KEY = config.RESEND_API_KEY;
+export const FRONTEND_URL = config.FRONTEND_URL;
+export const SERVER_PORT = config.PORT;
+export const SERVER_HOST = config.HOST;
+export const HORIZON_URL = config.HORIZON_URL;
+export const RPC_URL = config.RPC_URL;
+export const HORIZON_FALLBACK_URL = config.HORIZON_FALLBACK_URL;
+export const NETWORK_PASSPHRASE = config.NETWORK_PASSPHRASE;
+export const CONTRACT_ID = config.CONTRACT_ID;
+export const DEPLOYMENT_LEDGER = config.DEPLOYMENT_LEDGER;
+export const DATABASE_URL = config.DATABASE_URL;
+export const DATABASE_REPLICA_URL = config.DATABASE_REPLICA_URL;
+export const AWS_REGION = config.AWS_REGION;
+export const WEBHOOK_QUEUE_PROVIDER = webhookQueueProvider;
+export const WEBHOOK_QUEUE_URL = config.WEBHOOK_QUEUE_URL;
+export const WEBHOOK_DLQ_URL = config.WEBHOOK_DLQ_URL;
+export const WEBHOOK_DLQ_ENABLED = config.WEBHOOK_DLQ_ENABLED;
+export const WEBHOOK_QUEUE_MAX_RECEIVE_COUNT = config.WEBHOOK_QUEUE_MAX_RECEIVE_COUNT;
+export const WEBHOOK_QUEUE_MAX_MESSAGES = config.WEBHOOK_QUEUE_MAX_MESSAGES;
+export const WEBHOOK_QUEUE_WAIT_TIME_SECONDS = config.WEBHOOK_QUEUE_WAIT_TIME_SECONDS;
+export const WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS = config.WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS;

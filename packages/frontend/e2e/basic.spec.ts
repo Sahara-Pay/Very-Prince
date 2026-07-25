@@ -80,4 +80,59 @@ test.describe('General UI and Navigation', () => {
     // Check for organization lookup input by placeholder
     await expect(page.getByPlaceholder(/e.g. stellar/i)).toBeVisible();
   });
+
+  test('shows empty state UI for organization with zero maintainers', async ({ page }) => {
+    // Inject Soroban mock client
+    await page.addInitScript(() => {
+      (window as any).__MOCK_SOROBAN_CLIENT__ = {
+        readOrganization: (id: string) => Promise.resolve({
+          id,
+          name: "Test Org",
+          admin: "GABC1234567890WXYZ",
+        }),
+        readOrgBudget: () => Promise.resolve({
+          stroops: BigInt(100000000),
+          xlm: "10.0000000",
+        }),
+        readMaintainers: () => Promise.resolve([]),
+      };
+    });
+
+    await page.goto('/dashboard');
+    await expect(page.getByText('PayoutRegistry', { exact: true })).toBeVisible();
+
+    // Input organization ID and lookup
+    await page.fill('#org-id-input', 'testorg');
+    await page.click('button:has-text("Lookup")');
+
+    // Verify premium empty state elements are visible
+    await expect(page.getByText('No Maintainers Registered')).toBeVisible();
+    await expect(page.getByText('There are currently no maintainers registered for the organization')).toBeVisible();
+    await expect(page.getByText('Allocate First Payout')).toBeVisible();
+  });
+
+  test('secondary text on Glassmorphism elements has improved contrast/opacity overrides', async ({ page }) => {
+    await page.goto('/');
+
+    const styles = await page.evaluate(() => {
+      const styleSheets = Array.from(document.styleSheets);
+      let foundOverride = false;
+      for (const sheet of styleSheets) {
+        try {
+          const rules = Array.from(sheet.cssRules);
+          for (const rule of rules) {
+            if (rule.cssText.includes('.glass-card .text-white') || rule.cssText.includes('.glass-panel .text-white')) {
+              foundOverride = true;
+            }
+          }
+        } catch (e) {
+          // Cross-origin stylesheet access might fail, ignore
+        }
+      }
+      return { foundOverride };
+    });
+
+    expect(styles.foundOverride).toBe(true);
+  });
 });
+

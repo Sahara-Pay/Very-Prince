@@ -1,41 +1,45 @@
-# Website
+# Docs Package
 
-This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
+The docs package contains the Docusaurus website for Very-Prince. It is the primary place for product, architecture, and contributor-facing documentation.
 
-### Installation
+## What this package does
 
-```
-$ yarn
-```
+- Hosts the public documentation site for the project.
+- Organizes guides for setup, contribution, and platform concepts.
+- Supports local previewing and static-site builds for deployment.
 
-### Local Development
+## Prerequisites
 
-```
-$ yarn start
-```
+- Node.js 20+
+- npm 10+
 
-This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
+## Quick start
 
-### Build
+From the repository root:
 
-```
-$ yarn build
-```
-
-This command generates static content into the `build` directory and can be served using any static contents hosting service.
-
-### Deployment
-
-Using SSH:
-
-```
-$ USE_SSH=true yarn deploy
+```bash
+npm install
+npm run start --workspace @very-prince/docs
 ```
 
-Not using SSH:
+Or from the package directory:
 
-```
-$ GIT_USER=<Your GitHub username> yarn deploy
+```bash
+cd packages/docs
+npm run start
 ```
 
-If you are using GitHub pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.
+## Common scripts
+
+```bash
+npm run build
+npm run start
+npm run typecheck
+npm run serve
+```
+
+## Development notes
+
+- Keep the documentation concise and practical for contributors and reviewers.
+- Prefer updating docs alongside code changes when behavior or setup changes.
+- Use the docs site for high-level architecture context rather than implementation details that belong in package-level README files.

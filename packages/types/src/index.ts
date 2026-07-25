@@ -6,6 +6,10 @@
  * to ensure a single source of truth for all Soroban-derived data shapes.
  */
 
+// ── API response types ────────────────────────────────────────────────────────
+
+export * from "./api-responses.js";
+
 // ── Stellar / Soroban primitives ──────────────────────────────────────────────
 
 /** A Stellar public key (G…). */
@@ -43,13 +47,25 @@ export interface OrganizationWithBudget extends Organization {
   budgetXlm: string;
 }
 
-/** Paginated list of organisations returned by GET /api/org. */
+/** Offset paginated list of organisations (kept for backwards compatibility). */
 export interface PaginatedOrgsResponse {
   data: { id: string; name: string; admin: string; publicBudget?: string }[];
   meta: {
     totalPages: number;
     currentPage: number;
     totalCount: number;
+  };
+}
+
+/** Cursor paginated list of organisations. */
+export interface CursorPaginatedOrgsResponse {
+  data: { id: string; name: string; admin: string; publicBudget?: string }[];
+  meta: {
+    totalCount: number;
+    hasNextPage: boolean;
+    hasPrevPage: boolean;
+    startCursor?: string;
+    endCursor?: string;
   };
 }
 
@@ -135,10 +151,10 @@ export enum PrinceError {
 export const PrinceErrorMessage: Record<PrinceError, string> = {
   [PrinceError.AlreadyInitialized]: "The contract is already initialized.",
   [PrinceError.EmptyAdminList]: "The admin list cannot be empty.",
-  [PrinceError.InvalidThreshold]: "The multisig threshold is invalid.",
+  [PrinceError.InvalidThreshold]: "The native protocol admin config is invalid.",
   [PrinceError.ContractNotInitialized]: "The contract has not been initialized yet.",
   [PrinceError.ProtocolPaused]: "The protocol is currently paused for maintenance.",
-  [PrinceError.InsufficientMultisigAuth]: "Insufficient signatures provided for this multisig action.",
+  [PrinceError.InsufficientMultisigAuth]: "Legacy signer payloads are not accepted for protocol admin actions.",
   [PrinceError.OrgAlreadyRegistered]: "This organization is already registered.",
   [PrinceError.OrgNotFound]: "Organization not found.",
   [PrinceError.NotAuthorized]: "You are not authorized to perform this action.",

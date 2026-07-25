@@ -64,13 +64,14 @@ export function FaucetBanner({ balanceStatus }: FaucetBannerProps) {
           onClick={() => setTooltipOpen((o) => !o)}
           className="flex items-center gap-1.5 text-xs text-white/35 transition-colors hover:text-white/60"
           aria-expanded={tooltipOpen}
+          aria-controls="faucet-tooltip"
         >
           <InfoIcon />
           Need testnet tokens?
         </button>
 
         {tooltipOpen && (
-          <div className="absolute bottom-full left-0 mb-2 w-72 rounded-xl border border-white/10 bg-[#0d1130] p-4 shadow-2xl shadow-black/40">
+          <div id="faucet-tooltip" className="absolute bottom-full left-0 mb-2 w-72 rounded-xl border border-white/10 bg-[#0d1130] p-4 shadow-2xl shadow-black/40">
             {/* Arrow */}
             <div className="absolute -bottom-1.5 left-4 h-3 w-3 rotate-45 border-b border-r border-white/10 bg-[#0d1130]" />
             <TooltipContent />
@@ -123,6 +124,7 @@ function TooltipContent() {
         target="_blank"
         rel="noopener noreferrer"
         id="stellar-faucet-link"
+        aria-label="Open Stellar Friendbot faucet in new tab"
         className="group flex items-center justify-between gap-3 rounded-lg border border-stellar-teal/20 bg-stellar-teal/[0.08] px-3 py-2.5 transition-all duration-200 hover:border-stellar-teal/50 hover:bg-stellar-teal/[0.14]"
       >
         <div className="flex items-center gap-2">

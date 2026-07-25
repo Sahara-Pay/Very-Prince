@@ -80,6 +80,12 @@ export const apiKeyRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     "/:orgId/api-keys",
     {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         description: "List all API keys for an organization",
         tags: ["API Keys"],
@@ -229,6 +235,12 @@ export const apiKeyRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     "/:orgId/api-keys",
     {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         description: "Generate a new API key for an organization",
         tags: ["API Keys"],
@@ -388,6 +400,12 @@ export const apiKeyRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     "/:orgId/api-keys/:id",
     {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         description: "Revoke an API key for an organization",
         tags: ["API Keys"],
@@ -535,6 +553,12 @@ export const apiKeyRoutes: FastifyPluginAsync = async (fastify) => {
   }>(
     "/:orgId/api-keys/:id",
     {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         description: "Update the name of an API key for an organization",
         tags: ["API Keys"],

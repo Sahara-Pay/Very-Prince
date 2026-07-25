@@ -8,15 +8,18 @@
 import { useState } from "react";
 import { useFreighter } from "@/hooks/useFreighter";
 import { buildAllocatePayoutTransaction, submitSignedTransaction } from "@/lib/sorobanClient";
-import { toast } from "sonner";
+import { toastTransaction } from "@/lib/transactionToast";
 
 interface AllocatePayoutModalProps {
   orgId: string;
   onClose: () => void;
   onSuccess: (optimisticData: { address: string, amount: bigint }) => void;
+  /** Called if the on-chain submission fails after the optimistic update
+   *  already fired, so the parent can reconcile immediately. */
+  onError?: () => void;
 }
 
-export function AllocatePayoutModal({ orgId, onClose, onSuccess }: AllocatePayoutModalProps) {
+export function AllocatePayoutModal({ orgId, onClose, onSuccess, onError }: AllocatePayoutModalProps) {
   const { publicKey, signTransaction } = useFreighter();
   const [maintainer, setMaintainer] = useState("");
   const [amount, setAmount] = useState("");
@@ -47,19 +50,28 @@ export function AllocatePayoutModal({ orgId, onClose, onSuccess }: AllocatePayou
 
       // 4. Submit to blockchain (background)
       await submitSignedTransaction(signedXdr);
-      toast.success("Allocation confirmed on-chain!");
+      toastTransaction.success("Allocation confirmed on-chain!");
     } catch (err) {
       console.error(err);
       toast.error(err instanceof Error ? err.message : "Allocation failed");
       setIsSubmitting(false);
+      // The optimistic update may have already fired (step 3, above) before
+      // this submission failed — reconcile immediately instead of leaving
+      // the phantom balance until the next scheduled refresh.
+      onError?.();
     }
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="allocate-modal-title"
+      className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+    >
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <div className="relative w-full max-w-md overflow-hidden rounded-2xl border border-white/10 bg-[#0a0a1a] p-8 shadow-2xl">
-        <h3 className="mb-6 text-xl font-bold text-white">Allocate Payout</h3>
+        <h3 id="allocate-modal-title" className="mb-6 text-xl font-bold text-white">Allocate Payout</h3>
         
         <form onSubmit={handleSubmit} className="space-y-6">
           <div>
@@ -91,6 +103,7 @@ export function AllocatePayoutModal({ orgId, onClose, onSuccess }: AllocatePayou
             <button
               type="button"
               onClick={onClose}
+              aria-label="Cancel allocation"
               className="flex-1 rounded-xl border border-white/10 px-4 py-3 text-sm font-semibold text-white/60 hover:bg-white/5"
             >
               Cancel
@@ -98,6 +111,7 @@ export function AllocatePayoutModal({ orgId, onClose, onSuccess }: AllocatePayou
             <button
               type="submit"
               disabled={isSubmitting}
+              aria-label={isSubmitting ? "Processing allocation" : "Allocate payout"}
               className="flex-[2] rounded-xl bg-gradient-to-r from-stellar-purple to-stellar-teal px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-stellar-purple/20 transition-all hover:brightness-110 disabled:opacity-50"
             >
               {isSubmitting ? "Processing..." : "Allocate Payout"}

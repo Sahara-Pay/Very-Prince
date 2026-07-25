@@ -25,6 +25,12 @@ export const profileRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.get<{ Params: { address: string } }>(
     "/:address/stats",
     {
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         params: {
           type: "object",

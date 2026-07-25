@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Example Terraform variable values
+# Copy this file to `terraform.tfvars` and customize the values before running
+# `terraform apply`. Do NOT commit `terraform.tfvars` if it contains sensitive
+# values.
+# ─────────────────────────────────────────────────────────────────────────────
+
+aws_region               = "us-east-1"
+project_name             = "very-prince"
+environment              = "shared"
+state_bucket_name        = "very-prince-terraform-state"
+dynamodb_lock_table_name = "very-prince-terraform-locks"
+
+# Existing private bucket containing the Next.js build output. CloudFront is
+# granted read access only to the _next/static/ prefix.
+asset_bucket_name = "very-prince-nextjs-assets"
+# PriceClass_All uses all edge locations for the lowest global delivery latency.
+cloudfront_price_class = "PriceClass_All"
+
+# ──── Monitoring & ECS Variables ──────────────────────────────────────────────
+# Uncomment and customize these for your deployment:
+# alert_email_addresses  = ["ops@example.com"]
+# cpu_threshold_pct      = 80
+# memory_threshold_pct   = 80
+# log_retention_days      = 30
+# webhook_queue_visibility_timeout_seconds = 30
+# webhook_queue_max_receive_count          = 5
+# webhook_dlq_depth_threshold              = 1
+# service_name            = "very-prince-backend"
+# task_cpu                = 512
+# task_memory             = 1024
+# desired_count           = 2
+# private_subnet_ids      = ["subnet-abc123", "subnet-def456"]
+# service_sg_id           = "sg-xyz789"
+# image_uri               = "ghcr.io/your-org/very-prince-backend:latest"
+# target_group_arn        = ""
+
+# ──── RDS Snapshot Lifecycle Variables ──────────────────────────────────────
+# Number of days to retain manual RDS DB snapshots before pruning
+# rds_snapshot_retention_days = 7
+# Preferred daily RDS backup window in UTC (format: HH:MM-HH:MM)
+# rds_backup_window          = "03:00-04:00"
+# EventBridge schedule expression for the prune Lambda
+# rds_snapshot_prune_schedule = "rate(1 day)"

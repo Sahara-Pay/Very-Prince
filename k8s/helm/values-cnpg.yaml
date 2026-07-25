@@ -1,0 +1,73 @@
+# =============================================================================
+# Helm values override – CloudNativePG Operator
+# =============================================================================
+# Chart: cloudnative-pg/cloudnative-pg
+# Version: 0.21.x  (operator v1.23.x)
+#
+# Install:
+#   helm repo add cnpg https://cloudnative-pg.github.io/charts
+#   helm repo update
+#   helm upgrade --install cnpg cnpg/cloudnative-pg \
+#     --namespace cnpg-system \
+#     --create-namespace \
+#     -f k8s/helm/values-cnpg.yaml
+# =============================================================================
+
+# Operator replicas – run 2 for HA operator itself
+replicaCount: 2
+
+image:
+  repository: ghcr.io/cloudnative-pg/cloudnative-pg
+  pullPolicy: IfNotPresent
+  # Pinned to a specific SHA for reproducible deployments
+  # tag: "" # defaults to chart appVersion
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# Webhook configuration
+webhook:
+  port: 9443
+  mutatingWebhookConfiguration:
+    create: true
+  validatingWebhookConfiguration:
+    create: true
+
+# Operator monitoring
+monitoring:
+  podMonitorEnabled: true        # requires prometheus-operator CRDs
+  grafanaDashboard:
+    create: true
+    namespace: monitoring        # namespace where Grafana is installed
+
+# Pod disruption budget for the operator itself
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Leader election (required when replicaCount > 1)
+leaderElect: true
+
+# Log level: error, warning, info, debug, trace
+logLevel: info
+
+# Node affinity – prefer to run on dedicated infra nodes if available
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 1
+        preference:
+          matchExpressions:
+            - key: node-role.kubernetes.io/infra
+              operator: Exists
+
+# Tolerations – allow scheduling on tainted infra nodes
+tolerations: []
+
+# Additional environment variables for the operator pod
+env: []

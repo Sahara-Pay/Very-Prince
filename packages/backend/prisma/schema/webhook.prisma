@@ -18,8 +18,9 @@ model WebhookDelivery {
   statusCode      Int?
   responseBody    String?
   errorMessage    String?
-  createdAt       DateTime      @default(now())
+  createdAt       DateTime      @default(now()) // Partition Key
 
+  @@id([id, createdAt])
   @@index([webhookConfigId])
   @@index([createdAt])
 }

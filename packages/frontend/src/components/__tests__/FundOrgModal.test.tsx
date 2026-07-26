@@ -36,14 +36,15 @@ describe("FundOrgModal", () => {
 
     render(<FundOrgModal orgId="testorg" onSuccess={onSuccess} onClose={onClose} />);
 
-    // Wait for balance to load and modal to be ready
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Confirm Funding/i })).not.toBeDisabled();
-    });
+    // Wait for balance to load
+    await screen.findByText("100.0000 XLM");
 
     // Enter amount
     const input = screen.getByPlaceholderText("0.00");
     fireEvent.change(input, { target: { value: "10" } });
+
+    // Verify button is now enabled
+    expect(screen.getByRole("button", { name: /Confirm Funding/i })).not.toBeDisabled();
 
     // Click fund
     const submitBtn = screen.getByRole("button", { name: /Confirm Funding/i });

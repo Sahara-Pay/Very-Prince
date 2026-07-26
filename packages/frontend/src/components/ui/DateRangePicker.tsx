@@ -79,9 +79,7 @@ export function DateRangePicker({ onChange, className = '' }: DateRangePickerPro
       onChange({ fromDate: null, toDate: null });
     } else {
       setValidationError(null);
-      if (fromDate || toDate) {
-        onChange({ fromDate, toDate });
-      }
+      onChange({ fromDate, toDate });
     }
   };
 

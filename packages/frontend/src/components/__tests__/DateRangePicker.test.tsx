@@ -82,4 +82,27 @@ describe('DateRangePicker', () => {
 
     expect(screen.getByRole('alert')).toHaveTextContent('Start date must be on or before end date');
   });
+
+  test('triggers onChange with nulls when custom dates are cleared', () => {
+    const handleChange = vi.fn();
+    render(<DateRangePicker onChange={handleChange} />);
+
+    const buttonCustom = screen.getByRole('button', { name: 'Custom Range' });
+    fireEvent.click(buttonCustom);
+
+    const fromInput = screen.getByLabelText('From:');
+    const toInput = screen.getByLabelText('To:');
+
+    // Fill dates
+    fireEvent.change(fromInput, { target: { value: '2026-07-20' } });
+    fireEvent.change(toInput, { target: { value: '2026-07-25' } });
+
+    // Clear dates
+    fireEvent.change(fromInput, { target: { value: '' } });
+    fireEvent.change(toInput, { target: { value: '' } });
+
+    const lastCall = handleChange.mock.calls[handleChange.mock.calls.length - 1]![0];
+    expect(lastCall.fromDate).toBeNull();
+    expect(lastCall.toDate).toBeNull();
+  });
 });

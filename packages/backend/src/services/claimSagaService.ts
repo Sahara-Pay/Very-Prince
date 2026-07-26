@@ -6,6 +6,12 @@ import { lockService } from "./lockService.js";
 import { logger } from "../utils/logger.js";
 import { SagaStatus } from "@prisma/client";
 
+/**
+ * ClaimSagaService: Saga Orchestrator for multi-step on-chain claims
+ * Manages transaction preparation, database state reservation, and RPC broadcast.
+ * Implements a two-phase commit / saga state machine using Redlock for concurrency control.
+ * Persists intermediate saga states with strict idempotency keys.
+ */
 export class ClaimSagaService {
   private async logTransition(
     sagaId: string,

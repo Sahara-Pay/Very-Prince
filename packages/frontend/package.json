@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "vitest run",
+    "test": "npx vitest run",
     "test:e2e": "playwright test"
   },
   "dependencies": {

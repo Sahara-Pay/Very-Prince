@@ -52,6 +52,7 @@ model FundingEvent {
   @@index([from])
   @@index([createdAt])
   @@index([ledger])
+  @@index([createdAt, orgId]) // Composite index for optimized groupBy aggregations
 }
 
 model IndexerState {

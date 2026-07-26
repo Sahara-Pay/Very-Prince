@@ -11,6 +11,7 @@ import { etagCachePlugin } from '../plugins/etagCache.js';
 import { queryComplexityMiddleware } from './queryComplexityMiddleware.js';
 import { deterministicStringify, cyrb53, compare } from './diff.js';
 import { safeGet, safeSet } from '../services/cache.js';
+import { tokenBucketMiddleware } from './tokenBucketMiddleware.js';
 
 const procedures = appRouter._def.procedures as Record<string, unknown>;
 
@@ -18,7 +19,7 @@ export async function configureTRPC(server: FastifyInstance) {
   await server.register(etagCachePlugin);
 
   server.post('/trpc/:path', {
-    preHandler: queryComplexityMiddleware,
+    preHandler: [tokenBucketMiddleware, queryComplexityMiddleware],
     config: {
       rateLimit: {
         max: 60,

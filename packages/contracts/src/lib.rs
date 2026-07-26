@@ -9,6 +9,10 @@ use soroban_sdk::{
 // See src/zero_copy.rs for the architecture and instruction-count benchmarks.
 mod zero_copy;
 
+// SDK compatibility tests to ensure safe version upgrades
+#[cfg(test)]
+mod sdk_compatibility_tests;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Data Types
 // ─────────────────────────────────────────────────────────────────────────────

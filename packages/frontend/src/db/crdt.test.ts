@@ -214,15 +214,18 @@ describe('crdtManager', () => {
   });
 });
 
-describe('syncEngine', () => {
-  const trpcMock = {
+const { trpcMock } = vi.hoisted(() => ({
+  trpcMock: {
     sync: {
       push: { mutate: vi.fn(async () => ({ success: true, received: Date.now() })) },
       pull: { query: vi.fn(async () => ({ changesets: [], serverTime: Date.now() })) },
     },
-  };
+  }
+}));
 
-  vi.mock('@/trpc/client', () => ({ trpcClient: trpcMock }));
+vi.mock('@/trpc/client', () => ({ trpcClient: trpcMock }));
+
+describe('syncEngine', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();

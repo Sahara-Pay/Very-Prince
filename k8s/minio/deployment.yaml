@@ -1,0 +1,221 @@
+---
+# ============================================================
+# MinIO – S3-compatible object storage for WAL archiving & PITR
+# ============================================================
+# Single-node MinIO is sufficient for a self-hosted k8s setup.
+# For production multi-zone HA, consider MinIO Operator or a
+# distributed 4-node erasure-coded deployment.
+# ============================================================
+
+# ── Namespace (created here for self-contained apply) ───────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: very-prince
+  labels:
+    app.kubernetes.io/part-of: very-prince
+
+---
+# ── Persistent volume claim ──────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: very-prince
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard          # replace with your storage class
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+# ── Deployment ───────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: very-prince
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  strategy:
+    type: Recreate    # single-node; use Recreate to avoid PVC conflicts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+        app.kubernetes.io/component: storage
+        app.kubernetes.io/part-of: very-prince
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:RELEASE.2024-04-18T19-09-19Z
+          imagePullPolicy: IfNotPresent
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          ports:
+            - name: api
+              containerPort: 9000
+              protocol: TCP
+            - name: console
+              containerPort: 9001
+              protocol: TCP
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-s3-secret
+                  key: ACCESS_KEY_ID
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-s3-secret
+                  key: SECRET_ACCESS_KEY
+            # Health & metrics
+            - name: MINIO_PROMETHEUS_AUTH_TYPE
+              value: public
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: api
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-pvc
+
+---
+# ── Services ─────────────────────────────────────────────────
+# API service – used by barman-cloud inside the PostgreSQL pods
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: very-prince
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+      protocol: TCP
+  type: ClusterIP
+
+---
+# Console service – MinIO web UI (NodePort for cluster-internal access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-console
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: very-prince
+spec:
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: console
+      port: 9001
+      targetPort: console
+      protocol: TCP
+  type: ClusterIP
+
+---
+# ── MinIO bucket creation Job ─────────────────────────────────
+# Runs once after MinIO is ready to ensure the WAL bucket exists.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-bucket-init
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/name: minio
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: very-prince
+  annotations:
+    # Helm: run only on first install
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: quay.io/minio/mc:RELEASE.2024-04-18T16-45-29Z
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-s3-secret
+                  key: ACCESS_KEY_ID
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-s3-secret
+                  key: SECRET_ACCESS_KEY
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "⏳ Waiting for MinIO to be ready..."
+              until mc alias set local http://minio:9000 \
+                    "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY"; do
+                sleep 3
+              done
+              echo "✅ MinIO reachable – creating bucket 'very-prince-wal'..."
+              mc mb --ignore-existing local/very-prince-wal
+              # Set lifecycle rule: delete objects older than 35 days
+              mc ilm add --expiry-days 35 local/very-prince-wal
+              echo "🎉 Bucket initialised."

@@ -14,6 +14,7 @@
  */
 
 import { Redis } from "ioredis";
+import { logger } from "../utils/logger.js";
 
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -47,7 +48,7 @@ export const bullRedisConnection = new Redis(REDIS_URL, {
 // ─── Event Listeners ─────────────────────────────────────────────────────────
 
 redis.on("error", (err) => {
-  console.error("Redis error:", err);
+  logger.error({ err }, "Redis error");
 });
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -62,7 +63,7 @@ export async function safeGet(key: string): Promise<string | null> {
   try {
     return await redis.get(key);
   } catch (error) {
-    console.error(`Redis safeGet failed for key ${key}:`, error);
+    logger.error({ err: error, key }, "Redis safeGet failed");
     return null;
   }
 }
@@ -78,6 +79,54 @@ export async function safeSet(key: string, value: string, ttlSeconds: number): P
   try {
     await redis.set(key, value, "EX", ttlSeconds);
   } catch (error) {
-    console.error(`Redis safeSet failed for key ${key}:`, error);
+    logger.error({ err: error, key }, "Redis safeSet failed");
   }
+}
+
+/**
+ * Safely delete a single Redis key.
+ */
+export async function safeDel(key: string): Promise<void> {
+  try {
+    await redis.del(key);
+  } catch (error) {
+    logger.error({ err: error, key }, "Redis safeDel failed");
+  }
+}
+
+/**
+ * Safely delete all keys matching a prefix (e.g. `stats:funds-raised:`).
+ */
+export async function safeDelByPrefix(prefix: string): Promise<void> {
+  try {
+    const keys = await redis.keys(`${prefix}*`);
+    if (keys.length > 0) {
+      await redis.del(...keys);
+    }
+  } catch (error) {
+    logger.error({ err: error, prefix }, "Redis safeDelByPrefix failed");
+  }
+}
+
+/**
+ * Read-through Redis cache for async fetchers.
+ * Returns cached JSON when present; otherwise fetches, stores, and returns.
+ */
+export async function withRedisCache<T>(
+  key: string,
+  ttlSeconds: number,
+  fetcher: () => Promise<T>,
+): Promise<T> {
+  const cached = await safeGet(key);
+  if (cached !== null) {
+    try {
+      return JSON.parse(cached) as T;
+    } catch (error) {
+      logger.warn({ err: error, key }, "Cache corruption detected");
+    }
+  }
+
+  const result = await fetcher();
+  void safeSet(key, JSON.stringify(result), ttlSeconds);
+  return result;
 }

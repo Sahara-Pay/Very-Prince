@@ -80,6 +80,13 @@ All state-changing functions follow CEI pattern:
 - State updates happen before external token transfers
 - Claimable balances reset to 0 before token transfer
 - No external calls between checks and effects
+- Every state-mutating entry point acquires a global reentrancy mutex
+  (`ReentrancyGuard`) on entry and releases it on exit (via `Drop`). A
+  re-entrant call panics with `PrinceError::Reentrancy` before it can observe
+  or mutate any inconsistent state. Combined with the atomic transaction
+  semantics (a panicking call reverts the lock write), the guard can never
+  dead-lock the contract and makes double-spend through reentrancy
+  structurally unreachable.
 
 ### Access Control
 - Role-based permissions (admin, maintainer, protocol admin)

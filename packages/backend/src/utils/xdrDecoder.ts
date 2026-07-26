@@ -18,6 +18,7 @@
  */
 
 import { xdr, scValToNative } from "@stellar/stellar-sdk";
+import { logger } from "./logger.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -444,7 +445,7 @@ export function parseContractEvent(decodedEvent: DecodedEvent): ContractEvent | 
     }
 
     default:
-      console.warn(`Unknown event name: ${eventName}`);
+      logger.warn({ eventName }, "Unknown contract event name");
       return null;
   }
 }
@@ -480,7 +481,7 @@ function extractI128AsString(value: unknown): string {
     }
   }
 
-  console.warn("Could not extract i128, returning '0'");
+  logger.warn("Could not extract i128, returning '0'");
   return "0";
 }
 

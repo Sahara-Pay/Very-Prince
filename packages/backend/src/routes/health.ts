@@ -1,13 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
+import type { HealthResponse } from "@very-prince/types";
 
 const API_VERSION = "0.1.0";
-
-export interface HealthResponse {
-  status: "ok";
-  version: string;
-  timestamp: string;
-  uptime: number;
-}
 
 export const healthRoutes: FastifyPluginAsync = async (fastify) => {
   /**

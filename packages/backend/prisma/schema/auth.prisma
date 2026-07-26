@@ -1,0 +1,15 @@
+model ApiKey {
+  id             String    @id @default(cuid())
+  organizationId String
+  hashedKey      String    // SHA-256 hash of the API key for secure storage
+  name           String?   // Optional display name for the key
+  lastUsedAt     DateTime? // Track when the key was last used
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([organizationId, hashedKey]) // Prevent duplicate keys for same org
+  @@index([organizationId])
+  @@index([isActive])
+  @@index([createdAt])
+}

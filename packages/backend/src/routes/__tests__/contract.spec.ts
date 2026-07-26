@@ -20,10 +20,12 @@ let app: ReturnType<typeof fastify>;
 let contractController: ContractControllerMock;
 
 beforeAll(async () => {
-  const controllerModule = await import('../controllers/contractController.js');
+  // @ts-ignore
+  const controllerModule = await import('../controllers/contractController');
   contractController = controllerModule.contractController;
 
-  const routeModule = await import('../contract.ts');
+  // @ts-ignore
+  const routeModule = await import('../contract');
   app = fastify();
   app.register(routeModule.contractRoutes, { prefix: '/api/v1/contract' });
   await app.ready();

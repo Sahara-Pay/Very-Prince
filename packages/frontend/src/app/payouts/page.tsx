@@ -7,6 +7,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import useSWR from "swr";
 import { WalletButton } from "@/components/WalletButton";
 import { useSSEWithSWR } from "@/hooks/useSSE";
@@ -19,6 +20,40 @@ interface PendingPayout {
   orgName?: string;
 }
 
+interface PayoutEntry {
+  orgId: string;
+  amountStroops: string;
+  ledger: number;
+  ledgerClosedAt: string;
+  txHash: string;
+}
+
+interface ProfileStats {
+  address: string;
+  totalStroops: string;
+  totalXlm: string;
+  orgIds: string[];
+  payouts: PayoutEntry[];
+}
+
+function formatXlm(stroops: string): string {
+  return (Number(stroops) / 10_000_000).toFixed(2);
+}
+
+function shortAddress(addr: string): string {
+  return `${addr.slice(0, 8)}...${addr.slice(-6)}`;
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export default function PayoutsPage() {
   const { isConnected, publicKey, claimPayout, isSigning } = useUnifiedWallet();
   const [isExporting, setIsExporting] = useState(false);
@@ -27,9 +62,11 @@ export default function PayoutsPage() {
   useSSEWithSWR();
 
   // Fetch pending payouts for the connected wallet
-  const { data: payouts, error, isLoading, mutate } = useSWR(
-    isConnected && publicKey ? [`/api/v1/contract/maintainer/${publicKey}`] : null,
-    async ([url]) => {
+  const { data: payouts, error, isLoading, refetch } = useQuery({
+    queryKey: ["payouts", publicKey],
+    enabled: isConnected && Boolean(publicKey),
+    queryFn: async () => {
+      const url = `/api/v1/contract/maintainer/${publicKey}`;
       const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"}${url}`);
       if (!response.ok) {
         throw new Error(`Failed to fetch payouts: ${response.statusText}`);
@@ -42,6 +79,21 @@ export default function PayoutsPage() {
         amountXlm: (Number(payout.amountStroops) / 10_000_000).toFixed(2),
       }));
     },
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: true,
+  });
+
+  // Fetch transaction history (claimed payouts) for the connected wallet
+  const { data: historyData, error: historyError, isLoading: isHistoryLoading } = useSWR<ProfileStats>(
+    isConnected && publicKey ? [`/api/v1/profile/${publicKey}/stats`] : null,
+    async ([url]) => {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"}${url}`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch transaction history: ${response.statusText}`);
+      }
+      return response.json();
+    },
     {
       revalidateOnFocus: false,
       revalidateOnReconnect: true,
@@ -52,54 +104,60 @@ export default function PayoutsPage() {
     try {
       await claimPayout(orgId);
       // Refresh the payouts list after successful claim
-      await mutate();
+      await refetch();
     } catch (error) {
       console.error("Failed to claim payout:", error);
     }
   };
 
-  const handleExportData = async (format: 'csv' | 'json') => {
-    if (!publicKey) return;
-    
-    setIsExporting(true);
-    try {
+  const exportMutation = useMutation({
+    mutationFn: async (format: 'csv' | 'json') => {
+      if (!publicKey) return;
       const baseUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001";
       const url = new URL(`/api/export/payouts/${publicKey}`, baseUrl);
       url.searchParams.set('type', format);
-      
+
       const response = await fetch(url.toString());
       if (!response.ok) {
         throw new Error(`Export failed: ${response.statusText}`);
       }
-      
-      // Get filename from Content-Disposition header or create default
+
       const contentDisposition = response.headers.get('Content-Disposition');
       let filename = `payout-history-${publicKey}-${new Date().toISOString().split('T')[0]}.${format}`;
-      
+
       if (contentDisposition) {
         const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
         if (filenameMatch && filenameMatch[1]) {
           filename = filenameMatch[1];
         }
       }
-      
-      // Create blob and download
-      const blob = await response.blob();
-      const downloadUrl = window.URL.createObjectURL(blob);
+
+      return { blob: await response.blob(), filename };
+    },
+    onSuccess: (data) => {
+      if (!data) return;
+      const downloadUrl = window.URL.createObjectURL(data.blob);
       const link = document.createElement('a');
       link.href = downloadUrl;
-      link.download = filename;
+      link.download = data.filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(downloadUrl);
-      
-    } catch (error) {
+    },
+    onError: (error) => {
       console.error("Export failed:", error);
       alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    } finally {
-      setIsExporting(false);
-    }
+    },
+  });
+
+  const handleExportData = async (format: 'csv' | 'json') => {
+    if (!publicKey) return;
+    
+    setIsExporting(true);
+    exportMutation.mutate(format, {
+      onSettled: () => setIsExporting(false),
+    });
   };
 
   if (!isConnected) {
@@ -152,9 +210,10 @@ export default function PayoutsPage() {
         </nav>
       </header>
 
-      <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-10">
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
+      <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-10 space-y-12">
+        {/* Payouts Header & Pending Section */}
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
             <div>
               <h2 className="text-3xl font-bold text-white mb-2">Your Payouts</h2>
               <p className="text-white/50">
@@ -165,6 +224,7 @@ export default function PayoutsPage() {
               <button
                 onClick={() => handleExportData('csv')}
                 disabled={isExporting}
+                aria-label={isExporting ? "Exporting data as CSV" : "Export payouts as CSV"}
                 className="rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {isExporting ? (
@@ -184,6 +244,7 @@ export default function PayoutsPage() {
               <button
                 onClick={() => handleExportData('json')}
                 disabled={isExporting}
+                aria-label={isExporting ? "Exporting data as JSON" : "Export payouts as JSON"}
                 className="rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {isExporting ? (
@@ -202,77 +263,165 @@ export default function PayoutsPage() {
               </button>
             </div>
           </div>
+
+          {error && (
+            <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+              {error.message || "Failed to load payouts"}
+            </div>
+          )}
+
+          {isLoading ? (
+            <div className="space-y-4">
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="glass-card animate-pulse">
+                  <div className="flex items-center justify-between p-6">
+                    <div className="space-y-2">
+                      <div className="h-4 w-32 bg-white/10 rounded"></div>
+                      <div className="h-3 w-24 bg-white/5 rounded"></div>
+                    </div>
+                    <div className="h-8 w-20 bg-white/10 rounded"></div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : payouts && payouts.length > 0 ? (
+            <div className="space-y-4">
+              {payouts.map((payout: PendingPayout, index: number) => (
+                <div key={`${payout.orgId}-${index}`} className="glass-card">
+                  <div className="flex items-center justify-between p-6">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 mb-2">
+                        <div className="h-10 w-10 rounded-lg bg-stellar-purple/20 flex items-center justify-center">
+                          <span className="text-lg">🏛️</span>
+                        </div>
+                        <div>
+                          <h3 className="font-semibold text-white">
+                            {payout.orgName || payout.orgId}
+                          </h3>
+                          <p className="text-sm text-white/40 font-mono">{payout.orgId}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4 text-sm">
+                        <div className="flex items-center gap-2 text-white/60">
+                          <span className="h-1.5 w-1.5 rounded-full bg-stellar-teal"></span>
+                          Claimable: <span className="font-mono">{payout.amountXlm} XLM</span>
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => handleClaimPayout(payout.orgId)}
+                      disabled={isSigning}
+                      className="rounded-lg bg-gradient-to-r from-stellar-purple to-brand-500 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-stellar-purple/20 transition-all hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isSigning ? "Claiming..." : "Claim"}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-12 glass-card">
+              <div className="mb-4">
+                <div className="h-12 w-12 rounded-full bg-white/5 flex items-center justify-center mx-auto">
+                  <span className="text-xl">💰</span>
+                </div>
+              </div>
+              <h3 className="text-lg font-semibold text-white mb-1">No Pending Payouts</h3>
+              <p className="text-white/50 text-sm max-w-md mx-auto">
+                You don't have any pending payouts at the moment. Check back later or contact organizations you contribute to.
+              </p>
+            </div>
+          )}
         </div>
 
-        {error && (
-          <div className="mb-8 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-            {error.message || "Failed to load payouts"}
-          </div>
-        )}
-
-        {isLoading ? (
-          <div className="space-y-4">
-            {[...Array(3)].map((_, i) => (
-              <div key={i} className="glass-card animate-pulse">
-                <div className="flex items-center justify-between p-6">
-                  <div className="space-y-2">
-                    <div className="h-4 w-32 bg-white/10 rounded"></div>
-                    <div className="h-3 w-24 bg-white/5 rounded"></div>
-                  </div>
-                  <div className="h-8 w-20 bg-white/10 rounded"></div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : payouts && payouts.length > 0 ? (
-          <div className="space-y-4">
-            {payouts.map((payout: PendingPayout, index: number) => (
-              <div key={`${payout.orgId}-${index}`} className="glass-card">
-                <div className="flex items-center justify-between p-6">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-2">
-                      <div className="h-10 w-10 rounded-lg bg-stellar-purple/20 flex items-center justify-center">
-                        <span className="text-lg">🏛️</span>
-                      </div>
-                      <div>
-                        <h3 className="font-semibold text-white">
-                          {payout.orgName || payout.orgId}
-                        </h3>
-                        <p className="text-sm text-white/40 font-mono">{payout.orgId}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-4 text-sm">
-                      <div className="flex items-center gap-2 text-white/60">
-                        <span className="h-1.5 w-1.5 rounded-full bg-stellar-teal"></span>
-                        Claimable: <span className="font-mono">{payout.amountXlm} XLM</span>
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => handleClaimPayout(payout.orgId)}
-                    disabled={isSigning}
-                    className="rounded-lg bg-gradient-to-r from-stellar-purple to-brand-500 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-stellar-purple/20 transition-all hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isSigning ? "Claiming..." : "Claim"}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-20">
-            <div className="mb-4">
-              <div className="h-16 w-16 rounded-full bg-white/5 flex items-center justify-center mx-auto">
-                <span className="text-2xl">💰</span>
-              </div>
+        {/* Transaction History Section */}
+        <div className="border-t border-white/[0.06] pt-10 space-y-6">
+          <h2 className="text-2xl font-bold text-white">Transaction History</h2>
+          
+          {historyError && (
+            <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+              {historyError.message || "Failed to load transaction history"}
             </div>
-            <h3 className="text-xl font-semibold text-white mb-2">No Pending Payouts</h3>
-            <p className="text-white/50">
-              You don't have any pending payouts at the moment. Check back later or contact organizations you contribute to.
-            </p>
-          </div>
-        )}
+          )}
+
+          {isHistoryLoading ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {[...Array(3)].map((_, i) => (
+                  <div key={i} className="glass-card animate-pulse p-4 h-20"></div>
+                ))}
+              </div>
+              <div className="glass-card animate-pulse h-40"></div>
+            </div>
+          ) : historyData ? (
+            <div className="space-y-6">
+              {/* Stats Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="glass-card p-4 space-y-1">
+                  <p className="text-xs text-white/50 uppercase tracking-wide">Total Earned</p>
+                  <p className="text-xl font-bold text-white">{formatXlm(historyData.totalStroops)} XLM</p>
+                </div>
+                <div className="glass-card p-4 space-y-1">
+                  <p className="text-xs text-white/50 uppercase tracking-wide">Payouts Received</p>
+                  <p className="text-xl font-bold text-white">{historyData.payouts.length}</p>
+                </div>
+                <div className="glass-card p-4 space-y-1">
+                  <p className="text-xs text-white/50 uppercase tracking-wide">Contributing Orgs</p>
+                  <p className="text-xl font-bold text-white">{historyData.orgIds.length}</p>
+                </div>
+              </div>
+
+              {/* Timeline list */}
+              {historyData.payouts.length === 0 ? (
+                <div className="text-center py-12 glass-card">
+                  <div className="mb-4">
+                    <div className="h-12 w-12 rounded-full bg-white/5 flex items-center justify-center mx-auto">
+                      <span className="text-xl">⌛</span>
+                    </div>
+                  </div>
+                  <h3 className="text-lg font-semibold text-white mb-1">No Past Transactions</h3>
+                  <p className="text-white/50 text-sm">
+                    No payouts have been recorded for your address yet.
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y divide-white/[0.06] border border-white/[0.06] rounded-xl overflow-hidden bg-white/[0.02]">
+                  {historyData.payouts.map((payout, i) => (
+                    <div
+                      key={`${payout.txHash}-${i}`}
+                      className="flex flex-col gap-2 p-4 hover:bg-white/[0.04] transition-colors sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-white">
+                            {formatXlm(payout.amountStroops)} XLM
+                          </span>
+                          <span className="text-xs text-white/40">
+                            from{" "}
+                            <span className="text-stellar-purple font-medium">{payout.orgId}</span>
+                          </span>
+                        </div>
+                        <p className="text-xs text-white/40">
+                          {formatDate(payout.ledgerClosedAt)} — Ledger #{payout.ledger}
+                        </p>
+                      </div>
+                      <a
+                        href={`https://stellar.expert/explorer/testnet/tx/${payout.txHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-mono text-stellar-teal hover:underline break-all sm:shrink-0"
+                      >
+                        {shortAddress(payout.txHash)}
+                      </a>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
       </main>
     </div>
   );
 }
+

@@ -4,7 +4,7 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { mutate } from 'swr';
+import { useQueryClient } from '@tanstack/react-query';
 
 export interface SSEEvent {
   type: string;
@@ -13,6 +13,7 @@ export interface SSEEvent {
 }
 
 export function useSSE(url?: string) {
+  const queryClient = useQueryClient();
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -38,22 +39,24 @@ export function useSSE(url?: string) {
 
             // Handle different event types
             if (event.type === 'payout_claimed') {
-              // Invalidate relevant SWR caches
-              mutate('/api/v1/contract/maintainer');
-              mutate('/api/v1/contract/balance');
+              // Invalidate relevant React Query caches
+              queryClient.invalidateQueries({ queryKey: ['payouts'] });
+              queryClient.invalidateQueries({ queryKey: ['balance'] });
               console.log('Invalidated payout-related caches');
             }
 
             if (event.type === 'funds_deposited') {
               // Invalidate organization and budget caches
-              mutate('/api/v1/contract/orgs');
-              mutate('/api/v1/contract/budget');
+              queryClient.invalidateQueries({ queryKey: ['organizations'] });
+              queryClient.invalidateQueries({ queryKey: ['organization'] });
+              queryClient.invalidateQueries({ queryKey: ['funding-history'] });
+              queryClient.invalidateQueries({ queryKey: ['budget'] });
               console.log('Invalidated fund-related caches');
             }
 
             if (event.type === 'blockchain_event') {
               // Invalidate all caches for any blockchain event
-              mutate(() => true, undefined, { revalidate: true });
+              queryClient.invalidateQueries();
               console.log('Invalidated all caches due to blockchain event');
             }
 
@@ -94,7 +97,7 @@ export function useSSE(url?: string) {
         reconnectTimeoutRef.current = null;
       }
     };
-  }, [url]);
+  }, [queryClient, url]);
 
   return {
     isConnected: typeof window !== 'undefined' && typeof EventSource !== 'undefined' && eventSourceRef.current?.readyState === EventSource.OPEN,
@@ -102,9 +105,8 @@ export function useSSE(url?: string) {
 }
 
 /**
- * Hook that combines SSE with SWR for automatic cache invalidation
+ * Hook that combines SSE with React Query for automatic cache invalidation.
  */
 export function useSSEWithSWR(sseUrl?: string) {
-  // You can add additional SWR-related logic here
   return useSSE(sseUrl);
 }

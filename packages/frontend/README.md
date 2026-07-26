@@ -55,3 +55,9 @@ The frontend prepares unsigned transaction payloads and sends them to the wallet
 ## Testing
 
 Use Vitest for unit and component-level tests and Playwright for browser-based end-to-end coverage.
+
+## Image Optimization
+
+Images are optimized and cached at Vercel's edge network via the `images` config
+in `next.config.mjs`. When adding new remote image sources, add their hostname to
+`images.remotePatterns` — otherwise Next.js will refuse to optimize them.

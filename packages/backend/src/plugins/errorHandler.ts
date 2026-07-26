@@ -5,9 +5,8 @@ export async function errorHandler(server: FastifyInstance) {
   server.setErrorHandler((error: FastifyError, request: FastifyRequest, reply: FastifyReply) => {
     request.log.error({ err: error, reqId: request.id }, error.message);
 
-    // Sentry part (khliha kifma hiya)
     if (process.env.NODE_ENV === "production" && process.env.SENTRY_DSN) {
-       // ... (Keep your existing Sentry logic here)
+      Sentry.captureException(error);
     }
 
     // Determine status code

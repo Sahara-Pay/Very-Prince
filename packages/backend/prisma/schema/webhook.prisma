@@ -1,0 +1,25 @@
+model WebhookConfig {
+  id             String            @id @default(cuid())
+  organizationId String            @unique
+  url            String
+  secret         String
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  deliveries     WebhookDelivery[]
+
+  @@index([organizationId])
+}
+
+model WebhookDelivery {
+  id              String        @id @default(cuid())
+  webhookConfigId String
+  webhookConfig   WebhookConfig @relation(fields: [webhookConfigId], references: [id])
+  payload         String        // JSON string
+  statusCode      Int?
+  responseBody    String?
+  errorMessage    String?
+  createdAt       DateTime      @default(now())
+
+  @@index([webhookConfigId])
+  @@index([createdAt])
+}

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
-import useSWR from "swr";
+import { useQuery } from "@tanstack/react-query";
 import { RegisterOrgModal } from "@/components/RegisterOrgModal";
 import { GlassButton } from "@/components/GlassButton";
 import type { Org } from "@/lib/api";
@@ -32,8 +32,7 @@ export default function DashboardOrganizationsPage() {
     return () => clearTimeout(timer);
   }, [searchTerm]);
 
-  // SWR fetcher function
-  const fetcher = async ([url]: [string]) => {
+  const fetchOrganizationsPage = async (url: string) => {
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`Failed to fetch organizations: ${response.statusText}`);
@@ -53,8 +52,9 @@ export default function DashboardOrganizationsPage() {
     return `${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001"}/api/v1/organizations/paginate?${params.toString()}`;
   }, [debouncedSearch, page]);
 
-  const { data, error, isLoading } = useSWR([apiUrl], fetcher, {
-    revalidateOnFocus: false,
+  const { data, error, isLoading } = useQuery({
+    queryKey: ["organizations", "dashboard", page, debouncedSearch],
+    queryFn: () => fetchOrganizationsPage(apiUrl),
   });
 
   return (
@@ -88,7 +88,7 @@ export default function DashboardOrganizationsPage() {
 
       {/* ── Content ────────────────────────────────────────────────────────────── */}
       {isLoading ? (
-        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
             <OrganizationSkeletonCard key={i} />
           ))}
@@ -98,7 +98,7 @@ export default function DashboardOrganizationsPage() {
           <p className="text-red-200">Failed to load organizations. Please try again.</p>
         </div>
       ) : data?.list && data.list.length > 0 ? (
-        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {data.list.map((org: Org) => (
             <Link key={org.id} href={`/dashboard/org/${org.id}`}>
               <div className="glass-panel p-6 hover:bg-white/15 transition-all duration-200 cursor-pointer group">

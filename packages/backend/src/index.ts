@@ -20,7 +20,10 @@ import { analyticsRoutes } from './routes/analytics.js';
 import { indexerService } from './services/indexerService.js';
 import { notificationController } from './controllers/notificationController.js';
 import { configureTRPC } from './trpc/server.js';
+import { createUwsGateway } from './ws/uwsGateway.js';
 import { webhookWorker } from './workers/WebhookWorker.js';
+import { claimSagaService } from './services/claimSagaService.js';
+import * as cron from 'node-cron';
 import * as Sentry from '@sentry/node';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
 
@@ -38,6 +41,11 @@ const server = Fastify({
     level: process.env['NODE_ENV'] === 'production' ? 'warn' : 'info',
     transport: process.env['NODE_ENV'] !== 'production' ? { target: 'pino-pretty', options: { colorize: true } } : undefined,
   } as any,
+  // The tRPC httpBatchLink joins multiple procedure names into the
+  // /trpc/:path route param (comma-separated). The router's default
+  // maxParamLength (100) is too small for realistic batches and would
+  // 414 them before the query complexity analyzer ever runs.
+  maxParamLength: 2000,
 });
 
 await server.register(helmet, { contentSecurityPolicy: false });
@@ -101,22 +109,89 @@ await server.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
 
 await configureTRPC(server);
 
-server.post('/api/v1/notifications/preferences', notificationController.saveEmailPreference);
-server.delete('/api/v1/notifications/preferences', notificationController.deleteEmailPreference);
-server.get('/api/v1/notifications/unsubscribe', notificationController.unsubscribe);
+const WS_PORT = parseInt(process.env['WS_PORT'] || '3002', 10);
+const uwsApp = createUwsGateway();
+uwsApp.listen(WS_PORT, (listenSocket: unknown) => {
+  if (listenSocket) {
+    server.log.info('uWebSockets.js WebSocket gateway listening on ws://0.0.0.0:' + WS_PORT);
+  } else {
+    server.log.error('Failed to start uWebSockets.js WebSocket gateway on port ' + WS_PORT);
+  }
+});
+
+server.post('/api/v1/notifications/preferences', {
+  config: {
+    rateLimit: {
+      max: 10,
+      timeWindow: '1 minute',
+    },
+  },
+}, notificationController.saveEmailPreference);
+server.delete('/api/v1/notifications/preferences', {
+  config: {
+    rateLimit: {
+      max: 10,
+      timeWindow: '1 minute',
+    },
+  },
+}, notificationController.deleteEmailPreference);
+server.get('/api/v1/notifications/unsubscribe', {
+  config: {
+    rateLimit: {
+      max: 30,
+      timeWindow: '1 minute',
+    },
+  },
+}, notificationController.unsubscribe);
 
 server.get('/health', async () => ({ status: 'ok', version: '0.1.0', timestamp: new Date().toISOString(), uptime: process.uptime() }));
-server.get('/indexer/status', async () => indexerService.getStatus());
-server.post('/indexer/sync', async () => { await indexerService.triggerSync(); return { message: 'Sync triggered' }; });
+server.get('/indexer/status', {
+  config: {
+    rateLimit: {
+      max: 60,
+      timeWindow: '1 minute',
+    },
+  },
+}, async () => indexerService.getStatus());
+server.post('/indexer/sync', {
+  config: {
+    rateLimit: {
+      max: 10,
+      timeWindow: '1 minute',
+    },
+  },
+}, async () => { await indexerService.triggerSync(); return { message: 'Sync triggered' }; });
+
+let recoveryJob: cron.ScheduledTask | null = null;
 
 try {
   await server.listen({ port: SERVER_PORT, host: SERVER_HOST });
   server.log.info('Very-prince backend listening on http://' + SERVER_HOST + ':' + SERVER_PORT);
   indexerService.start();
+
+  // Start the Saga recovery worker to check for stalled/timed out transactions every minute
+  const recoveryCronExpr = process.env['SAGA_RECOVERY_CRON_EXPRESSION'] || '*/1 * * * *';
+  recoveryJob = cron.schedule(recoveryCronExpr, async () => {
+    try {
+      server.log.info('[Saga Recovery] Running stalled sagas check...');
+      const result = await claimSagaService.recoverStalledSagas();
+      if (result.processedCount > 0) {
+        server.log.info(result, '[Saga Recovery] Completed check');
+      }
+    } catch (err) {
+      server.log.error(err, '[Saga Recovery] Error during stalled sagas check');
+    }
+  });
+
   const gracefulShutdown = async (signal: string) => {
     server.log.info('Received ' + signal + ', shutting down gracefully...');
+    if (recoveryJob) {
+      recoveryJob.stop();
+      recoveryJob = null;
+    }
     indexerService.stop();
     await webhookWorker.stop();
+    uwsApp.close();
     server.close(() => { server.log.info('Server closed'); process.exit(0); });
   };
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

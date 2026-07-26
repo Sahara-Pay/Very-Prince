@@ -17,6 +17,7 @@ import { webhookRoutes } from './routes/webhook.js';
 import { apiKeyRoutes } from './routes/apiKeys.js';
 import { exportRoutes } from './routes/export.js';
 import { analyticsRoutes } from './routes/analytics.js';
+import { rateLimitRoutes } from './routes/rateLimit.js';
 import { indexerService } from './services/indexerService.js';
 import { notificationController } from './controllers/notificationController.js';
 import { configureTRPC } from './trpc/server.js';
@@ -106,6 +107,7 @@ await server.register(webhookRoutes, { prefix: '/api/org/:orgId/webhook' });
 await server.register(apiKeyRoutes, { prefix: '/api/org' });
 await server.register(exportRoutes, { prefix: '/api/export' });
 await server.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
+await server.register(rateLimitRoutes, { prefix: '/api/v1' });
 
 await configureTRPC(server);
 

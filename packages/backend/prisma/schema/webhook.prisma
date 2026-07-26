@@ -11,7 +11,7 @@ model WebhookConfig {
 }
 
 model WebhookDelivery {
-  id              String        @id @default(cuid())
+  id              String        @default(cuid())
   webhookConfigId String
   webhookConfig   WebhookConfig @relation(fields: [webhookConfigId], references: [id])
   payload         String        // JSON string

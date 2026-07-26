@@ -12,7 +12,6 @@ import { t } from './trpc.js';
 import { withTrpcCache } from './cacheMiddleware.js';
 import { TRPC_CACHE_TTL, trpcCacheKeys } from './cacheKeys.js';
 import { organizationService } from '../services/organizationService.js';
-
 import {
   fundOrgInputSchema,
   allocatePayoutInputSchema,

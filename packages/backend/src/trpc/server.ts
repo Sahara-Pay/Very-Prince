@@ -1,9 +1,16 @@
+/**
+ * @file server.ts
+ * @description tRPC server configuration for Fastify integration with differential synchronization.
+ */
+
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { appRouter } from './router.js';
-import type { AppRouter } from './router.js';
+import type { AppRouter, TRPCContext } from './trpc.js';
 import { logger } from '../utils/logger.js';
 import { etagCachePlugin } from '../plugins/etagCache.js';
 import { queryComplexityMiddleware } from './queryComplexityMiddleware.js';
+import { deterministicStringify, cyrb53, compare } from './diff.js';
+import { safeGet, safeSet } from '../services/cache.js';
 import { tokenBucketMiddleware } from './tokenBucketMiddleware.js';
 
 const procedures = appRouter._def.procedures as Record<string, unknown>;
@@ -22,14 +29,71 @@ export async function configureTRPC(server: FastifyInstance) {
   }, async (request: FastifyRequest, reply: FastifyReply) => {
     const { path } = request.params as { path: string };
     const body = request.body as any;
-
+    
+    // Extract the client's last known state hash from the custom header
+    const clientStateHash = request.headers['x-state-hash'] as string | undefined;
+    
+    const ctx: TRPCContext = {
+      stateHash: clientStateHash,
+    };
+    
     try {
-      const { result, cacheable } = await handleTRPCRequest(path, body);
+      const { result, cacheable } = await handleTRPCRequest(path, body, ctx);
+      
       // Only queries are safe to serve as 304 Not Modified: mutations must
       // always return their actual result body to the caller.
       if (cacheable) {
         request.etagCacheable = true;
       }
+      
+      // We only apply differential sync to query procedures (cacheable queries)
+      // and only when the result is a non-null object.
+      const isQuery = cacheable;
+      
+      if (isQuery && result && typeof result === 'object') {
+        const serialized = deterministicStringify(result);
+        const newHash = cyrb53(serialized);
+        
+        // 1. Check if the client's state is already identical to the current state
+        if (clientStateHash && clientStateHash === newHash) {
+          return reply.send({
+            status: 'no_change',
+            hash: newHash,
+          });
+        }
+        
+        // 2. Cache the new state in Redis for future diff comparisons (1 hour TTL)
+        const cacheKey = `state_hash:${newHash}`;
+        await safeSet(cacheKey, serialized, 3600);
+        
+        // 3. If client sent a hash, look up the old state and compute the patch
+        if (clientStateHash) {
+          const oldStateStr = await safeGet(`state_hash:${clientStateHash}`);
+          if (oldStateStr) {
+            try {
+              const oldState = JSON.parse(oldStateStr);
+              const patch = compare(oldState, result);
+              return reply.send({
+                status: 'diff',
+                hash: newHash,
+                patch,
+              });
+            } catch (error) {
+              console.warn(`Failed to parse cached state for hash ${clientStateHash}:`, error);
+              // Fall back to full payload transmission
+            }
+          }
+        }
+        
+        // 4. Return full payload if client had a cache miss or is a new session
+        return reply.send({
+          status: 'full',
+          hash: newHash,
+          data: result,
+        });
+      }
+      
+      // Return standard result for primitive/mutation responses
       return reply.send(result);
     } catch (error) {
       logger.error({ err: error, path }, 'tRPC HTTP request failed');
@@ -41,9 +105,11 @@ export async function configureTRPC(server: FastifyInstance) {
   });
 }
 
+// Basic tRPC request handler utilizing AppRouter's procedures
 async function handleTRPCRequest(
   path: string,
   input: any,
+  ctx: TRPCContext
 ): Promise<{ result: unknown; cacheable: boolean }> {
   // eslint-disable-next-line security/detect-object-injection
   const procedure = procedures[path] as
@@ -51,7 +117,7 @@ async function handleTRPCRequest(
         _def: {
           query?: boolean;
           subscription?: boolean;
-          resolver: (opts: { ctx: object; input: unknown; signal: AbortSignal }) => unknown;
+          resolver: (opts: { ctx: TRPCContext; input: unknown; signal: AbortSignal }) => unknown;
         };
       }
     | undefined;
@@ -65,7 +131,7 @@ async function handleTRPCRequest(
   }
 
   const result = await procedure._def.resolver({
-    ctx: {},
+    ctx,
     input,
     signal: new AbortController().signal,
   });
@@ -73,4 +139,5 @@ async function handleTRPCRequest(
   return { result, cacheable: procedure._def.query === true };
 }
 
+// Export the router type for frontend usage
 export type { AppRouter };

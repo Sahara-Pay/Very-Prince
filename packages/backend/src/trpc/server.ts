@@ -6,6 +6,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { appRouter } from './router.js';
 import type { AppRouter } from './router.js';
+import { evictionEngine } from '../services/probabilisticEviction.js';
 
 // Create a simple tRPC HTTP handler for Fastify
 export async function configureTRPC(server: FastifyInstance) {
@@ -15,6 +16,10 @@ export async function configureTRPC(server: FastifyInstance) {
     const body = request.body as any;
     
     try {
+      // Record the query path in the eviction engine so the sketch learns
+      // which procedures are hot across the entire tRPC surface.
+      evictionEngine.recordAccess(`trpc:${path}`);
+      
       // Simple routing - this is a basic implementation
       // In a real setup, you'd use the proper tRPC handler
       const result = await handleTRPCRequest(path, body);

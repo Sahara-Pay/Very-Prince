@@ -41,6 +41,7 @@ import { indexerService } from "./services/indexerService.js";
 import { notificationController } from "./controllers/notificationController.js";
 import { configureTRPC } from "./trpc/server.js";
 import { webhookWorker } from "./workers/WebhookWorker.js";
+import { evictionEngine } from "./services/probabilisticEviction.js";
 
 // Sentry initialization
 import * as Sentry from "@sentry/node";
@@ -226,6 +227,7 @@ try {
     server.log.info(`Received ${signal}, shutting down gracefully...`);
     indexerService.stop();
     await webhookWorker.stop();
+    evictionEngine.destroy();
     server.close(() => {
       server.log.info('Server closed');
       process.exit(0);

@@ -27,7 +27,7 @@ mod tests {
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
         // Native multisig policy belongs to this address, not to signer payloads.
@@ -244,7 +244,7 @@ mod tests {
         let token_admin = Address::generate(&env);
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
         let mut admins = Vec::new(&env);
@@ -645,7 +645,7 @@ mod tests {
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let _token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
         let protocol_admin = Address::generate(&env);
@@ -781,7 +781,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin1 = Address::generate(&env);
@@ -907,7 +907,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin1 = Address::generate(&env);
@@ -1015,7 +1015,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1061,7 +1061,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1126,7 +1126,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1187,7 +1187,7 @@ mod tests {
             let token_admin = Address::generate(&env);
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1238,7 +1238,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1403,10 +1403,10 @@ mod tests {
 
         // Register the malicious token and configure it to re-enter the
         // registry whenever it delivers tokens to the claiming maintainer.
-        let token_id = env.register_contract(None, MaliciousToken);
+        let token_id = env.register(MaliciousToken, ());
         let token_client = MaliciousTokenClient::new(&env, &token_id);
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -1946,6 +1946,191 @@ mod mpt_and_verifier_tests {
         acc.balance[16..].copy_from_slice(&be);
         acc.balance_len = 16;
         assert_eq!(reputation_score_from_account(&acc), 10_000);
+    }
+
+    // ── Ledger State Mutation Tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_ledger_state_mutation_budget_atomicity() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("atomictest");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let donor = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+        token.mint(&donor, &100_000_000);
+
+        // Record initial state
+        let initial_budget = client.get_org_budget(&org_sym);
+        let initial_donor_balance = token_client.balance(&donor);
+        let initial_contract_balance = token_client.balance(&client.address);
+
+        assert_eq!(initial_budget, 0);
+        assert_eq!(initial_donor_balance, 100_000_000);
+        assert_eq!(initial_contract_balance, 0);
+
+        // Perform funding
+        client.fund_org(&org_sym, &donor, &50_000_000);
+
+        // Verify atomic state mutation
+        assert_eq!(client.get_org_budget(&org_sym), 50_000_000);
+        assert_eq!(token_client.balance(&donor), 50_000_000);
+        assert_eq!(token_client.balance(&client.address), 50_000_000);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_payout_allocation() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("allocmut");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let maintainer = Address::generate(&env);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        let donor = Address::generate(&env);
+        token.mint(&donor, &20_000_000);
+        client.fund_org(&org_sym, &donor, &20_000_000);
+
+        // Record pre-allocation state
+        let pre_budget = client.get_org_budget(&org_sym);
+        let pre_balance = client.get_claimable_balance(&maintainer);
+
+        assert_eq!(pre_budget, 20_000_000);
+        assert_eq!(pre_balance, 0);
+
+        // Allocate payout
+        client.allocate_payout(&org_sym, &admin, &maintainer, &5_000_000_i128, &0_u64);
+
+        // Verify state mutation
+        assert_eq!(client.get_org_budget(&org_sym), 15_000_000);
+        assert_eq!(client.get_claimable_balance(&maintainer), 5_000_000);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_claim_payout() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("claimmut");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let maintainer = Address::generate(&env);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        let donor = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+        token.mint(&donor, &20_000_000);
+        client.fund_org(&org_sym, &donor, &20_000_000);
+
+        client.allocate_payout(&org_sym, &admin, &maintainer, &10_000_000_i128, &0_u64);
+
+        // Record pre-claim state
+        let pre_maintainer_balance = token_client.balance(&maintainer);
+        let pre_claimable = client.get_claimable_balance(&maintainer);
+        let pre_org_budget = client.get_org_budget(&org_sym);
+
+        assert_eq!(pre_maintainer_balance, 0);
+        assert_eq!(pre_claimable, 10_000_000);
+        assert_eq!(pre_org_budget, 10_000_000);
+
+        // Claim payout
+        let claimed = client.claim_payout(&maintainer);
+
+        // Verify state mutation
+        assert_eq!(claimed, 10_000_000);
+        assert_eq!(token_client.balance(&maintainer), 10_000_000);
+        assert_eq!(client.get_claimable_balance(&maintainer), 0);
+        assert_eq!(client.get_org_budget(&org_sym), 10_000_000);
+    }
+
+    #[test]
+    fn test_ledger_state_monation_protocol_pause() {
+        let Setup { env, client, .. } = setup();
+
+        // Initial state should be Active
+        let initial_state = client.get_protocol_state();
+        assert_eq!(initial_state, crate::ProtocolState::Active);
+
+        // Pause protocol
+        client.pause_protocol();
+
+        // Verify state mutation
+        let paused_state = client.get_protocol_state();
+        assert_eq!(paused_state, crate::ProtocolState::Paused);
+
+        // Unpause protocol
+        client.unpause_protocol();
+
+        // Verify state mutation back to Active
+        let active_state = client.get_protocol_state();
+        assert_eq!(active_state, crate::ProtocolState::Active);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_admin_transfer() {
+        let Setup {
+            env, client, protocol_admin, ..
+        } = setup();
+
+        // Get initial admin
+        let initial_admin = client.get_multisig_admin();
+        let initial_admin_addr = initial_admin.admins.get(0).unwrap();
+
+        // Propose new admin
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&protocol_admin, &new_admin);
+
+        // Accept new admin
+        client.accept_admin(&new_admin);
+
+        // Verify state mutation
+        let updated_admin = client.get_multisig_admin();
+        let updated_admin_addr = updated_admin.admins.get(0).unwrap();
+
+        assert_ne!(initial_admin_addr, updated_admin_addr);
+        assert_eq!(updated_admin_addr, &new_admin);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_qf_contribution() {
+        let Setup {
+            env, client, token, protocol_admin, ..
+        } = setup();
+        let org_sym = symbol_short!("qfmut");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        // Record pre-contribution state
+        let pre_stats = client.get_qf_project_stats(&org_sym);
+        let pre_contrib = client.get_qf_contribution(&org_sym, &contributor);
+        let pre_org_budget = client.get_org_budget(&org_sym);
+
+        assert_eq!(pre_stats.direct_contributions, 0);
+        assert_eq!(pre_stats.sqrt_sum, 0);
+        assert_eq!(pre_stats.contributor_count, 0);
+        assert_eq!(pre_contrib, 0);
+        assert_eq!(pre_org_budget, 0);
+
+        // Make contribution
+        client.qf_contribute(&org_sym, &contributor, &100);
+
+        // Verify state mutation
+        let post_stats = client.get_qf_project_stats(&org_sym);
+        let post_contrib = client.get_qf_contribution(&org_sym, &contributor);
+        let post_org_budget = client.get_org_budget(&org_sym);
+
+        assert_eq!(post_stats.direct_contributions, 100);
+        assert_eq!(post_stats.sqrt_sum, 10);
+        assert_eq!(post_stats.contributor_count, 1);
+        assert_eq!(post_contrib, 100);
+        assert_eq!(post_org_budget, 100);
     }
 
     // ── Exclusion proof tests ─────────────────────────────────────────────────

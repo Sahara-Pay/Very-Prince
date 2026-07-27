@@ -14,6 +14,7 @@
  */
 
 import { Redis } from "ioredis";
+import { evictionEngine } from "./probabilisticEviction.js";
 import { logger } from "../utils/logger.js";
 
 
@@ -84,6 +85,29 @@ export async function safeSet(key: string, value: string, ttlSeconds: number): P
 }
 
 /**
+ * Safely store a value in Redis with an adaptive TTL computed by the
+ * probabilistic eviction engine.
+ *
+ * The engine tracks how frequently `key` has been accessed and scales the
+ * base TTL upward (up to the configured max multiplier) for hot keys.
+ * Cold keys stay at the base TTL so they expire promptly.
+ *
+ * @param key       - The unique identifier for the data.
+ * @param value     - The string content to be cached (typically JSON).
+ * @param baseTTL   - Minimum time‑to‑live in seconds.
+ */
+export async function safeSetAdaptive(
+  key: string,
+  value: string,
+  baseTTL: number
+): Promise<void> {
+  const adaptiveTTL = evictionEngine.getAdaptiveTTL(key, baseTTL);
+  try {
+    await redis.set(key, value, "EX", adaptiveTTL);
+  } catch (error) {
+    console.error(`Redis safeSetAdaptive failed for key ${key}:`, error);
+  }
+}
  * Safely delete a single Redis key.
  */
 export async function safeDel(key: string): Promise<void> {

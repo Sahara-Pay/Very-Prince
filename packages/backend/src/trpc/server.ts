@@ -5,6 +5,8 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { appRouter } from './router.js';
+import type { AppRouter } from './router.js';
+import { evictionEngine } from '../services/probabilisticEviction.js';
 import type { AppRouter, TRPCContext } from './trpc.js';
 import { logger } from '../utils/logger.js';
 import { etagCachePlugin } from '../plugins/etagCache.js';
@@ -38,6 +40,13 @@ export async function configureTRPC(server: FastifyInstance) {
     };
     
     try {
+      // Record the query path in the eviction engine so the sketch learns
+      // which procedures are hot across the entire tRPC surface.
+      evictionEngine.recordAccess(`trpc:${path}`);
+      
+      // Simple routing - this is a basic implementation
+      // In a real setup, you'd use the proper tRPC handler
+      const result = await handleTRPCRequest(path, body);
       const { result, cacheable } = await handleTRPCRequest(path, body, ctx);
       
       // Only queries are safe to serve as 304 Not Modified: mutations must

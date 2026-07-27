@@ -5,6 +5,8 @@
 
 import { z } from 'zod';
 import { stellarService } from '../services/stellarService.js';
+import { safeGet, safeSet } from '../services/cache.js';
+import { evictionEngine } from '../services/probabilisticEviction.js';
 import { statsController } from '../controllers/statsController.js';
 import { analyticsController } from '../controllers/analyticsController.js';
 import { logger } from '../utils/logger.js';
@@ -34,6 +36,34 @@ export const appRouter = t.router({
       ))
       .query(async ({ input }) => {
         const { id } = input;
+        
+        // Check cache first (5-second base TTL, adaptive for hot keys)
+        const cacheKey = `org_details:${id}`;
+        const cachedResult = await safeGet(cacheKey);
+        
+        if (cachedResult) {
+          // Record this access so the eviction engine promotes the key
+          evictionEngine.recordAccess(cacheKey);
+          try {
+            return JSON.parse(cachedResult);
+          } catch (error) {
+            // Cache corrupted, continue to fetch from contract
+            console.warn(`Cache corruption for key ${cacheKey}:`, error);
+          }
+        }
+
+        try {
+          // Fetch organization details directly from contract
+          const orgDetails = await stellarService.readOrganizationDetails(id);
+          
+          // Record the access AND get an adaptive TTL in one call.
+          // The eviction engine increments the sketch counter *before*
+          // computing the TTL so that cache misses still contribute to
+          // the frequency estimate.
+          const adaptiveTTL = evictionEngine.recordAndGetTTL(cacheKey, 5);
+          await safeSet(cacheKey, JSON.stringify(orgDetails), adaptiveTTL);
+          
+          return orgDetails;
 
         try {
           return await stellarService.readOrganizationDetails(id);

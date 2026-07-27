@@ -1,0 +1,220 @@
+---
+# ============================================================
+# PgBouncer – transaction-pooling mode
+# ============================================================
+# Sits in front of the CloudNativePG cluster. Apps connect to
+# pgbouncer:5432 and never open persistent connections directly
+# to PostgreSQL, capping total backend connections to pool_size.
+#
+# Connection flow:
+#   app  →  pgbouncer:5432  →  very-prince-pg-rw:5432  (writes)
+#   app  →  pgbouncer:5432  →  very-prince-pg-ro:5432  (reads, optional)
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgbouncer-config
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/name: pgbouncer
+    app.kubernetes.io/component: pgbouncer
+    app.kubernetes.io/part-of: very-prince
+data:
+  pgbouncer.ini: |
+    [databases]
+    ; Route "very_prince" → CloudNativePG primary (read-write) service
+    very_prince = host=very-prince-pg-rw port=5432 dbname=very_prince
+
+    [pgbouncer]
+    ; ── Networking ──────────────────────────────────────────────────────
+    listen_addr = 0.0.0.0
+    listen_port = 5432
+    unix_socket_dir =
+
+    ; ── Auth ────────────────────────────────────────────────────────────
+    ; userlist.txt is mounted from pgbouncer-userlist-secret
+    auth_file = /etc/pgbouncer/userlist.txt
+    auth_type = scram-sha-256
+
+    ; ── Pool settings ───────────────────────────────────────────────────
+    ; transaction mode: connection returned to pool after each transaction
+    pool_mode = transaction
+    max_client_conn = 2000          ; max simultaneous client connections
+    default_pool_size = 25          ; backend connections per (db, user) pair
+    min_pool_size = 5               ; keep warm connections ready
+    reserve_pool_size = 5           ; emergency connections for spikes
+    reserve_pool_timeout = 3        ; seconds before using reserve pool
+
+    ; ── Timeouts ────────────────────────────────────────────────────────
+    server_idle_timeout = 600       ; close idle backend connections after 10 min
+    client_idle_timeout = 0         ; do not force-close idle client connections
+    query_timeout = 0               ; disable global query timeout
+    query_wait_timeout = 120        ; wait up to 2 min for a free server connection
+
+    ; ── TLS (set cert paths if TLS is enabled in the cluster) ───────────
+    ; server_tls_sslmode = require
+    ; server_tls_ca_file = /etc/pgbouncer/ca.crt
+
+    ; ── Logging ─────────────────────────────────────────────────────────
+    log_connections = 0
+    log_disconnections = 0
+    log_pooler_errors = 1
+    stats_period = 60
+
+    ; ── Admin console ───────────────────────────────────────────────────
+    ; Access with: psql -h 127.0.0.1 -p 6432 -U pgbouncer pgbouncer
+    admin_users = pgbouncer_admin
+    stats_users = pgbouncer_stats
+    listen_port_admin = 6432        ; separate port so apps can't reach it
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgbouncer
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/name: pgbouncer
+    app.kubernetes.io/component: pgbouncer
+    app.kubernetes.io/part-of: very-prince
+spec:
+  replicas: 2                       # HA: 2 PgBouncer pods behind a ClusterIP
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pgbouncer
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pgbouncer
+        app.kubernetes.io/component: pgbouncer
+        app.kubernetes.io/part-of: very-prince
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9127"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70               # pgbouncer uid in bitnami image
+        fsGroup: 70
+      containers:
+        # ── PgBouncer ────────────────────────────────────────────────────
+        - name: pgbouncer
+          image: bitnami/pgbouncer:1.22.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: pgbouncer
+              containerPort: 5432
+              protocol: TCP
+            - name: admin
+              containerPort: 6432
+              protocol: TCP
+          env:
+            - name: PGBOUNCER_PORT
+              value: "5432"
+            - name: PGBOUNCER_BIND_ADDRESS
+              value: "0.0.0.0"
+          volumeMounts:
+            - name: pgbouncer-config
+              mountPath: /etc/pgbouncer/pgbouncer.ini
+              subPath: pgbouncer.ini
+              readOnly: true
+            - name: pgbouncer-userlist
+              mountPath: /etc/pgbouncer/userlist.txt
+              subPath: userlist.txt
+              readOnly: true
+          livenessProbe:
+            tcpSocket:
+              port: pgbouncer
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: pgbouncer
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+
+        # ── Prometheus exporter (pgbouncer_exporter) ─────────────────────
+        - name: metrics
+          image: prometheuscommunity/pgbouncer-exporter:v0.7.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--pgBouncer.connectionString=postgres://pgbouncer_stats@localhost:6432/pgbouncer?sslmode=disable"
+          ports:
+            - name: metrics
+              containerPort: 9127
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "50m"
+              memory: "64Mi"
+
+      volumes:
+        - name: pgbouncer-config
+          configMap:
+            name: pgbouncer-config
+        - name: pgbouncer-userlist
+          secret:
+            secretName: pgbouncer-userlist-secret
+
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: pgbouncer
+                topologyKey: kubernetes.io/hostname
+
+---
+# ClusterIP service – apps connect to pgbouncer:5432
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgbouncer
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/name: pgbouncer
+    app.kubernetes.io/component: pgbouncer
+    app.kubernetes.io/part-of: very-prince
+spec:
+  selector:
+    app.kubernetes.io/name: pgbouncer
+  ports:
+    - name: pgbouncer
+      port: 5432
+      targetPort: pgbouncer
+      protocol: TCP
+  type: ClusterIP
+
+---
+# PodDisruptionBudget – ensure at least 1 PgBouncer pod is always running
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pgbouncer-pdb
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/component: pgbouncer
+    app.kubernetes.io/part-of: very-prince
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pgbouncer

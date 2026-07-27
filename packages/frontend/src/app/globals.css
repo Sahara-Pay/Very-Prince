@@ -133,4 +133,31 @@
     font-size: 0.75rem;
     font-weight: 500;
   }
+
+  /* Improve contrast ratio for secondary/muted text on the Glassmorphism theme */
+  .glass-card .text-white\/60,
+  .glass-panel .text-white\/60 {
+    color: rgba(255, 255, 255, 0.85);
+  }
+
+  .glass-card .text-white\/50,
+  .glass-panel .text-white\/50 {
+    color: rgba(255, 255, 255, 0.78);
+  }
+
+  .glass-card .text-white\/40,
+  .glass-panel .text-white\/40 {
+    color: rgba(255, 255, 255, 0.72);
+  }
+
+  .glass-card .text-white\/35,
+  .glass-panel .text-white\/35 {
+    color: rgba(255, 255, 255, 0.68);
+  }
+
+  .glass-card .text-white\/30,
+  .glass-panel .text-white\/30 {
+    color: rgba(255, 255, 255, 0.62);
+  }
 }
+

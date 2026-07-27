@@ -1,0 +1,8 @@
+model MaintainerNotification {
+  walletAddress    String   @id
+  email            String
+  optIn            Boolean  @default(true)
+  unsubscribeToken String   @unique
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}

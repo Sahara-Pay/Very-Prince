@@ -1,8 +1,13 @@
-﻿"use client";
+"use client";
 
 import { usePathname } from "next/navigation";
 import Link from "next/link";
 import type { ComponentType } from "react";
+import {
+  DASHBOARD_NAV_ACTIVE_INDICATOR_CLASS,
+  DASHBOARD_NAV_ICON_CLASS,
+  getDashboardNavItemClassName,
+} from "./dashboardNavigationStyles";
 
 interface NavLink {
   label: string;
@@ -89,12 +94,31 @@ function SettingsIcon({ className = "" }: { className?: string }) {
   );
 }
 
+function BatchIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={2}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"
+      />
+    </svg>
+  );
+}
+
 // ── Navigation Configuration ──────────────────────────────────────────────────
 
 const navLinks: NavLink[] = [
   { label: "Overview", href: "/dashboard", icon: OverviewIcon },
   { label: "Organizations", href: "/dashboard/org", icon: OrganizationIcon },
   { label: "My Payouts", href: "/dashboard/payouts", icon: PayoutIcon },
+  { label: "Batch Builder", href: "/dashboard/batch", icon: BatchIcon },
   { label: "Settings", href: "/dashboard/settings", icon: SettingsIcon },
 ];
 
@@ -141,16 +165,12 @@ export function DashboardSidebar() {
           return (
             <Link key={link.href} href={link.href}>
               <div
-                className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${
-                  active
-                    ? "bg-gradient-to-r from-stellar-purple/50 to-brand-500/30 text-white shadow-lg shadow-stellar-purple/20 border border-stellar-purple/30"
-                    : "text-white/70 hover:text-white hover:bg-white/5 border border-transparent"
-                }`}
+                className={getDashboardNavItemClassName(active)}
               >
-                {Icon && <Icon className="w-5 h-5 flex-shrink-0" />}
+                {Icon && <Icon className={DASHBOARD_NAV_ICON_CLASS} />}
                 <span className="font-medium text-sm">{link.label}</span>
                 {active && (
-                  <div className="ml-auto w-1.5 h-1.5 rounded-full bg-gradient-to-r from-stellar-purple to-brand-500" />
+                  <div className={DASHBOARD_NAV_ACTIVE_INDICATOR_CLASS} />
                 )}
               </div>
             </Link>

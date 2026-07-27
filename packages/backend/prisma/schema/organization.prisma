@@ -1,0 +1,18 @@
+model Organization {
+  id          String   @id // Unique identifier for the organization (Symbol on-chain)
+  name        String   // Display name of the organization
+  admin       String   // Primary administrator wallet address
+  createdAt   DateTime @default(now()) // When the organization was first indexed
+  updatedAt   DateTime @updatedAt // Last time the metadata was updated
+
+  @@index([createdAt])
+  @@unique([createdAt, id])
+}
+
+model Maintainer {
+  address   String   @id
+  orgId     String
+  createdAt DateTime @default(now())
+
+  @@index([orgId])
+}

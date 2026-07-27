@@ -144,6 +144,7 @@ export default function ErrorBoundary({ error, reset }: ErrorBoundaryProps) {
           <div className="space-y-3">
             <Button
               onClick={reset}
+              aria-label="Try again"
               className="w-full bg-white/20 hover:bg-white/30 text-white border border-white/30 backdrop-blur-sm"
             >
               Try Again
@@ -155,6 +156,7 @@ export default function ErrorBoundary({ error, reset }: ErrorBoundaryProps) {
                 <Button
                   onClick={() => window.location.reload()}
                   variant="outline"
+                  aria-label="Refresh the current page"
                   className="border-white/20 text-white/80 hover:bg-white/10"
                 >
                   Refresh Page
@@ -162,6 +164,7 @@ export default function ErrorBoundary({ error, reset }: ErrorBoundaryProps) {
                 <Button
                   onClick={() => window.open('https://freighter.app', '_blank')}
                   variant="outline"
+                  aria-label="Open Freighter wallet website"
                   className="border-white/20 text-white/80 hover:bg-white/10"
                 >
                   Check Wallet

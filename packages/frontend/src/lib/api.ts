@@ -3,28 +3,21 @@
  * @description Backend API client for Very-prince.
  */
 
+import type {
+  OrgListItem,
+  PaginatedResponse,
+  FundResponse,
+  TopMaintainer,
+} from "@very-prince/types";
+
 const BACKEND_URL = process.env["NEXT_PUBLIC_BACKEND_URL"] ?? "http://localhost:3001/api";
 
-export interface Org {
-  id: string;
-  name: string;
-  admin: string;
-  publicBudget?: string; // Total public budget available in stroops
-}
-
-export interface PaginatedResponse<T> {
-  data: T[];
-  meta: {
-    totalPages: number;
-    currentPage: number;
-    totalCount: number;
-  };
-}
+export type { OrgListItem as Org, PaginatedResponse, TopMaintainer };
 
 /**
  * Fetch a paginated list of organizations from the backend.
  */
-export async function fetchOrganizations(page: number = 1, limit: number = 10, search?: string): Promise<PaginatedResponse<Org>> {
+export async function fetchOrganizations(page: number = 1, limit: number = 10, search?: string): Promise<PaginatedResponse<OrgListItem>> {
   const params = new URLSearchParams({
     page: page.toString(),
     limit: limit.toString(),
@@ -39,13 +32,6 @@ export async function fetchOrganizations(page: number = 1, limit: number = 10, s
     throw new Error(`Failed to fetch organizations: ${response.statusText}`);
   }
   return response.json();
-}
-
-export interface TopMaintainer {
-  address: string;
-  totalEarningsXlm: string;
-  totalEarningsStroops: string;
-  organizationsAssisted: number;
 }
 
 /**
@@ -67,7 +53,7 @@ export async function registerOrganization(
   name: string,
   admin: string,
   signerSecret: string
-): Promise<{ success: boolean; transactionHash?: string }> {
+): Promise<FundResponse> {
   const response = await fetch(`${BACKEND_URL}/v1/contract/orgs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

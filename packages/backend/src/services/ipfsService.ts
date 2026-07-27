@@ -1,5 +1,6 @@
 import axios from 'axios';
 import FormData from 'form-data';
+import { logger } from '../utils/logger.js';
 
 /**
  * Service to handle metadata uploads to IPFS.
@@ -39,15 +40,22 @@ export class IpfsService {
     const buffer = Buffer.from(JSON.stringify(metadata));
     data.append('file', buffer, { filename: 'metadata.json' });
 
-    const response = await axios.post(this.pinataUrl, data, {
-      headers: {
-        ...data.getHeaders(),
-        'pinata_api_key': this.apiKey,
-        'pinata_secret_api_key': this.secretKey,
-      },
-    });
+    try {
+      const response = await axios.post(this.pinataUrl, data, {
+        headers: {
+          ...data.getHeaders(),
+          'pinata_api_key': this.apiKey,
+          'pinata_secret_api_key': this.secretKey,
+        },
+      });
 
-    return response.data.IpfsHash;
+      const cid = response.data.IpfsHash;
+      logger.info({ name, cid }, 'Uploaded organization metadata to IPFS');
+      return cid;
+    } catch (error) {
+      logger.error({ err: error, name }, 'Failed to upload organization metadata to IPFS');
+      throw error;
+    }
   }
 }
 

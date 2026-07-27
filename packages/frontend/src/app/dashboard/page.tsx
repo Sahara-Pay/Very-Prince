@@ -9,21 +9,32 @@ import { useState, useEffect, useCallback, Suspense, useOptimistic, useTransitio
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { WalletButton } from "@/components/WalletButton";
+import dynamic from "next/dynamic";
 import { PayoutCard } from "@/components/PayoutCard";
-import { FundOrgModal } from "@/components/FundOrgModal";
-import { AllocatePayoutModal } from "@/components/AllocatePayoutModal";
+import DashboardLoading from "./loading";
+
+const FundOrgModal = dynamic(
+  () => import("@/components/FundOrgModal").then((mod) => mod.FundOrgModal),
+  { ssr: false }
+);
+const AllocatePayoutModal = dynamic(
+  () => import("@/components/AllocatePayoutModal").then((mod) => mod.AllocatePayoutModal),
+  { ssr: false }
+);
+import { EmptyMaintainersState } from "@/components/EmptyMaintainersState";
 import { WebhookSettings } from "@/components/WebhookSettings";
 import { ApiKeySettings } from "@/components/ApiKeySettings";
+import { FundingHistoryChart } from "@/components/FundingHistoryChart";
 import { useFreighter } from "@/hooks/useFreighter";
 import {
-  readOrganization,
   readMaintainers,
   readClaimableBalance,
-  readOrgBudget,
   buildClaimPayoutTransaction,
   submitSignedTransaction,
 } from "@/lib/sorobanClient";
 import type { Organization, MaintainerBalance } from "@/lib/contractTypes";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { useOrganizationData } from "@/hooks/useOrganizationData";
 
 // ── Inner Component (uses useSearchParams) ────────────────────────────────────
 
@@ -33,22 +44,33 @@ function DashboardPageInner() {
 
   // ── State ─────────────────────────────────────────────────────────────────
   const [orgIdInput, setOrgIdInput] = useState("");
-  const [organization, setOrganization] = useState<Organization | null>(null);
-  const [orgBudget, setOrgBudget] = useState<{ stroops: bigint; xlm: string } | null>(null);
+  const [lookupOrgId, setLookupOrgId] = useState<string | undefined>(undefined);
   const [showFundModal, setShowFundModal] = useState(false);
   const [claimingAddress, setClaimingAddress] = useState<string | null>(null);
   const [balances, setBalances] = useState<MaintainerBalance[]>([]);
   const [showAllocateModal, setShowAllocateModal] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "settings">("overview");
   
-  const [optimisticBalances, addOptimisticBalance] = useOptimistic(
+  type OptimisticAction =
+    | { type: "allocate"; address: string; amount: bigint }
+    | { type: "claim"; address: string };
+
+  const [optimisticBalances, dispatchOptimisticBalance] = useOptimistic(
     balances,
-    (state, newAlloc: { address: string; amount: bigint }) => {
-      const existingIndex = state.findIndex(b => b.address === newAlloc.address);
+    (state, action: OptimisticAction) => {
+      if (action.type === "claim") {
+        return state.map((b) =>
+          b.address === action.address
+            ? { ...b, stroops: BigInt(0), xlm: "0.0000000", isPending: true }
+            : b
+        );
+      }
+
+      const existingIndex = state.findIndex(b => b.address === action.address);
       if (existingIndex !== -1) {
         const newState = [...state];
         const current = newState[existingIndex]!;
-        const newStroops = current.stroops + newAlloc.amount;
+        const newStroops = current.stroops + action.amount;
         newState[existingIndex] = {
           ...current,
           stroops: newStroops,
@@ -60,15 +82,24 @@ function DashboardPageInner() {
         return [
           ...state,
           {
-            address: newAlloc.address,
-            stroops: newAlloc.amount,
-            xlm: (Number(newAlloc.amount) / 10_000_000).toFixed(7),
+            address: action.address,
+            stroops: action.amount,
+            xlm: (Number(action.amount) / 10_000_000).toFixed(7),
             isPending: true,
           },
         ];
       }
     }
   );
+
+  const {
+    data: orgData,
+    isLoading: isOrgLoading,
+    error: orgQueryError,
+    refetch: refetchOrgData,
+  } = useOrganizationData(lookupOrgId);
+  const organization = orgData?.organization ?? null;
+  const orgBudget = orgData?.budget ?? null;
 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,18 +113,19 @@ function DashboardPageInner() {
     if (!id) return;
     setIsLoading(true);
     setError(null);
-    setOrganization(null);
     setBalances([]);
-    setOrgBudget(null);
 
     try {
-      const [org, budget, maintainerAddresses] = await Promise.all([
-        readOrganization(id),
-        readOrgBudget(id),
-        readMaintainers(id),
-      ]);
-      setOrganization(org);
-      setOrgBudget(budget);
+      let maintainerAddresses: string[];
+      if (id === lookupOrgId) {
+        // Same org already tracked by the query — just refetch it, then
+        // read maintainers directly since we need the address list now.
+        await refetchOrgData();
+        maintainerAddresses = await readMaintainers(id);
+      } else {
+        setLookupOrgId(id);
+        maintainerAddresses = await readMaintainers(id);
+      }
 
       const balanceResults = await Promise.all(
         maintainerAddresses.map((addr) => readClaimableBalance(addr))
@@ -105,7 +137,7 @@ function DashboardPageInner() {
     } finally {
       setIsLoading(false);
     }
-  }, [orgIdInput]);
+  }, [orgIdInput, lookupOrgId, refetchOrgData]);
 
   /** Auto-lookup when ?org= param is present in the URL. */
   useEffect(() => {
@@ -124,10 +156,20 @@ function DashboardPageInner() {
     try {
       const unsignedXdr = await buildClaimPayoutTransaction(address);
       const signedXdr = await signTransaction(unsignedXdr);
+
+      // Optimistically zero out the balance right after signing, before
+      // waiting for full on-chain confirmation.
+      startTransition(() => {
+        dispatchOptimisticBalance({ type: "claim", address });
+      });
+
       await submitSignedTransaction(signedXdr);
       void handleLookupOrg();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Claim failed");
+      // Reconcile immediately — don't leave a phantom zeroed balance if the
+      // submission actually failed after the optimistic update fired.
+      void handleLookupOrg();
     } finally {
       setClaimingAddress(null);
     }
@@ -171,8 +213,10 @@ function DashboardPageInner() {
 
       <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-10">
         {/* ── Wallet Guard ── */}
-        {isInitialized && !isConnected ? (
-          <div className="flex flex-col items-center justify-center py-32 text-center">
+        {!isInitialized ? (
+          <div className="flex min-h-[520px] flex-col items-center justify-center py-32 text-center" />
+        ) : !isConnected ? (
+          <div className="flex min-h-[520px] flex-col items-center justify-center py-32 text-center">
             <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl border border-stellar-purple/30 bg-stellar-purple/10">
               <LockIcon />
             </div>
@@ -236,10 +280,11 @@ function DashboardPageInner() {
                 />
                 <button
                   onClick={() => void handleLookupOrg()}
-                  disabled={isLoading || !orgIdInput.trim()}
+                  disabled={isLoading || isOrgLoading || !orgIdInput.trim()}
+                  aria-label={isLoading || isOrgLoading ? "Looking up organization" : "Look up organization"}
                   className="rounded-lg bg-gradient-to-r from-stellar-purple to-brand-500 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-stellar-purple/20 transition-all duration-200 hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {isLoading ? "Loading..." : "Lookup"}
+                  {isLoading || isOrgLoading ? "Loading..." : "Lookup"}
                 </button>
               </div>
               <p id="org-id-hint" className="mt-2 text-xs text-white/30">
@@ -249,10 +294,13 @@ function DashboardPageInner() {
             </div>
 
             {/* ── Tabs ── */}
-            {organization && (
-              <div className="mb-6 flex gap-8 border-b border-white/10">
+            <div className="mb-6 flex h-[41px] gap-8 border-b border-white/10">
+              {organization && (
+                <>
                 <button
                   onClick={() => setActiveTab("overview")}
+                  role="tab"
+                  aria-selected={activeTab === "overview"}
                   className={`pb-4 text-sm font-semibold transition-all ${
                     activeTab === "overview"
                       ? "border-b-2 border-stellar-purple text-white"
@@ -263,6 +311,8 @@ function DashboardPageInner() {
                 </button>
                 <button
                   onClick={() => setActiveTab("settings")}
+                  role="tab"
+                  aria-selected={activeTab === "settings"}
                   className={`pb-4 text-sm font-semibold transition-all ${
                     activeTab === "settings"
                       ? "border-b-2 border-stellar-purple text-white"
@@ -271,13 +321,14 @@ function DashboardPageInner() {
                 >
                   Settings
                 </button>
-              </div>
-            )}
+                </>
+              )}
+            </div>
 
             {/* ── Error ── */}
-            {error && (
+            {(error || orgQueryError) && (
               <div className="mb-6 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-                {error}
+                {error ?? (orgQueryError instanceof Error ? orgQueryError.message : "Failed to load organization")}
               </div>
             )}
 
@@ -326,12 +377,14 @@ function DashboardPageInner() {
                         <div className="flex gap-2">
                           <button
                             onClick={() => setShowAllocateModal(true)}
+                            aria-label="Open allocate payout form"
                             className="rounded-lg border border-stellar-purple/30 bg-stellar-purple/10 px-5 py-2.5 text-sm font-semibold text-stellar-purple hover:bg-stellar-purple/20 transition-all"
                           >
                             Allocate Payout
                           </button>
                           <button
                             onClick={() => setShowFundModal(true)}
+                            aria-label="Open fund organization form"
                             className="rounded-lg bg-white/10 px-5 py-2.5 text-sm font-semibold text-white hover:bg-stellar-teal transition-all"
                           >
                             Fund Org
@@ -339,6 +392,12 @@ function DashboardPageInner() {
                         </div>
                       </div>
                     )}
+                  </div>
+
+                  <div className="mb-8">
+                  <ErrorBoundary variant="inline">
+                    <FundingHistoryChart orgId={organization.id} />
+                    </ErrorBoundary>
                   </div>
 
                   {/* ── Maintainer Balances ── */}
@@ -349,28 +408,25 @@ function DashboardPageInner() {
                       </h3>
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                         {optimisticBalances.map((balance) => (
+                          <ErrorBoundary key={balance.address} variant="inline">
                           <PayoutCard
                             key={balance.address}
                             balance={balance}
                             onClaim={handleClaim}
                             isClaiming={claimingAddress === balance.address}
                           />
+                          </ErrorBoundary>
                         ))}
                       </div>
                     </div>
                   )}
 
                   {/* ── Empty State ── */}
-                  {balances.length === 0 && !isLoading && (
-                    <div className="rounded-2xl border border-dashed border-white/10 p-12 text-center">
-                      <p className="text-sm text-white/40">
-                        No maintainers registered for{" "}
-                        <span className="font-mono text-white/60">
-                          {organization.id}
-                        </span>{" "}
-                        yet.
-                      </p>
-                    </div>
+                  {optimisticBalances.length === 0 && !isLoading && (
+                    <EmptyMaintainersState
+                      orgId={organization.id}
+                      onAllocateClick={() => setShowAllocateModal(true)}
+                    />
                   )}
                 </>
               ) : (
@@ -385,6 +441,7 @@ function DashboardPageInner() {
       </main>
 
       {showFundModal && organization && (
+        <ErrorBoundary variant="inline">
         <FundOrgModal
           orgId={organization.id}
           onClose={() => setShowFundModal(false)}
@@ -393,21 +450,25 @@ function DashboardPageInner() {
             void handleLookupOrg();
           }}
         />
+        </ErrorBoundary>
       )}
 
       {showAllocateModal && organization && (
+        <ErrorBoundary variant="inline">
         <AllocatePayoutModal
           orgId={organization.id}
           onClose={() => setShowAllocateModal(false)}
           onSuccess={(data) => {
             startTransition(() => {
-              addOptimisticBalance(data);
+              dispatchOptimisticBalance({ type: "allocate", ...data });
             });
             // The modal itself handles the transaction submission
             // and we'll eventually refresh data when confirmed.
-            setTimeout(() => void handleLookupOrg(), 5000); 
+            setTimeout(() => void handleLookupOrg(), 5000);
           }}
+          onError={() => void handleLookupOrg()}
         />
+        </ErrorBoundary>
       )}
     </div>
   );
@@ -417,7 +478,7 @@ function DashboardPageInner() {
 
 export default function DashboardPage() {
   return (
-    <Suspense fallback={null}>
+    <Suspense fallback={<DashboardLoading />}>
       <DashboardPageInner />
     </Suspense>
   );

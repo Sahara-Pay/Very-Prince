@@ -20,10 +20,18 @@
       "@/*": [
         "./src/*"
       ]
+    ,
+      "@backend/*": [
+        "../backend/src/*"
+      ],
+      "@contracts/*": [
+        "../contracts/src/*"
+      ]
     },
     "allowJs": true,
     "noEmit": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "types": ["vitest/globals"]
   },
   "include": [
     "next-env.d.ts",

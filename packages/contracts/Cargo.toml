@@ -12,13 +12,13 @@ crate-type = ["cdylib"]
 
 # ── Runtime Dependencies ──────────────────────────────────────────────────────
 [dependencies]
-# Official Soroban SDK — Protocol 21 compatible.
-soroban-sdk = { version = "21.0.0" }
+# Official Soroban SDK — Protocol 22 compatible.
+soroban-sdk = { version = "22.0.0" }
 
 # ── Dev/Test Dependencies ─────────────────────────────────────────────────────
 # The "testutils" feature unlocks Address::generate(), mock_all_auths(), etc.
 [dev-dependencies]
-soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.6.0"
 
 # ── Release Profile ───────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Next.js configuration for the Very-prince frontend.
  *
  * Key notes:
@@ -12,6 +12,12 @@ import withPWA from "next-pwa";
 const pwaConfig = withPWA({
   dest: "public",
   disable: process.env.NODE_ENV === "development",
+  register: true,
+  skipWaiting: true,
+  // Serve a branded offline page when the network is unavailable.
+  fallbacks: {
+    document: "/offline.html",
+  },
   // Only cache GET requests — never cache POST/wallet/webhook endpoints.
   runtimeCaching: [
     {
@@ -43,6 +49,62 @@ const pwaConfig = withPWA({
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: "standalone",
+
+  /**
+   * HTTP security headers required for SharedArrayBuffer support (Issue #381).
+   *
+   * SharedArrayBuffer is only available in "cross-origin isolated" contexts.
+   * A page is cross-origin isolated when the server sends:
+   *   Cross-Origin-Opener-Policy: same-origin
+   *   Cross-Origin-Embedder-Policy: require-corp
+   *
+   * These headers are applied to every HTML page response.  Static assets
+   * (scripts, images) do not need them because the isolation applies at the
+   * page level.
+   *
+   * References:
+   *   https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#security_requirements
+   *   https://nextjs.org/docs/app/api-reference/next-config-js/headers
+   */
+  async headers() {
+    return [
+      {
+        // Apply to every route.
+        source: "/(.*)",
+        headers: [
+          {
+            // Prevents other origins from gaining a reference to this window,
+            // which is required for cross-origin isolation.
+            key: "Cross-Origin-Opener-Policy",
+            value: "same-origin",
+          },
+          {
+            // Ensures all sub-resources explicitly grant permission to be loaded,
+            // completing the cross-origin isolation requirement.
+            key: "Cross-Origin-Embedder-Policy",
+            value: "require-corp",
+          },
+        ],
+      },
+    ];
+  },
+  // Vercel's edge network optimizes and caches images automatically once
+  // `images` is configured — this keeps optimization off the Node server.
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "**.veryprince.com",
+      },
+      {
+        protocol: "https",
+        hostname: "res.cloudinary.com",
+      },
+    ],
+    formats: ["image/avif", "image/webp"],
+  },
+
   // Expose network config to the browser bundle.
   env: {
     NEXT_PUBLIC_HORIZON_URL:
@@ -63,12 +125,22 @@ const nextConfig = {
   // degrade gracefully in the browser bundle.
   webpack: (config) => {
     config.resolve = config.resolve ?? {};
+    config.resolve.extensionAlias = {
+      ...config.resolve.extensionAlias,
+      ".js": [".js", ".ts", ".tsx"],
+    };
     config.resolve.fallback = {
       ...config.resolve.fallback,
       fs: false,
       net: false,
       tls: false,
       crypto: false,
+    };
+    // Allow ESM-style .js imports to resolve to .ts files
+    // (needed for @very-prince/types which uses "type": "module").
+    config.resolve.extensionAlias = {
+      ...config.resolve.extensionAlias,
+      ".js": [".ts", ".tsx", ".js", ".jsx"],
     };
     return config;
   },

@@ -41,6 +41,7 @@ export function SignInButton() {
     return (
       <button 
         disabled 
+        aria-label="Signing in with wallet"
         className="px-6 py-2 bg-stellar-blue/50 border border-stellar-purple/30 rounded-lg text-white/70 cursor-not-allowed"
       >
         Loading...
@@ -59,6 +60,7 @@ export function SignInButton() {
         </div>
         <button
           onClick={handleSignOut}
+          aria-label="Sign out of account"
           className="px-4 py-2 bg-red-500/20 border border-red-500/50 rounded-lg text-red-300 hover:bg-red-500/30 transition-colors"
         >
           Sign Out
@@ -71,6 +73,7 @@ export function SignInButton() {
     return (
       <button
         onClick={connectWallet}
+        aria-label="Connect wallet to sign in"
         className="px-6 py-2 bg-stellar-purple border border-stellar-purple/50 rounded-lg text-white hover:bg-stellar-purple/80 transition-colors"
       >
         Connect Wallet
@@ -89,6 +92,7 @@ export function SignInButton() {
         </div>
         <button
           onClick={handleSignIn}
+          aria-label="Sign in with Stellar wallet"
           className="px-6 py-2 bg-stellar-purple border border-stellar-purple/50 rounded-lg text-white hover:bg-stellar-purple/80 transition-colors"
         >
           Sign In with Stellar
@@ -100,6 +104,7 @@ export function SignInButton() {
   return (
     <button
       onClick={handleSignIn}
+      aria-label="Sign in with Stellar wallet"
       className="px-6 py-2 bg-stellar-purple border border-stellar-purple/50 rounded-lg text-white hover:bg-stellar-purple/80 transition-colors"
     >
       Sign In with Stellar

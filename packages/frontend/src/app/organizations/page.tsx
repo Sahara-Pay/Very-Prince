@@ -5,9 +5,11 @@
 
 "use client";
 
+import { useRouter } from "next/navigation";
+import { readOrganization, readOrgBudget, readMaintainers } from "@/lib/sorobanClient";
 import { useEffect, useState, useMemo } from "react";
 import Link from "next/link";
-import useSWR from "swr";
+import { useQuery } from "@tanstack/react-query";
 import { WalletButton } from "@/components/WalletButton";
 import { RegisterOrgModal } from "@/components/RegisterOrgModal";
 import type { Org } from "@/lib/api";
@@ -31,14 +33,23 @@ export default function OrganizationsPage() {
     return () => clearTimeout(timer);
   }, [searchTerm]);
 
-  // SWR fetcher function
-  const fetcher = async ([url]: [string]) => {
+  const fetchOrganizationsPage = async (url: string) => {
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`Failed to fetch organizations: ${response.statusText}`);
     }
     return response.json();
   };
+
+  const router = useRouter();
+
+const handlePrefetchOrg = (orgId: string) => {
+  router.prefetch(`/dashboard?org=${orgId}`);
+  // Warm the Soroban read calls so they're cached/in-flight before the click
+  void readOrganization(orgId).catch(() => {});
+  void readOrgBudget(orgId).catch(() => {});
+  void readMaintainers(orgId).catch(() => {});
+};
 
   // Build API URL with search and pagination
   const apiUrl = useMemo(() => {
@@ -52,16 +63,11 @@ export default function OrganizationsPage() {
     return `${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001/api/v1/contract"}/orgs?${params}`;
   }, [page, debouncedSearch]);
 
-  // SWR hook for data fetching
-  const { data, error, isLoading, mutate } = useSWR(
-    [apiUrl],
-    fetcher,
-    {
-      revalidateOnFocus: false,
-      revalidateOnReconnect: true,
-      dedupingInterval: 5000,
-    }
-  );
+  const { data, error, isLoading, refetch } = useQuery({
+    queryKey: ["organizations", page, debouncedSearch],
+    queryFn: () => fetchOrganizationsPage(apiUrl),
+    staleTime: 5000,
+  });
 
   const orgs = data?.data || [];
   const totalPages = data?.meta?.totalPages || 1;
@@ -132,7 +138,7 @@ export default function OrganizationsPage() {
 
         {error && (
           <div className="mb-8 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-            {error}
+            {error instanceof Error ? error.message : String(error)}
           </div>
         )}
 
@@ -141,6 +147,8 @@ export default function OrganizationsPage() {
             <Link
               key={org.id}
               href={`/dashboard?org=${org.id}`}
+              onMouseEnter={() => handlePrefetchOrg(org.id)}
+              onFocus={() => handlePrefetchOrg(org.id)}
               className="glass-card group flex flex-col p-6 transition-all hover:border-stellar-purple/50 hover:bg-white/[0.08]"
             >
               <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-stellar-purple/20 text-xl group-hover:bg-stellar-purple/30">
@@ -188,7 +196,7 @@ export default function OrganizationsPage() {
           onClose={() => setShowRegisterModal(false)}
           onSuccess={() => {
             setShowRegisterModal(false);
-            void mutate(); // Refresh the data using SWR
+            void refetch();
           }}
         />
       )}

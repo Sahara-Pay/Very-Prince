@@ -52,6 +52,12 @@ export const organizationRoutes: FastifyPluginAsync = async (fastify) => {
     "/:id",
     {
       preHandler: validateApiKey,
+      config: {
+        rateLimit: {
+          max: 60,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         description: "Get organization details directly from Soroban contract",
         tags: ["Organizations"],
@@ -151,6 +157,12 @@ export const organizationRoutes: FastifyPluginAsync = async (fastify) => {
     "/upload-metadata",
     {
       preHandler: validateApiKey,
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+        },
+      },
       schema: {
         description: "Upload organization metadata to IPFS",
         tags: ["Organizations"],

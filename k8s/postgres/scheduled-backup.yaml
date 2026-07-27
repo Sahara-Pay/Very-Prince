@@ -1,0 +1,19 @@
+---
+# Daily scheduled base backup at 02:00 UTC
+# CloudNativePG will use barman-cloud to push a full base backup to MinIO,
+# in addition to continuous WAL archiving defined in cluster.yaml.
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: very-prince-pg-daily-backup
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: very-prince
+spec:
+  schedule: "0 2 * * *"        # daily at 02:00 UTC (same as existing cron)
+  cluster:
+    name: very-prince-pg
+  backupOwnerReference: self    # GC backups when ScheduledBackup is deleted
+  immediate: false              # do NOT run immediately on creation
+  suspend: false

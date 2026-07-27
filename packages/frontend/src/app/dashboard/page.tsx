@@ -5,7 +5,7 @@
 
 "use client";
 
-import { useState, useEffect, useCallback, Suspense, useOptimistic, useTransition } from "react";
+import { useState, useEffect, useCallback, Suspense, useOptimistic, useTransition, useMemo, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { WalletButton } from "@/components/WalletButton";
@@ -35,6 +35,9 @@ import {
 import type { Organization, MaintainerBalance } from "@/lib/contractTypes";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useOrganizationData } from "@/hooks/useOrganizationData";
+import { usePredictivePrefetch } from "@/hooks/usePredictivePrefetch";
+import { prefetchFundOrgIntent } from "@/lib/predictivePrefetch";
+import type { PrefetchTarget } from "@/lib/predictivePrefetch";
 
 // ── Inner Component (uses useSearchParams) ────────────────────────────────────
 
@@ -50,6 +53,7 @@ function DashboardPageInner() {
   const [balances, setBalances] = useState<MaintainerBalance[]>([]);
   const [showAllocateModal, setShowAllocateModal] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "settings">("overview");
+  const fundButtonRef = useRef<HTMLButtonElement | null>(null);
   
   type OptimisticAction =
     | { type: "allocate"; address: string; amount: bigint }
@@ -99,6 +103,33 @@ function DashboardPageInner() {
     refetch: refetchOrgData,
   } = useOrganizationData(lookupOrgId);
   const organization = orgData?.organization ?? null;
+
+  // Predictive prefetch for Fund Org — warms the modal chunk before mousedown.
+  const fundPrefetchTargets: PrefetchTarget[] = useMemo(
+    () => [
+      {
+        id: "dashboard:fund-org",
+        getRect: () => {
+          const el = fundButtonRef.current;
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return null;
+          return {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+          };
+        },
+        prefetch: (signal) => prefetchFundOrgIntent(signal),
+      },
+    ],
+    [],
+  );
+  usePredictivePrefetch({
+    targets: fundPrefetchTargets,
+    enabled: Boolean(organization),
+  });
   const orgBudget = orgData?.budget ?? null;
 
   const [isLoading, setIsLoading] = useState(false);
@@ -383,7 +414,11 @@ function DashboardPageInner() {
                             Allocate Payout
                           </button>
                           <button
+                            ref={fundButtonRef}
                             onClick={() => setShowFundModal(true)}
+                            onMouseEnter={() => {
+                              void prefetchFundOrgIntent();
+                            }}
                             aria-label="Open fund organization form"
                             className="rounded-lg bg-white/10 px-5 py-2.5 text-sm font-semibold text-white hover:bg-stellar-teal transition-all"
                           >

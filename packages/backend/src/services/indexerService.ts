@@ -6,6 +6,7 @@ import { invalidateOnFundingEvent, invalidateOnTransactionEvent } from './cacheI
 import { emitSSEEvent } from './sse.js';
 import { webhookService } from './webhookService.js';
 import { txHashFilter } from './txHashFilter.js';
+import { publishToStream } from './redisStreams.js';
 import { logger } from '../utils/logger.js';
 import {
   decodeSorobanEvent,
@@ -144,7 +145,7 @@ export class IndexerService {
     const createdAt = new Date(event.ledgerClosedAt);
 
     // ── HLL replay-attack filter ──────────────────────────────────────────────
-    // Check before any SSE emission, webhook dispatch, or DB write.
+    // Check before any SSE emission, webhook dispatch, stream publish, or DB write.
     // The filter is probabilistic: confirmed positives are dropped immediately;
     // false positives are verified against the DB and allowed through.
     const { isDuplicate, decidedBy } = await txHashFilter.check(event.txHash, eventIndex, createdAt);
@@ -155,6 +156,12 @@ export class IndexerService {
       );
       return;
     }
+
+    // ── Redis Streams push (live path) ────────────────────────────────────────
+    // Publish to the central stream BEFORE DB persistence so connected clients
+    // see the mutation instantly even under slow transaction commits. If the
+    // stream is unavailable, `publishToStream` degrades to the local event bus.
+    void publishToStream(event, eventIndex);
     // Log filter metrics periodically for observability (every 500 events).
     if (txHashFilter.getMetrics().totalChecked % 500 === 0) {
       logger.info(txHashFilter.getMetrics(), '[TxHashFilter] metrics snapshot');

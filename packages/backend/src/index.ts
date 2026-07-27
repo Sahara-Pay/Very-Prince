@@ -19,36 +19,6 @@
  * ```
  */
 
-import Fastify from "fastify";
-import { profileRoutes } from "./routes/profile.js";
-
-import cors from "@fastify/cors";
-import helmet from "@fastify/helmet";
-import swagger from "@fastify/swagger";
-import swaggerUi from "@fastify/swagger-ui";
-import { SERVER_HOST, SERVER_PORT } from "./config/env.js";
-import { contractRoutes } from "./routes/contract.js";
-import rateLimit from "@fastify/rate-limit";
-import { errorHandler } from "./plugins/errorHandler.js";
-import { statsRoutes } from "./routes/stats.js";
-import { tokenRoutes } from "./routes/token.js";
-import { eventsRoutes } from "./routes/events.js";
-import { organizationRoutes } from "./routes/organization.js";
-import { authRoutes } from "./routes/auth.js";
-import { webhookRoutes } from "./routes/webhook.js";
-import { apiKeyRoutes } from "./routes/apiKeys.js";
-import { indexerService } from "./services/indexerService.js";
-import { notificationController } from "./controllers/notificationController.js";
-import { configureTRPC } from "./trpc/server.js";
-import { webhookWorker } from "./workers/WebhookWorker.js";
-import { evictionEngine } from "./services/probabilisticEviction.js";
-
-// Sentry initialization
-import * as Sentry from "@sentry/node";
-import { nodeProfilingIntegration } from "@sentry/profiling-node";
-
-// Initialize Sentry only in production and when DSN is available
-if (process.env.NODE_ENV === "production" && process.env.SENTRY_DSN) {
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
@@ -75,6 +45,8 @@ import { configureTRPC } from './trpc/server.js';
 import { createUwsGateway } from './ws/uwsGateway.js';
 import { webhookWorker } from './workers/WebhookWorker.js';
 import { claimSagaService } from './services/claimSagaService.js';
+import { redisStreamsConsumer } from './services/redisStreams.js';
+import { evictionEngine } from './services/probabilisticEviction.js';
 import * as cron from 'node-cron';
 import * as Sentry from '@sentry/node';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
@@ -220,6 +192,7 @@ let recoveryJob: cron.ScheduledTask | null = null;
 try {
   await server.listen({ port: SERVER_PORT, host: SERVER_HOST });
   server.log.info('Very-prince backend listening on http://' + SERVER_HOST + ':' + SERVER_PORT);
+  await redisStreamsConsumer.start();
   indexerService.start();
 
   // Start the Saga recovery worker to check for stalled/timed out transactions every minute
@@ -243,14 +216,14 @@ try {
       recoveryJob = null;
     }
     indexerService.stop();
+    await redisStreamsConsumer.stop();
     await webhookWorker.stop();
     evictionEngine.destroy();
+    uwsApp.close();
     server.close(() => {
       server.log.info('Server closed');
       process.exit(0);
     });
-    uwsApp.close();
-    server.close(() => { server.log.info('Server closed'); process.exit(0); });
   };
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));

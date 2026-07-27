@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { statsController } from '../controllers/statsController.js';
+import { streamJsonArray } from '../utils/streamingJson.js';
 
 interface CacheEntry<T> {
   data: T;
@@ -142,7 +143,10 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (_request, reply) => {
       const data = await statsController.getTopMaintainers();
-      return reply.send(data);
+      // Above ~5000 unique maintainers the JSON.stringified result would be
+      // promoted to V8 Large-Object-Space and fragment the heap.  Stream it.
+      await streamJsonArray(reply.raw, data);
+      return reply;
     }
   );
 
@@ -248,8 +252,11 @@ export const statsRoutes: FastifyPluginAsync = async (fastify) => {
     },
     async (request, reply) => {
       const { orgId } = request.params;
+      // Cumulative funding history can be >50MB for mature orgs (many events
+      // per day for several years).  Stream it to keep the heap flat.
       const data = await statsController.getOrgFundingHistory(orgId);
-      return reply.send(data);
+      await streamJsonArray(reply.raw, data);
+      return reply;
     }
   );
 };

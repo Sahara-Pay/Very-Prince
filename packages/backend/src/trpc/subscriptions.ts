@@ -3,6 +3,15 @@ import { t } from './trpc.js';
 import { eventBus } from '../services/eventBus.js';
 import { logger } from '../utils/logger.js';
 
+export interface StreamEventFrame {
+  id: string;
+  eventName: string;
+  data: Record<string, unknown>;
+  producedAt: number;
+  receivedAt: number;
+  latencyMs: number;
+}
+
 export const subscriptionRouter = t.router({
   onEvent: t.procedure
     .subscription(() => {
@@ -15,6 +24,36 @@ export const subscriptionRouter = t.router({
         return () => {
           eventBus.off('sse', handler);
           logger.debug('Client unsubscribed from all events');
+        };
+      });
+    }),
+
+  /**
+   * Live event stream sourced directly from the Redis Streams fan-out path.
+   * Includes end-to-end latency (producedAt → subscriber receivedAt).
+   * This is the recommended path for clients that want sub-100 ms updates.
+   */
+  onStreamEvent: t.procedure
+    .subscription(() => {
+      return observable<StreamEventFrame>((emit) => {
+        const handler = (frame: {
+          envelope: { id: string; eventName: string; payload: Record<string, unknown>; producedAt: number };
+          latencyMs: number;
+        }) => {
+          emit.next({
+            id: frame.envelope.id,
+            eventName: frame.envelope.eventName,
+            data: frame.envelope.payload,
+            producedAt: frame.envelope.producedAt,
+            receivedAt: Date.now(),
+            latencyMs: frame.latencyMs,
+          });
+        };
+        eventBus.on('soroban:stream', handler);
+        logger.debug('Client subscribed to Redis Stream events');
+        return () => {
+          eventBus.off('soroban:stream', handler);
+          logger.debug('Client unsubscribed from Redis Stream events');
         };
       });
     }),

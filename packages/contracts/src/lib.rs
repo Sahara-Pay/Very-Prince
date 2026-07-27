@@ -184,6 +184,9 @@ pub enum PrinceError {
     EmptyQuadraticRound = 32,
     /// A project list cannot contain the same project more than once.
     DuplicateProject = 33,
+    /// The provided nonce does not match the expected next nonce for this caller.
+    /// This indicates a replayed or out-of-order payload — reject immediately.
+    InvalidNonce = 34,
 }
 
 #[contracttype]
@@ -214,6 +217,13 @@ pub enum DataKey {
     QfProjectStats(Symbol),
     /// Cumulative verified contribution from one human to one project.
     QfContribution(Symbol, Address),
+    /// Monotonically increasing nonce per caller address.
+    ///
+    /// Used to provide adversarial replay protection for external-origin calls
+    /// and cross-contract callback entry points. The nonce starts at 0 and is
+    /// atomically incremented to `expected + 1` on each accepted call. Replayed
+    /// payloads that present a stale nonce are rejected with `InvalidNonce`.
+    Nonce(Address),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1202,6 +1212,350 @@ impl PayoutRegistry {
     /// reducing CPU instruction consumption by ~28 % versus the naive path.
     pub fn get_org_budget(env: Env, id: Symbol) -> i128 {
         zero_copy::read_org_budget(&env, &id)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Replay Protection — Per-Caller Nonces
+    //
+    // Every external-origin call that touches funds (fund_org, claim_payout,
+    // qf_contribute) has a nonce-gated variant. The caller must supply the
+    // nonce value they observed via `get_nonce`; the contract verifies it
+    // matches the stored value, then atomically increments it before any
+    // state-changing side effects. Because the nonce advances before the token
+    // transfer (CEI), a replayed payload always arrives with a stale nonce and
+    // is rejected with `InvalidNonce`, making double-spend via callback replay
+    // structurally unreachable.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Returns the current nonce for `caller`.
+    ///
+    /// The nonce starts at 0 and increments by 1 after each accepted
+    /// nonce-gated call. Clients should read this value just before
+    /// constructing a nonce-protected transaction to obtain the correct
+    /// expected nonce.
+    ///
+    /// # Arguments
+    /// * `env`    - The contract environment.
+    /// * `caller` - The address whose nonce to query.
+    pub fn get_nonce(env: Env, caller: Address) -> u64 {
+        let key = DataKey::Nonce(caller);
+        if !env.storage().persistent().has(&key) {
+            return 0u64;
+        }
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().get(&key).unwrap_or(0u64)
+    }
+
+    /// Verify that `expected_nonce` matches the stored nonce for `caller`,
+    /// then atomically increment the stored nonce to `expected_nonce + 1`.
+    ///
+    /// Must be called **before** any state mutation in a nonce-gated entry
+    /// point. Panics with `InvalidNonce` if the nonces do not match, ensuring
+    /// replayed payloads are rejected without committing any state change.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `caller`         - The address whose nonce is being consumed.
+    /// * `expected_nonce` - The nonce value the caller believes is current.
+    fn verify_and_consume_nonce(env: &Env, caller: &Address, expected_nonce: u64) {
+        let key = DataKey::Nonce(caller.clone());
+        let current: u64 = env.storage().persistent().get(&key).unwrap_or(0u64);
+        if current != expected_nonce {
+            panic_with_error!(env, PrinceError::InvalidNonce);
+        }
+        // Atomically advance: increment before any downstream side effects.
+        let next = expected_nonce.checked_add(1).unwrap_or_else(|| {
+            // u64 overflow is cryptographically implausible; treat as invalid.
+            panic_with_error!(env, PrinceError::InvalidNonce)
+        });
+        env.storage().persistent().set(&key, &next);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Nonce-protected variant of `fund_org`.
+    ///
+    /// Behaves identically to `fund_org` but additionally verifies and consumes
+    /// a per-caller nonce, preventing adversarial replay of a captured funding
+    /// payload across different ledger states.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `org_id`         - Symbol ID of the organization to fund.
+    /// * `from`           - Donor address.
+    /// * `amount`         - Amount of tokens to transfer (in stroops).
+    /// * `expected_nonce` - Caller's expected nonce (must equal `get_nonce(from)`).
+    ///
+    /// # Panics
+    /// All panics from `fund_org` apply, plus:
+    /// * `InvalidNonce` - If `expected_nonce` does not match the stored nonce for `from`.
+    pub fn fund_org_with_nonce(
+        env: Env,
+        org_id: Symbol,
+        from: Address,
+        amount: i128,
+        expected_nonce: u64,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        // Bind auth to all parameters including the nonce so a replay with a
+        // different nonce cannot reuse a captured auth envelope.
+        from.require_auth_for_args(
+            (org_id.clone(), from.clone(), amount, expected_nonce).into_val(&env),
+        );
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Organization(org_id.clone()))
+        {
+            panic_with_error!(&env, PrinceError::OrgNotFound);
+        }
+
+        // Effects — nonce must be consumed before any storage mutation or
+        // external call so that a re-entrant replay sees the already-advanced
+        // nonce and is rejected.
+        Self::verify_and_consume_nonce(&env, &from, expected_nonce);
+        zero_copy::add_org_budget(&env, &org_id, amount);
+
+        // Interactions
+        let token = Self::get_token(env.clone());
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&from, &env.current_contract_address(), &amount);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "OrgFunded"),
+            ),
+            (org_id, from, amount),
+        );
+    }
+
+    /// Nonce-protected variant of `claim_payout`.
+    ///
+    /// Behaves identically to `claim_payout` but additionally verifies and
+    /// consumes a per-maintainer nonce, preventing adversarial replay of a
+    /// captured claim payload.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `maintainer`     - Address of the maintainer claiming their payout.
+    /// * `expected_nonce` - Caller's expected nonce (must equal `get_nonce(maintainer)`).
+    ///
+    /// # Returns
+    /// The amount of tokens transferred.
+    ///
+    /// # Panics
+    /// All panics from `claim_payout` apply, plus:
+    /// * `InvalidNonce` - If `expected_nonce` does not match the stored nonce.
+    pub fn claim_payout_with_nonce(env: Env, maintainer: Address, expected_nonce: u64) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        maintainer.require_auth_for_args(
+            (maintainer.clone(), expected_nonce).into_val(&env),
+        );
+
+        let balance_key = DataKey::MaintainerBalance(maintainer.clone());
+        let mut payout: MaintainerPayout =
+            env.storage()
+                .persistent()
+                .get(&balance_key)
+                .unwrap_or(MaintainerPayout {
+                    amount: 0,
+                    claimed_amount: 0,
+                    tranches: Vec::new(&env),
+                });
+
+        if payout.amount == 0 {
+            panic_with_error!(&env, PrinceError::NoClaimableBalance);
+        }
+
+        let now = env.ledger().timestamp();
+        let mut vested_total: i128 = 0;
+        for i in 0..payout.tranches.len() {
+            let tranche = payout.tranches.get(i).unwrap();
+            if now >= tranche.unlock_timestamp {
+                vested_total = vested_total
+                    .checked_add(tranche.amount)
+                    .unwrap_or_else(|| panic_with_error!(&env, PrinceError::PayoutOverflow));
+            }
+        }
+
+        if vested_total <= payout.claimed_amount {
+            panic_with_error!(&env, PrinceError::PayoutLocked);
+        }
+
+        let amount_to_claim = vested_total - payout.claimed_amount;
+
+        // Effects: consume nonce and update payout accounting before transfer.
+        Self::verify_and_consume_nonce(&env, &maintainer, expected_nonce);
+        payout.claimed_amount = vested_total;
+        payout.amount = payout.amount - amount_to_claim;
+        env.storage().persistent().set(&balance_key, &payout);
+        env.storage().persistent().extend_ttl(
+            &balance_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Interactions
+        let token = Self::get_token(env.clone());
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &maintainer,
+            &amount_to_claim,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "PayoutClaimed"),
+            ),
+            (maintainer, amount_to_claim),
+        );
+
+        amount_to_claim
+    }
+
+    /// Nonce-protected variant of `qf_contribute`.
+    ///
+    /// Behaves identically to `qf_contribute` but additionally verifies and
+    /// consumes a per-contributor nonce, preventing adversarial replay of a
+    /// captured QF contribution payload.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `project_id`     - Symbol ID of the project receiving the contribution.
+    /// * `contributor`    - Contributor address.
+    /// * `amount`         - Amount of tokens to contribute (in stroops).
+    /// * `expected_nonce` - Caller's expected nonce (must equal `get_nonce(contributor)`).
+    ///
+    /// # Panics
+    /// All panics from `qf_contribute` apply, plus:
+    /// * `InvalidNonce` - If `expected_nonce` does not match the stored nonce.
+    pub fn qf_contribute_with_nonce(
+        env: Env,
+        project_id: Symbol,
+        contributor: Address,
+        amount: i128,
+        expected_nonce: u64,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        contributor.require_auth_for_args(
+            (
+                project_id.clone(),
+                contributor.clone(),
+                amount,
+                expected_nonce,
+            )
+                .into_val(&env),
+        );
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+        if !Self::has_humanity(env.clone(), contributor.clone()) {
+            panic_with_error!(&env, PrinceError::HumanityVerificationRequired);
+        }
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Organization(project_id.clone()))
+        {
+            panic_with_error!(&env, PrinceError::OrgNotFound);
+        }
+
+        let contribution_key = DataKey::QfContribution(project_id.clone(), contributor.clone());
+        let previous_contribution: i128 = env
+            .storage()
+            .persistent()
+            .get(&contribution_key)
+            .unwrap_or(0);
+        let new_contribution = previous_contribution
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+
+        let previous_root = checked_isqrt_i128(&env, previous_contribution);
+        let new_root = checked_isqrt_i128(&env, new_contribution);
+        let root_delta = new_root
+            .checked_sub(previous_root)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow));
+
+        // Effects: consume nonce first, then apply all storage mutations.
+        Self::verify_and_consume_nonce(&env, &contributor, expected_nonce);
+
+        env.storage()
+            .persistent()
+            .set(&contribution_key, &new_contribution);
+        env.storage().persistent().extend_ttl(
+            &contribution_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let stats_key = DataKey::QfProjectStats(project_id.clone());
+        let mut stats: QfProjectStats = env
+            .storage()
+            .persistent()
+            .get(&stats_key)
+            .unwrap_or_else(Self::empty_qf_stats);
+        stats.direct_contributions = stats
+            .direct_contributions
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+        stats.sqrt_sum = stats
+            .sqrt_sum
+            .checked_add(root_delta)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow));
+        if previous_contribution == 0 {
+            stats.contributor_count = stats
+                .contributor_count
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow));
+        }
+        stats.weight = checked_square_i128(&env, stats.sqrt_sum);
+        env.storage().persistent().set(&stats_key, &stats);
+        env.storage().persistent().extend_ttl(
+            &stats_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        zero_copy::add_org_budget(&env, &project_id, amount);
+
+        // Interactions
+        let token = Self::get_token(env.clone());
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&contributor, &env.current_contract_address(), &amount);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "QfContributed"),
+            ),
+            (project_id, contributor, amount, stats.weight),
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

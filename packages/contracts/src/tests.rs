@@ -2158,4 +2158,220 @@ mod mpt_and_verifier_tests {
         let res = verify_exclusion(&header, b"absent_key", &[leaf.as_slice()]);
         assert!(res.is_ok() || matches!(res, Err(CrossChainError::ProofVerifyError(_))));
     }
+
+    // ── Nonce / Replay-Protection Tests ──────────────────────────────────────
+
+    /// A fresh address has nonce 0.
+    #[test]
+    fn test_nonce_initial_value_is_zero() {
+        let Setup { env, client, .. } = setup();
+        let user = Address::generate(&env);
+        assert_eq!(client.get_nonce(&user), 0u64);
+    }
+
+    /// `fund_org_with_nonce` accepts nonce 0 on first call and advances to 1.
+    #[test]
+    fn test_fund_org_with_nonce_first_call_succeeds() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg1");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        assert_eq!(client.get_nonce(&donor), 0u64);
+        client.fund_org_with_nonce(&org_sym, &donor, &500, &0u64);
+
+        // Nonce must have advanced to 1.
+        assert_eq!(client.get_nonce(&donor), 1u64);
+        // Budget must have been updated.
+        assert_eq!(client.get_org_budget(&org_sym), 500);
+    }
+
+    /// Replaying the same nonce (0) after a successful call is rejected.
+    #[test]
+    fn test_fund_org_with_nonce_replay_rejected() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg2");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        // First call succeeds.
+        client.fund_org_with_nonce(&org_sym, &donor, &100, &0u64);
+
+        // Second call with stale nonce 0 must fail.
+        let result = client.try_fund_org_with_nonce(&org_sym, &donor, &100, &0u64);
+        assert!(result.is_err());
+        // Budget must not have changed from the replay attempt.
+        assert_eq!(client.get_org_budget(&org_sym), 100);
+    }
+
+    /// Sequential calls each advance the nonce by 1.
+    #[test]
+    fn test_fund_org_with_nonce_increments_monotonically() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg3");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        for expected in 0u64..5u64 {
+            assert_eq!(client.get_nonce(&donor), expected);
+            client.fund_org_with_nonce(&org_sym, &donor, &10, &expected);
+        }
+        assert_eq!(client.get_nonce(&donor), 5u64);
+        assert_eq!(client.get_org_budget(&org_sym), 50);
+    }
+
+    /// Providing an out-of-order nonce (skipping ahead) is rejected.
+    #[test]
+    fn test_fund_org_with_nonce_future_nonce_rejected() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg4");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        // Nonce is 0 but caller supplies 1 (future nonce).
+        let result = client.try_fund_org_with_nonce(&org_sym, &donor, &100, &1u64);
+        assert!(result.is_err());
+        assert_eq!(client.get_nonce(&donor), 0u64);
+    }
+
+    /// `claim_payout_with_nonce` correctly verifies and advances the nonce.
+    #[test]
+    fn test_claim_payout_with_nonce_succeeds_and_increments() {
+        let Setup {
+            env,
+            client,
+            token,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nnclaim");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+        let maintainer = Address::generate(&env);
+
+        // Fund the org, add a maintainer, and allocate a payout with unlock_ts=0 (immediately vested).
+        token.mint(&admin, &10_000);
+        client.fund_org(&org_sym, &admin, &10_000);
+        client.add_maintainer(&org_sym, &maintainer);
+        client.allocate_payout(&org_sym, &admin, &maintainer, &500, &0u64);
+
+        assert_eq!(client.get_nonce(&maintainer), 0u64);
+
+        // Claim with correct nonce 0.
+        let claimed = client.claim_payout_with_nonce(&maintainer, &0u64);
+        assert_eq!(claimed, 500);
+        assert_eq!(client.get_nonce(&maintainer), 1u64);
+    }
+
+    /// Replaying a `claim_payout_with_nonce` is rejected.
+    #[test]
+    fn test_claim_payout_with_nonce_replay_rejected() {
+        let Setup {
+            env,
+            client,
+            token,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nnclrep");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+        let maintainer = Address::generate(&env);
+
+        token.mint(&admin, &10_000);
+        client.fund_org(&org_sym, &admin, &10_000);
+        client.add_maintainer(&org_sym, &maintainer);
+        client.allocate_payout(&org_sym, &admin, &maintainer, &200, &0u64);
+
+        // First claim (nonce 0) succeeds.
+        client.claim_payout_with_nonce(&maintainer, &0u64);
+
+        // Allocate more so there is a claimable balance again.
+        client.allocate_payout(&org_sym, &admin, &maintainer, &200, &0u64);
+
+        // Replay with stale nonce 0 must fail.
+        let result = client.try_claim_payout_with_nonce(&maintainer, &0u64);
+        assert!(result.is_err());
+    }
+
+    /// `qf_contribute_with_nonce` verifies nonce, contributes, then advances.
+    #[test]
+    fn test_qf_contribute_with_nonce_succeeds_and_increments() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nncqf1");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        assert_eq!(client.get_nonce(&contributor), 0u64);
+        client.qf_contribute_with_nonce(&org_sym, &contributor, &100, &0u64);
+
+        assert_eq!(client.get_nonce(&contributor), 1u64);
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 100);
+    }
+
+    /// Replaying a `qf_contribute_with_nonce` is rejected.
+    #[test]
+    fn test_qf_contribute_with_nonce_replay_rejected() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nncqf2");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        // First call succeeds.
+        client.qf_contribute_with_nonce(&org_sym, &contributor, &50, &0u64);
+        // Replay with stale nonce 0 must fail.
+        let result = client.try_qf_contribute_with_nonce(&org_sym, &contributor, &50, &0u64);
+        assert!(result.is_err());
+        // Contribution must still be only 50.
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 50);
+    }
+
+    /// Nonces are independent per caller address.
+    #[test]
+    fn test_nonces_are_independent_per_caller() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncind");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        token.mint(&donor_a, &1_000);
+        token.mint(&donor_b, &1_000);
+
+        // donor_a makes two calls; donor_b makes one.
+        client.fund_org_with_nonce(&org_sym, &donor_a, &100, &0u64);
+        client.fund_org_with_nonce(&org_sym, &donor_a, &100, &1u64);
+        client.fund_org_with_nonce(&org_sym, &donor_b, &100, &0u64);
+
+        assert_eq!(client.get_nonce(&donor_a), 2u64);
+        assert_eq!(client.get_nonce(&donor_b), 1u64);
+    }
 }

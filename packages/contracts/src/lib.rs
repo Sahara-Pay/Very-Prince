@@ -8,6 +8,7 @@ use soroban_sdk::{
 // Zero-copy deserialization helpers for hot-path reads.
 // See src/zero_copy.rs for the architecture and instruction-count benchmarks.
 mod zero_copy;
+pub mod xdr_parser;
 
 // SDK compatibility tests to ensure safe version upgrades
 #[cfg(test)]

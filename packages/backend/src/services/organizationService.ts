@@ -190,6 +190,24 @@ export class OrganizationService {
     return stellarService.readMaintainers(orgId);
   }
 
+  async getMaintainerBalances(orgId: string) {
+    const maintainerAddresses = await stellarService.readMaintainers(orgId);
+    
+    // Fetch all balances in parallel to avoid waterfalls
+    const balanceResults = await Promise.all(
+      maintainerAddresses.map(async (address) => {
+        const stroops = await stellarService.readClaimableBalance(address);
+        return {
+          address,
+          stroops: stroops.toString(),
+          xlm: (Number(stroops) / 10_000_000).toFixed(7),
+        };
+      })
+    );
+
+    return balanceResults;
+  }
+
   async getOrgBudget(orgId: string) {
     const stroops = await stellarService.readOrgBudget(orgId);
     const xlm = (Number(stroops) / 10_000_000).toFixed(7);

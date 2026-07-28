@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Next.js configuration for the Very-prince frontend.
  *
  * Key notes:
@@ -12,6 +12,7 @@ import withPWA from "next-pwa";
 const pwaConfig = withPWA({
   dest: "public",
   disable: process.env.NODE_ENV === "development",
+  customWorkerDir: "worker",
   // Only cache GET requests — never cache POST/wallet/webhook endpoints.
   runtimeCaching: [
     {

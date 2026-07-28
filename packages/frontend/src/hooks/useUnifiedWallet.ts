@@ -21,7 +21,7 @@ import {
   isAllowed,
   setAllowed,
 } from "@stellar/freighter-api";
-import toast from "react-hot-toast";
+import { toast } from "sonner";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

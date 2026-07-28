@@ -12,6 +12,7 @@ use token_interface::TokenMetadata;
 // See src/zero_copy.rs for the architecture and instruction-count benchmarks.
 mod zero_copy;
 pub mod xdr_parser;
+pub mod linked_list;
 
 // SDK compatibility tests to ensure safe version upgrades
 #[cfg(test)]
@@ -197,6 +198,12 @@ pub enum PrinceError {
     InvalidPoP = 36,
     /// Token metadata (name/symbol/decimals) could not be fetched during initialisation.
     TokenMetadataUnavailable = 37,
+    /// The linked list traversal depth limit was reached.
+    ListTraversalLimitExceeded = 38,
+    /// The provided insertion point for the sorted list is invalid.
+    InvalidListInsertionPoint = 39,
+    /// The requested node was not found in the linked list.
+    ListNodeNotFound = 40,
 }
 
 #[contracttype]
@@ -251,6 +258,12 @@ pub enum DataKey {
     TokenSymbol,
     /// Cached token decimals from the underlying SAC (populated during init).
     TokenDecimals,
+    /// Metadata for a specific doubly linked list (head, tail, size).
+    ListMetadata(Symbol),
+    /// A single node in a doubly linked list.
+    ListNode(Symbol, u64),
+    /// The next available node ID for a specific list.
+    ListNextId(Symbol),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2821,6 +2834,49 @@ impl PayoutRegistry {
             (owner, amount, maturity_date),
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Priority Queue (Sorted Linked List)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Insert a value into a sorted priority queue.
+    ///
+    /// Requires the caller to provide the intended insertion point (prev/next).
+    /// Insertion is O(1) storage read/write.
+    pub fn list_insert(
+        env: Env,
+        list_id: Symbol,
+        value: Address,
+        priority: i128,
+        prev_id: Option<u64>,
+        next_id: Option<u64>,
+    ) -> u64 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        linked_list::SortedList::insert(&env, list_id, value, priority, prev_id, next_id)
+    }
+
+    /// Remove a node from a priority queue.
+    ///
+    /// Removal is O(1) storage read/write.
+    pub fn list_remove(env: Env, list_id: Symbol, node_id: u64) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        linked_list::SortedList::remove(&env, list_id, node_id)
+    }
+
+    /// Fetch a page of nodes from a priority queue starting from `start_id`.
+    ///
+    /// Traversal is capped at 50 nodes to prevent CPU exhaustion.
+    pub fn list_get_page(
+        env: Env,
+        list_id: Symbol,
+        start_id: Option<u64>,
+        limit: u32,
+    ) -> soroban_sdk::Vec<linked_list::ListNode> {
+        Self::assert_active(&env);
+        linked_list::SortedList::get_page(&env, list_id, start_id, limit)
+    }
 }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2838,3 +2894,5 @@ mod tests;
 mod bls_tests;
 #[cfg(test)]
 mod vault_tests;
+#[cfg(test)]
+mod list_tests;

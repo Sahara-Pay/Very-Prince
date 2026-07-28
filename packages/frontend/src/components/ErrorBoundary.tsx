@@ -16,6 +16,9 @@ interface ErrorBoundaryProps {
     children: React.ReactNode;
     fallback?: React.ReactNode;
     onReset?: () => void;
+    /** 'page' (default) renders a full-screen fallback. 'inline' renders a compact
+     *  card-sized fallback for use around individual widgets. */
+    variant?: 'page' | 'inline';
 }
 
 interface ErrorBoundaryState {
@@ -51,6 +54,27 @@ export class ErrorBoundary extends React.Component<
         if (this.state.hasError) {
             if (this.props.fallback) {
                 return this.props.fallback;
+            }
+
+            if (this.props.variant === 'inline') {
+                return (
+                    <div
+                        role="alert"
+                        aria-live="assertive"
+                        className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6 text-center"
+                    >
+                        <p className="mb-3 text-sm text-red-300">
+                            This section couldn't load.
+                        </p>
+                        <button
+                            type="button"
+                            onClick={this.handleReset}
+                            className="rounded-lg bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-purple"
+                        >
+                            Try Again
+                        </button>
+                    </div>
+                );
             }
 
             const isDev = process.env.NODE_ENV !== 'production';

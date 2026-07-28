@@ -1,0 +1,76 @@
+# =============================================================================
+# Kustomize root – Very-Prince k8s infrastructure
+# =============================================================================
+# Apply everything:
+#   kubectl apply -k k8s/
+#
+# Apply a single component (e.g., just MinIO):
+#   kubectl apply -k k8s/minio/
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: very-prince
+
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/part-of: very-prince
+
+resources:
+  # Namespace must exist before any other resource
+  - minio/deployment.yaml
+
+  # Secrets (apply before cluster to avoid bootstrap race)
+  - postgres/secrets.yaml
+
+  # CloudNativePG cluster + scheduled backups
+  - postgres/cluster.yaml
+  - postgres/scheduled-backup.yaml
+
+  # PgBouncer connection pooler
+  - pgbouncer/deployment.yaml
+
+# =============================================================================
+# Patches – override specific fields without touching the base manifests
+# =============================================================================
+patches:
+  # ── Storage class override ─────────────────────────────────────────────────
+  # Uncomment and set your storage class name if not using 'standard'
+  # - patch: |-
+  #     - op: replace
+  #       path: /spec/storage/storageClass
+  #       value: gp3
+  #   target:
+  #     kind: Cluster
+  #     name: very-prince-pg
+
+  # ── Replica count override ─────────────────────────────────────────────────
+  # Uncomment to scale PgBouncer independently
+  # - patch: |-
+  #     - op: replace
+  #       path: /spec/replicas
+  #       value: 3
+  #   target:
+  #     kind: Deployment
+  #     name: pgbouncer
+
+# =============================================================================
+# Config generator – generate ConfigMap from literal values
+# (supplement to pgbouncer-config ConfigMap in deployment.yaml)
+# =============================================================================
+# configMapGenerator:
+#   - name: very-prince-env
+#     literals:
+#       - POSTGRES_DB=very_prince
+#       - POSTGRES_HOST=very-prince-pg-rw
+
+# =============================================================================
+# Images – pin image digests for production air-gapped environments
+# =============================================================================
+images:
+  - name: ghcr.io/cloudnative-pg/postgresql
+    newTag: "15.6"
+  - name: bitnami/pgbouncer
+    newTag: "1.22.1"
+  - name: quay.io/minio/minio
+    newTag: "RELEASE.2024-04-18T19-09-19Z"

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useUnifiedWallet } from "../hooks/useUnifiedWallet";
-import toast from "react-hot-toast";
+import { toast } from "sonner";
 
 interface EmailPreferencesProps {
   dictionary?: {

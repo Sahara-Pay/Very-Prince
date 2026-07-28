@@ -5,7 +5,7 @@
 # CI workflow read this file automatically via rustup.
 #
 # ── Why 1.88.0? ──────────────────────────────────────────────────────────────
-# The transitive dependency tree pulled in by soroban-sdk v21 requires:
+# The transitive dependency tree pulled in by soroban-sdk v22 requires:
 #
 #   darling@0.23    → rust-version = "1.88"
 #   serde_with@3.18 → rust-version = "1.88"

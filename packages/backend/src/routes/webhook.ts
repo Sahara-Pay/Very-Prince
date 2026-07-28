@@ -65,6 +65,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
         secret: "********************************"
       });
     } catch (error) {
+      request.log.error({ err: error, orgId }, "Failed to fetch webhook config");
       return reply.status(500).send({ error: "Failed to fetch webhook config" });
     }
   });
@@ -102,6 +103,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
       const config = await webhookService.updateConfig(orgId, url);
       return reply.send(config);
     } catch (error) {
+      request.log.error({ err: error, orgId }, "Failed to update webhook config");
       return reply.status(500).send({ error: "Failed to update webhook config" });
     }
   });
@@ -138,6 +140,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
       const config = await webhookService.getConfig(orgId);
       return reply.send(config?.deliveries || []);
     } catch (error) {
+      request.log.error({ err: error, orgId }, "Failed to fetch webhook deliveries");
       return reply.status(500).send({ error: "Failed to fetch deliveries" });
     }
   });
@@ -174,6 +177,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
       const result = await webhookService.sendTestWebhook(orgId);
       return reply.send(result);
     } catch (error) {
+      request.log.error({ err: error, orgId }, "Test webhook failed");
       return reply.status(500).send({ error: "Test webhook failed", message: error instanceof Error ? error.message : "Unknown error" });
     }
   });
@@ -210,6 +214,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
       const config = await webhookService.getConfig(orgId);
       return reply.send({ secret: config?.secret });
     } catch (error) {
+      request.log.error({ err: error, orgId }, "Failed to reveal webhook secret");
       return reply.status(500).send({ error: "Failed to reveal secret" });
     }
   });

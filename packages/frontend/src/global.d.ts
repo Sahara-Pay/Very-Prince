@@ -1,3 +1,13 @@
+declare module '*?worker' {
+  const workerConstructor: { new (): Worker };
+  export default workerConstructor;
+}
+
+declare module '*.worker.ts' {
+  const workerConstructor: { new (): Worker };
+  export default workerConstructor;
+}
+
 interface Window {
   freighter?: {
     isConnected: () => Promise<boolean>;

@@ -1,11 +1,62 @@
 #[allow(clippy::module_inception)]
 #[cfg(test)]
 mod tests {
-    use crate::{PayoutParams, PayoutRegistry, PayoutRegistryClient};
+    use crate::{PayoutParams, PayoutRegistry, PayoutRegistryClient, PrinceError};
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{symbol_short, token, Address, Env, IntoVal, String, Symbol, Vec};
+    use soroban_sdk::{
+        symbol_short, token, Address, Env, IntoVal, InvokeError, String, Symbol, Vec,
+    };
 
     // ── Test Helpers ─────────────────────────────────────────────────────────
+
+    /// Assert that a `client.try_xxx(...)` call failed with the *specific*
+    /// contract error variant `expected`. This is the strict version of
+    /// `assert!(result.is_err())`: any of `Ok(some_other_variant)`,
+    /// host-level errors, or auth failures will fail the test, satisfying
+    /// the "strict unit test coverage" AC.
+    ///
+    /// On soroban-sdk 21, every `client.try_xxx` call returns
+    /// `Result<T, Result<soroban_sdk::Error, InvokeError>>` where `T` is
+    /// either the contract's return value (for `-> T` functions like
+    /// `get_token`) or a nested `Result<U, E>` (for `-> Result<U, E>`
+    /// functions like `fund_org`). Both shapes share the same outer Err
+    /// path, which is what the helper inspects:
+    ///   * `Err(InvokeError::Contract(code))` — contract panicked via
+    ///     `panic_with_error!` with the wrapped `PrinceError` variant.
+    ///   * `Ok(soroban_sdk::Error::Contract(_))` — contract returned inline
+    ///     `Err(_)`. The `From<soroban_sdk::Error> for InvokeError` impl
+    ///     extracts the same u32 code.
+    fn assert_failed_with<T>(
+        result: Result<T, Result<soroban_sdk::Error, InvokeError>>,
+        expected: PrinceError,
+    ) {
+        // Outer Err ⇒ the contract call did not produce a success value.
+        // We avoid `expect_err` because its `Debug` bound on `T` does not
+        // hold for every try_xxx inner Ok (e.g. `ConversionError`).
+        let outer_err: Result<soroban_sdk::Error, InvokeError> = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected contract call to fail"),
+        };
+        let code: u32 = match outer_err {
+            Ok(err) => match InvokeError::from(err) {
+                InvokeError::Contract(code) => code,
+                InvokeError::Abort => panic!(
+                    "expected PrinceError::{:?}({}) but got host abort",
+                    expected, expected as u32,
+                ),
+            },
+            Err(InvokeError::Contract(code)) => code,
+            Err(InvokeError::Abort) => panic!(
+                "expected PrinceError::{:?}({}) but got host abort",
+                expected, expected as u32,
+            ),
+        };
+        assert_eq!(
+            code, expected as u32,
+            "expected PrinceError::{:?}({}) but got contract-error code {}",
+            expected, expected as u32, code,
+        );
+    }
 
     struct Setup {
         env: Env,
@@ -570,5 +621,223 @@ mod tests {
         let result = client.try_unpause_protocol(&signers_unpause2);
         assert!(result.is_ok());
         assert_eq!(client.get_protocol_state(), crate::ProtocolState::Active);
+    }
+
+    // ── Instance Storage Coverage ───────────────────────────────────────────────
+    //
+    // The following tests give us strict unit-test coverage over every
+    // instance-storage read/write introduced by the migration to the Soroban
+    // instance-storage model. They guard the API surface used by the program
+    // (`get_token`, `get_multisig_admin`, `get_protocol_state`,
+    // `propose_admin`, `accept_admin`) and assert the expected failure modes
+    // on the uninitialised state.
+
+    #[test]
+    fn test_uninitialized_getters_panic() {
+        // A brand-new contract that never had `init` invoked.
+        let env = Env::default();
+        let contract_id = env.register_contract(None, PayoutRegistry);
+        let client = PayoutRegistryClient::new(&env, &contract_id);
+
+        // Every getter must panic with ContractNotInitialized because no
+        // instance storage entries exist yet (Token, MultisigAdmin,
+        // ProtocolState). The contract error is *strictly* verified via
+        // `assert_failed_with`.
+        assert_failed_with(client.try_get_token(), PrinceError::ContractNotInitialized);
+        assert_failed_with(
+            client.try_get_multisig_admin(),
+            PrinceError::ContractNotInitialized,
+        );
+        assert_failed_with(
+            client.try_get_protocol_state(),
+            PrinceError::ContractNotInitialized,
+        );
+    }
+
+    #[test]
+    fn test_init_cannot_be_called_twice() {
+        // After init runs, the Token entry lives in instance storage, so a
+        // second init attempt must panic with AlreadyInitialized.
+        let env = Env::default();
+        let token_admin = Address::generate(&env);
+        let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+        let contract_id = env.register_contract(None, PayoutRegistry);
+        let client = PayoutRegistryClient::new(&env, &contract_id);
+
+        let mut admins = Vec::new(&env);
+        admins.push_back(Address::generate(&env));
+        client.init(&token_contract_id.address(), &admins, &1);
+
+        assert_failed_with(
+            client.try_init(&token_contract_id.address(), &admins, &1),
+            PrinceError::AlreadyInitialized,
+        );
+    }
+
+    #[test]
+    fn test_propose_and_accept_admin_instance_storage_flow() {
+        // Set up a deployed contract with a 2-of-3 multisig.
+        let env = Env::default();
+        let token_admin = Address::generate(&env);
+        let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let _token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
+
+        let contract_id = env.register_contract(None, PayoutRegistry);
+        let client = PayoutRegistryClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+
+        let mut admins = Vec::new(&env);
+        admins.push_back(admin1.clone());
+        admins.push_back(admin2.clone());
+        admins.push_back(admin3.clone());
+
+        client.init(&token_contract_id.address(), &admins, &2);
+
+        let new_admin = Address::generate(&env);
+
+        // ── propose_admin: 1 signer (below threshold) must fail ────────────
+        let mut signers_one = Vec::new(&env);
+        signers_one.push_back(admin1.clone());
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin1,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_admin",
+                args: (signers_one.clone(), new_admin.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert_failed_with(
+            client.try_propose_admin(&signers_one, &new_admin),
+            PrinceError::InsufficientMultisigAuth,
+        );
+
+        // ── propose_admin: 2 signers (at threshold) must succeed ──────────
+        let mut signers_two = Vec::new(&env);
+        signers_two.push_back(admin1.clone());
+        signers_two.push_back(admin2.clone());
+
+        env.mock_auths(&[
+            soroban_sdk::testutils::MockAuth {
+                address: &admin1,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (signers_two.clone(), new_admin.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+            soroban_sdk::testutils::MockAuth {
+                address: &admin2,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "propose_admin",
+                    args: (signers_two.clone(), new_admin.clone()).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
+        client.propose_admin(&signers_two, &new_admin);
+
+        // ── accept_admin: the wrong address cannot accept ──────────────────
+        let impostor = Address::generate(&env);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &impostor,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_admin",
+                args: (impostor.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert_failed_with(
+            client.try_accept_admin(&impostor),
+            PrinceError::NotPendingAdmin,
+        );
+
+        // ── accept_admin: the correct pending address accepts ──────────────
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &new_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        client.accept_admin(&new_admin);
+
+        // Instance storage must now expose a single-admin, threshold-1 multisig.
+        let multisig_admin = client.get_multisig_admin();
+        assert_eq!(multisig_admin.admins.len(), 1);
+        assert_eq!(multisig_admin.admins.get(0).unwrap(), new_admin);
+        assert_eq!(multisig_admin.threshold, 1);
+
+        // ── accept_admin: subsequent calls must panic with NoPendingAdmin ─
+        // because the instance-storage PendingAdmin entry was removed.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &new_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert_failed_with(
+            client.try_accept_admin(&new_admin),
+            PrinceError::NoPendingAdmin,
+        );
+    }
+
+    #[test]
+    fn test_paused_protocol_blocks_state_mutating_ops() {
+        // After pause_protocol runs, `fund_org`/`allocate_payout`/`claim_payout`
+        // (which read `ProtocolState` from instance storage) must each panic
+        // with ProtocolPaused. We rely on `setup()`'s `mock_all_auths()` to
+        // auto-approve any auth — the multisig threshold check is what
+        // actually gates `pause_protocol`, not `require_auth`.
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("p_org");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let donor = Address::generate(&env);
+        token.mint(&donor, &10_000_000);
+        client.fund_org(&org_sym, &donor, &10_000_000);
+
+        let maintainer = Address::generate(&env);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        // Pause via multisig. Threshold=2, so two distinct signers are needed.
+        let admins_vec = client.get_multisig_admin();
+        let s1 = admins_vec.admins.get(0).unwrap();
+        let s2 = admins_vec.admins.get(1).unwrap();
+        let mut signers = Vec::new(&env);
+        signers.push_back(s1.clone());
+        signers.push_back(s2.clone());
+        client.pause_protocol(&signers);
+
+        assert_eq!(client.get_protocol_state(), crate::ProtocolState::Paused);
+
+        // Each state-mutating op must panic with ProtocolPaused.
+        assert_failed_with(
+            client.try_fund_org(&org_sym, &donor, &1_000_000),
+            PrinceError::ProtocolPaused,
+        );
+        assert_failed_with(
+            client.try_allocate_payout(&org_sym, &admin, &maintainer, &1_000_000_i128, &0_u64),
+            PrinceError::ProtocolPaused,
+        );
+        assert_failed_with(
+            client.try_claim_payout(&maintainer),
+            PrinceError::ProtocolPaused,
+        );
     }
 }

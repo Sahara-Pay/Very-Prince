@@ -147,19 +147,28 @@ const PERSISTENT_BUMP_AMOUNT: u32 = 518_400;
 /// Trigger an extension when fewer than ~7 days of TTL remain.
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 120_960;
 
+/// Extend the contract instance to live for ~30 days from the current ledger.
+const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
+/// Trigger an extension when fewer than ~7 days of TTL remain.
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 120_960;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Technical Design Notes: Soroban Storage Model
 //
 // Soroban uses a state-archiving model to keep the ledger size manageable.
 // Every entry (Persistent, Instance, Temporary) has a Time-To-Live (TTL).
 //
-// - Persistent: High-cost, long-lived data (Orgs, Maintainers).
-// - Instance: Data associated with the contract instance itself.
+// - Persistent: High-cost, long-lived, per-entry data. Used for scalable
+//   entities (Organizations, Maintainers, Budgets, Balances). Each entry has
+//   its own independent TTL.
+// - Instance: Data associated with the contract instance itself. Loaded on
+//   every invocation (64 KB limit). Used for global configuration that is
+//   small, frequently accessed, and bounded in size (Token, MultisigAdmin,
+//   ProtocolState, PendingAdmin). A single TTL covers all instance entries.
 // - Temporary: Low-cost data that expires quickly (not used here).
 //
 // Our implementation proactively bumps TTLs during read/write operations
-// to ensure that registered organizations and their budgets never "evict"
-// from the active ledger state.
+// to prevent ledger entries from being archived.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -176,7 +185,7 @@ impl PayoutRegistry {
     // ─────────────────────────────────────────────────────────────────────────
 
     pub fn init(env: Env, token: Address, admins: Vec<Address>, threshold: u32) {
-        if env.storage().persistent().has(&DataKey::Token) {
+        if env.storage().instance().has(&DataKey::Token) {
             panic_with_error!(&env, PrinceError::AlreadyInitialized);
         }
 
@@ -188,33 +197,26 @@ impl PayoutRegistry {
             panic_with_error!(&env, PrinceError::InvalidThreshold);
         }
 
-        env.storage().persistent().set(&DataKey::Token, &token);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Token,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        // ── Instance Storage: global configuration ─────────────────────────
+        // Token, MultisigAdmin, and ProtocolState are small, frequently
+        // accessed values that fit comfortably within the 64 KB instance limit.
+
+        env.storage().instance().set(&DataKey::Token, &token);
 
         let multisig_admin = MultisigAdmin {
             admins: admins.clone(),
             threshold,
         };
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::MultisigAdmin, &multisig_admin);
-        env.storage().persistent().extend_ttl(
-            &DataKey::MultisigAdmin,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::ProtocolState, &ProtocolState::Active);
-        env.storage().persistent().extend_ttl(
-            &DataKey::ProtocolState,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+
+        // Extend instance TTL once for all instance entries
+        Self::extend_instance_ttl(&env);
 
         env.events().publish(
             (
@@ -226,13 +228,9 @@ impl PayoutRegistry {
     }
 
     pub fn get_token(env: Env) -> Address {
-        env.storage().persistent().extend_ttl(
-            &DataKey::Token,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::extend_instance_ttl(&env);
         env.storage()
-            .persistent()
+            .instance()
             .get(&DataKey::Token)
             .unwrap_or_else(|| panic_with_error!(&env, PrinceError::ContractNotInitialized))
     }
@@ -242,13 +240,9 @@ impl PayoutRegistry {
     /// # Panics
     /// If the contract has not been initialized.
     pub fn get_multisig_admin(env: Env) -> MultisigAdmin {
-        env.storage().persistent().extend_ttl(
-            &DataKey::MultisigAdmin,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::extend_instance_ttl(&env);
         env.storage()
-            .persistent()
+            .instance()
             .get(&DataKey::MultisigAdmin)
             .unwrap_or_else(|| panic_with_error!(&env, PrinceError::ContractNotInitialized))
     }
@@ -258,15 +252,19 @@ impl PayoutRegistry {
     /// # Panics
     /// If the contract has not been initialized.
     pub fn get_protocol_state(env: Env) -> ProtocolState {
-        env.storage().persistent().extend_ttl(
-            &DataKey::ProtocolState,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::extend_instance_ttl(&env);
         env.storage()
-            .persistent()
+            .instance()
             .get(&DataKey::ProtocolState)
             .unwrap_or_else(|| panic_with_error!(&env, PrinceError::ContractNotInitialized))
+    }
+
+    /// Extend the instance storage TTL so the contract remains live.
+    /// Called before any read or write to instance storage.
+    fn extend_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Assert that the protocol is currently active.
@@ -962,14 +960,10 @@ impl PayoutRegistry {
         Self::verify_multisig_auth(&env, &signers);
 
         // Update the protocol state to paused
+        Self::extend_instance_ttl(&env);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::ProtocolState, &ProtocolState::Paused);
-        env.storage().persistent().extend_ttl(
-            &DataKey::ProtocolState,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
 
         // Emit pause event
         env.events().publish(
@@ -992,14 +986,10 @@ impl PayoutRegistry {
         Self::verify_multisig_auth(&env, &signers);
 
         // Update the protocol state to active
+        Self::extend_instance_ttl(&env);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::ProtocolState, &ProtocolState::Active);
-        env.storage().persistent().extend_ttl(
-            &DataKey::ProtocolState,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
 
         // Emit unpause event
         env.events().publish(
@@ -1025,8 +1015,9 @@ impl PayoutRegistry {
     /// * If multisig authorization is insufficient.
     pub fn propose_admin(env: Env, signers: Vec<Address>, new_admin: Address) {
         Self::verify_multisig_auth(&env, &signers);
+        Self::extend_instance_ttl(&env);
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
         env.events().publish(
             (
@@ -1047,9 +1038,10 @@ impl PayoutRegistry {
     /// * If the caller is not the pending admin.
     pub fn accept_admin(env: Env, new_admin: Address) {
         new_admin.require_auth();
+        Self::extend_instance_ttl(&env);
         let pending: Address = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::PendingAdmin)
             .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NoPendingAdmin));
         if pending != new_admin {
@@ -1063,9 +1055,9 @@ impl PayoutRegistry {
             threshold: 1,
         };
         env.storage()
-            .persistent()
+            .instance()
             .set(&DataKey::MultisigAdmin, &multisig_admin);
-        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         env.events().publish(
             (
                 Symbol::new(&env, "VeryPrince"),

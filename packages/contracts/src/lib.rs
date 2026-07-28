@@ -1,9 +1,12 @@
 #![no_std]
 
+mod token_interface;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
     Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
+use token_interface::TokenMetadata;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data Types
@@ -110,6 +113,8 @@ pub enum PrinceError {
     NoPendingAdmin = 25,
     /// The caller is not the address currently proposed as a new administrator.
     NotPendingAdmin = 26,
+    /// Token metadata (name/symbol/decimals) could not be fetched during initialisation.
+    TokenMetadataUnavailable = 27,
 }
 
 #[contracttype]
@@ -129,6 +134,12 @@ pub enum DataKey {
     ProtocolState,
     /// Pending admin address proposed via propose_admin (two-step transfer).
     PendingAdmin,
+    /// Cached token name from the underlying SAC (populated during init).
+    TokenName,
+    /// Cached token symbol from the underlying SAC (populated during init).
+    TokenSymbol,
+    /// Cached token decimals from the underlying SAC (populated during init).
+    TokenDecimals,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,12 +227,214 @@ impl PayoutRegistry {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        // Fetch and cache token metadata from the SAC for 1:1 parameter mapping.
+        // This ensures external contracts can query token params without calling
+        // the token contract directly — a single source of truth.
+        let metadata = token_interface::fetch_token_metadata(&env, &token);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenName, &metadata.name);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenName,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenSymbol, &metadata.symbol);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenSymbol,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenDecimals, &metadata.decimals);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenDecimals,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
         env.events().publish(
             (
                 Symbol::new(&env, "VeryPrince"),
                 Symbol::new(&env, "Initialized"),
             ),
             (token, admins.len(), threshold),
+        );
+    }
+
+    /// Retrieve the cached SAC token metadata (name, symbol, decimals).
+    ///
+    /// This returns the metadata that was fetched during contract initialisation.
+    /// It maps 1:1 with the SEP-41 token standard, ensuring AMM compatibility.
+    ///
+    /// # Returns
+    /// `TokenMetadata` struct with name, symbol, and decimals.
+    ///
+    /// # Panics
+    /// If the contract has not been initialised.
+    pub fn get_token_metadata(env: Env) -> TokenMetadata {
+        if !env.storage().persistent().has(&DataKey::TokenName) {
+            panic_with_error!(&env, PrinceError::ContractNotInitialized);
+        }
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenName,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenSymbol,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenDecimals,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let name: String = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenName)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::TokenMetadataUnavailable));
+        let symbol: String = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenSymbol)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::TokenMetadataUnavailable));
+        let decimals: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenDecimals)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::TokenMetadataUnavailable));
+        TokenMetadata {
+            name,
+            symbol,
+            decimals,
+        }
+    }
+
+    /// Query the token balance of any address.
+    ///
+    /// Delegates to the SAC `balance(id: Address) -> i128` function.
+    /// This is a read-only function — no authentication required.
+    pub fn token_balance(env: Env, id: Address) -> i128 {
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_balance(&env, &token_addr, &id)
+    }
+
+    /// Mint new tokens to the specified address.
+    ///
+    /// Requires multisig authorization from protocol admins because minting
+    /// inflates the token supply. This delegates to the SAC admin `mint` function.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment.
+    /// * `signers` - Multisig signers who must meet the threshold.
+    /// * `to` - Recipient address for the newly minted tokens.
+    /// * `amount` - Amount of tokens to mint (in the token's base unit).
+    ///
+    /// # Panics
+    /// * If insufficient multisig signatures are provided.
+    /// * If the amount is not positive.
+    pub fn mint_token(env: Env, signers: Vec<Address>, to: Address, amount: i128) {
+        Self::verify_multisig_auth(&env, &signers);
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_mint(&env, &token_addr, &to, &amount);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "TokenMinted"),
+            ),
+            (to, amount),
+        );
+    }
+
+    /// Query the allowance `from` has granted to `spender`.
+    ///
+    /// Delegates to the SAC `allowance(from, spender) -> i128` function.
+    /// This is required for AMM compatibility — AMM routers check allowances
+    /// before executing swaps.
+    pub fn token_allowance(env: Env, from: Address, spender: Address) -> i128 {
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_allowance(&env, &token_addr, &from, &spender)
+    }
+
+    /// Approve `spender` to transfer up to `amount` tokens from `from`.
+    ///
+    /// Delegates to the SAC `approve(from, spender, amount, expiration_ledger)`.
+    /// This is required for AMM compatibility — AMM routers call `approve` on the
+    /// token before executing swaps.
+    ///
+    /// # Authorization
+    /// The `from` address must authorise this call.
+    pub fn token_approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        expiration_ledger: u32,
+    ) {
+        from.require_auth_for_args(
+            (from.clone(), spender.clone(), amount, expiration_ledger).into_val(&env),
+        );
+
+        if amount < 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_approve(&env, &token_addr, &from, &spender, amount, expiration_ledger);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "TokenApproved"),
+            ),
+            (from, spender, amount),
+        );
+    }
+
+    /// Transfer tokens on behalf of another address using an allowance.
+    ///
+    /// Delegates to the SAC `transfer_from(spender, from, to, amount)`.
+    /// This is required for AMM compatibility — AMM routers use this to move tokens
+    /// on behalf of users who have approved an allowance.
+    ///
+    /// # Authorization
+    /// The `spender` address must authorise this call.
+    pub fn token_transfer_from(
+        env: Env,
+        spender: Address,
+        from: Address,
+        to: Address,
+        amount: i128,
+    ) {
+        spender.require_auth_for_args(
+            (spender.clone(), from.clone(), to.clone(), amount).into_val(&env),
+        );
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_transfer_from(&env, &token_addr, &spender, &from, &to, &amount);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "TokenTransferFrom"),
+            ),
+            (spender, from, to, amount),
         );
     }
 
@@ -480,8 +693,7 @@ impl PayoutRegistry {
         // Interactions: Execute the token transfer as the absolute last step
         // This follows the Check-Effects-Interactions pattern.
         let token = Self::get_token(env.clone());
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&from, &env.current_contract_address(), &amount);
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &amount);
 
         env.events().publish(
             (
@@ -928,8 +1140,9 @@ impl PayoutRegistry {
         // Interactions: Execute the token transfer as the absolute last step
         // This follows the Check-Effects-Interactions pattern.
         let token = Self::get_token(env.clone());
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(
+        token_interface::sac_transfer(
+            &env,
+            &token,
             &env.current_contract_address(),
             &maintainer,
             &amount_to_claim,

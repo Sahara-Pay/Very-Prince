@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useSuspenseQuery } from "@tanstack/react-query";
 
 interface FundingHistoryPoint {
   id: string;
@@ -30,32 +30,14 @@ const fetcher = async (url: string) => {
 };
 
 export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
-  const { data, error, isLoading } = useQuery({
+  const { data } = useSuspenseQuery({
     queryKey: ["funding-history", orgId],
     queryFn: () => fetcher(`${BACKEND_URL}/stats/funding-history/${orgId}`),
-    enabled: Boolean(orgId),
     staleTime: 5000,
   });
 
   const [hoveredPoint, setHoveredPoint] = useState<FundingHistoryPoint | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
-
-  if (isLoading) {
-    return (
-      <div className="glass-card p-6 animate-pulse space-y-4">
-        <div className="h-6 w-48 bg-white/10 rounded" />
-        <div className="h-48 bg-white/5 rounded-xl" />
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="glass-card p-6 border-red-500/30 bg-red-500/5 text-center">
-        <p className="text-red-400 text-sm">Failed to load funding history</p>
-      </div>
-    );
-  }
 
   if (!data || data.length === 0) {
     return (

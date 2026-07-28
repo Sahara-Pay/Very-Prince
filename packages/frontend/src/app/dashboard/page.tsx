@@ -16,6 +16,7 @@ import { EmptyMaintainersState } from "@/components/EmptyMaintainersState";
 import { WebhookSettings } from "@/components/WebhookSettings";
 import { ApiKeySettings } from "@/components/ApiKeySettings";
 import { FundingHistoryChart } from "@/components/FundingHistoryChart";
+import { SuspenseOrchestratorProvider, OrchestratedBoundary } from "@/components/SuspenseOrchestrator";
 import { useFreighter } from "@/hooks/useFreighter";
 import {
   readOrganization,
@@ -291,7 +292,13 @@ function DashboardPageInner() {
             {/* ── Content ── */}
             {organization && (
               activeTab === "overview" ? (
-                <>
+                <SuspenseOrchestratorProvider fallback={
+                  <div className="space-y-8 animate-pulse">
+                     <div className="h-32 bg-white/5 rounded-xl w-full" />
+                     <div className="h-64 bg-white/5 rounded-xl w-full" />
+                     <div className="h-48 bg-white/5 rounded-xl w-full" />
+                  </div>
+                }>
                   <div className="glass-card mb-8 p-6">
                     <div className="mb-4 flex items-center gap-3">
                       <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-stellar-purple to-stellar-teal font-bold text-white">
@@ -351,7 +358,15 @@ function DashboardPageInner() {
                   </div>
 
                   <div className="mb-8">
-                    <FundingHistoryChart orgId={organization.id} />
+                    <Suspense fallback={
+                      <OrchestratedBoundary id="funding" isReady={false}>
+                        <div className="h-64 w-full bg-white/5 animate-pulse rounded-xl" />
+                      </OrchestratedBoundary>
+                    }>
+                      <OrchestratedBoundary id="funding" isReady={true}>
+                        <FundingHistoryChart orgId={organization.id} />
+                      </OrchestratedBoundary>
+                    </Suspense>
                   </div>
 
                   {/* ── Maintainer Balances ── */}
@@ -373,14 +388,13 @@ function DashboardPageInner() {
                     </div>
                   )}
 
-                  {/* ── Empty State ── */}
                   {optimisticBalances.length === 0 && !isLoading && (
                     <EmptyMaintainersState
                       orgId={organization.id}
                       onAllocateClick={() => setShowAllocateModal(true)}
                     />
                   )}
-                </>
+                </SuspenseOrchestratorProvider>
               ) : (
                 <div className="space-y-8">
                   <ApiKeySettings orgId={organization.id} publicKey={publicKey || ""} />

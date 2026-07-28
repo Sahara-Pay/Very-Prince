@@ -2627,4 +2627,97 @@ mod mpt_and_verifier_tests {
         let result = client.try_token_transfer_from(&spender, &from, &to, &0_i128);
         assert!(result.is_err());
     }
+
+    #[contract]
+    pub struct MockToken;
+
+    #[contractimpl]
+    impl MockToken {
+        pub fn mint(env: Env, to: Address, amount: i128) {
+            let mut supply: i128 = env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0);
+            supply += amount;
+            env.storage().instance().set(&Symbol::new(&env, "supply"), &supply);
+            
+            // To simulate the balance update, we can also maintain a balance mapping if needed.
+            // But flash_mint only relies on `total_supply`, `mint` and `burn`.
+        }
+        
+        pub fn burn(env: Env, _from: Address, amount: i128) {
+            let mut supply: i128 = env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0);
+            supply -= amount;
+            env.storage().instance().set(&Symbol::new(&env, "supply"), &supply);
+        }
+        
+        pub fn total_supply(env: Env) -> i128 {
+            env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0)
+        }
+        
+        pub fn name(env: Env) -> String { String::from_str(&env, "Mock") }
+        pub fn symbol(env: Env) -> String { String::from_str(&env, "MCK") }
+        pub fn decimals(_env: Env) -> u32 { 7 }
+    }
+
+    #[contract]
+    pub struct MockReceiver;
+
+    #[contractimpl]
+    impl MockReceiver {
+        pub fn execute_flash_mint(env: Env, _amount: i128, args: Vec<soroban_sdk::Val>) {
+            let compliant: bool = args.get(0).unwrap().into_val(&env);
+            if !compliant {
+                let token_addr: Address = args.get(1).unwrap().into_val(&env);
+                env.invoke_contract::<()>(&token_addr, &Symbol::new(&env, "mint"), (env.current_contract_address(), 100i128).into_val(&env));
+            }
+        }
+    }
+
+    #[test]
+    fn test_flash_mint_compliant() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let token_id = env.register(MockToken, ());
+        let registry_id = env.register(PayoutRegistry, ());
+        let client = PayoutRegistryClient::new(&env, &registry_id);
+
+        let protocol_admin = Address::generate(&env);
+        let mut admins = Vec::new(&env);
+        admins.push_back(protocol_admin.clone());
+
+        client.init(&token_id, &admins, &1);
+
+        let receiver_id = env.register(MockReceiver, ());
+        
+        let mut args = Vec::new(&env);
+        args.push_back(true.into_val(&env));
+
+        // This should succeed and not panic
+        client.flash_mint(&receiver_id, &1000i128, &args);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #38)")]
+    fn test_flash_mint_non_compliant() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let token_id = env.register(MockToken, ());
+        let registry_id = env.register(PayoutRegistry, ());
+        let client = PayoutRegistryClient::new(&env, &registry_id);
+
+        let protocol_admin = Address::generate(&env);
+        let mut admins = Vec::new(&env);
+        admins.push_back(protocol_admin.clone());
+
+        client.init(&token_id, &admins, &1);
+
+        let receiver_id = env.register(MockReceiver, ());
+        
+        let mut args = Vec::new(&env);
+        args.push_back(false.into_val(&env));
+        args.push_back(token_id.into_val(&env)); // Pass token address to mint maliciously
+
+        // This should panic with FlashMintSupplyMismatch (38)
+        client.flash_mint(&receiver_id, &1000i128, &args);
+    }
 }

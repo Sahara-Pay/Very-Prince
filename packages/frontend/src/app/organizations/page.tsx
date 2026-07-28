@@ -6,20 +6,23 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { readOrganization, readOrgBudget, readMaintainers } from "@/lib/sorobanClient";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { WalletButton } from "@/components/WalletButton";
 import { RegisterOrgModal } from "@/components/RegisterOrgModal";
 import type { Org } from "@/lib/api";
 import { useSSEWithSWR } from "@/hooks/useSSE";
+import { usePredictivePrefetch } from "@/hooks/usePredictivePrefetch";
+import { prefetchOrganizationIntent } from "@/lib/predictivePrefetch";
+import type { PrefetchTarget } from "@/lib/predictivePrefetch";
 
 export default function OrganizationsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
+  const cardEls = useRef(new Map<string, HTMLElement>());
 
   // Enable SSE for real-time updates
   useSSEWithSWR();
@@ -42,14 +45,19 @@ export default function OrganizationsPage() {
   };
 
   const router = useRouter();
+  const queryClient = useQueryClient();
 
-const handlePrefetchOrg = (orgId: string) => {
-  router.prefetch(`/dashboard?org=${orgId}`);
-  // Warm the Soroban read calls so they're cached/in-flight before the click
-  void readOrganization(orgId).catch(() => {});
-  void readOrgBudget(orgId).catch(() => {});
-  void readMaintainers(orgId).catch(() => {});
-};
+  const handlePrefetchOrg = useCallback(
+    (orgId: string) => {
+      void prefetchOrganizationIntent(orgId, { queryClient, router });
+    },
+    [queryClient, router],
+  );
+
+  const setCardEl = useCallback((orgId: string, el: HTMLElement | null) => {
+    if (el) cardEls.current.set(orgId, el);
+    else cardEls.current.delete(orgId);
+  }, []);
 
   // Build API URL with search and pagination
   const apiUrl = useMemo(() => {
@@ -72,6 +80,32 @@ const handlePrefetchOrg = (orgId: string) => {
   const orgs = data?.data || [];
   const totalPages = data?.meta?.totalPages || 1;
   const totalCount = data?.meta?.totalCount || 0;
+
+  // Trajectory prefetch — fires ~100–300ms before click when the cursor
+  // is aiming at an org card. Hover/focus handlers remain as a fallback.
+  const predictiveTargets: PrefetchTarget[] = useMemo(
+    () =>
+      orgs.map((org: Org) => ({
+        id: `org:${org.id}`,
+        getRect: () => {
+          const el = cardEls.current.get(org.id);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return null;
+          return {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+          };
+        },
+        prefetch: (signal: AbortSignal) =>
+          prefetchOrganizationIntent(org.id, { queryClient, router, signal }),
+      })),
+    [orgs, queryClient, router],
+  );
+
+  usePredictivePrefetch({ targets: predictiveTargets });
 
   const handleLoadMore = () => {
     if (page < totalPages) {
@@ -147,6 +181,7 @@ const handlePrefetchOrg = (orgId: string) => {
             <Link
               key={org.id}
               href={`/dashboard?org=${org.id}`}
+              ref={(el) => setCardEl(org.id, el)}
               onMouseEnter={() => handlePrefetchOrg(org.id)}
               onFocus={() => handlePrefetchOrg(org.id)}
               className="glass-card group flex flex-col p-6 transition-all hover:border-stellar-purple/50 hover:bg-white/[0.08]"

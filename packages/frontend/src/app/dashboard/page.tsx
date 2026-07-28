@@ -132,79 +132,14 @@ function DashboardPageInner() {
   });
   const orgBudget = orgData?.budget ?? null;
 
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [, startTransition] = useTransition();
-
-  // ── Handlers ──────────────────────────────────────────────────────────────
-
-  /** Fetch org data, budget, and all maintainer balances from Soroban RPC. */
-  const handleLookupOrg = useCallback(async (idOverride?: string) => {
-    const id = (idOverride ?? orgIdInput).trim();
-    if (!id) return;
-    setIsLoading(true);
-    setError(null);
-    setBalances([]);
-
-    try {
-      let maintainerAddresses: string[];
-      if (id === lookupOrgId) {
-        // Same org already tracked by the query — just refetch it, then
-        // read maintainers directly since we need the address list now.
-        await refetchOrgData();
-        maintainerAddresses = await readMaintainers(id);
-      } else {
-        setLookupOrgId(id);
-        maintainerAddresses = await readMaintainers(id);
-      }
-
-      const balanceResults = await Promise.all(
-        maintainerAddresses.map((addr) => readClaimableBalance(addr))
-      );
-      setBalances(balanceResults);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      setError(msg);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [orgIdInput, lookupOrgId, refetchOrgData]);
-
-  /** Auto-lookup when ?org= param is present in the URL. */
-  useEffect(() => {
-    const orgFromUrl = searchParams.get("org");
-    if (orgFromUrl) {
-      setOrgIdInput(orgFromUrl);
-      void handleLookupOrg(orgFromUrl);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  /** Prepare, sign, and submit the claim_payout transaction. */
-  const handleClaim = async (address: string) => {
-    if (!isConnected || !publicKey) return;
-    setClaimingAddress(address);
-    try {
-      const unsignedXdr = await buildClaimPayoutTransaction(address);
-      const signedXdr = await signTransaction(unsignedXdr);
-
-      // Optimistically zero out the balance right after signing, before
-      // waiting for full on-chain confirmation.
-      startTransition(() => {
-        dispatchOptimisticBalance({ type: "claim", address });
-      });
-
-      await submitSignedTransaction(signedXdr);
-      void handleLookupOrg();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Claim failed");
-      // Reconcile immediately — don't leave a phantom zeroed balance if the
-      // submission actually failed after the optimistic update fired.
-      void handleLookupOrg();
-    } finally {
-      setClaimingAddress(null);
-    }
+interface DashboardPageProps {
+  searchParams: {
+    org?: string;
   };
+}
+
+export default function DashboardPage({ searchParams }: DashboardPageProps) {
+  const initialOrgId = searchParams.org;
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -474,67 +409,6 @@ function DashboardPageInner() {
           </>
         )}
       </main>
-
-      {showFundModal && organization && (
-        <ErrorBoundary variant="inline">
-        <FundOrgModal
-          orgId={organization.id}
-          onClose={() => setShowFundModal(false)}
-          onSuccess={() => {
-            setShowFundModal(false);
-            void handleLookupOrg();
-          }}
-        />
-        </ErrorBoundary>
-      )}
-
-      {showAllocateModal && organization && (
-        <ErrorBoundary variant="inline">
-        <AllocatePayoutModal
-          orgId={organization.id}
-          onClose={() => setShowAllocateModal(false)}
-          onSuccess={(data) => {
-            startTransition(() => {
-              dispatchOptimisticBalance({ type: "allocate", ...data });
-            });
-            // The modal itself handles the transaction submission
-            // and we'll eventually refresh data when confirmed.
-            setTimeout(() => void handleLookupOrg(), 5000);
-          }}
-          onError={() => void handleLookupOrg()}
-        />
-        </ErrorBoundary>
-      )}
     </div>
-  );
-}
-
-// ── Root Export (Suspense boundary required for useSearchParams) ──────────────
-
-export default function DashboardPage() {
-  return (
-    <Suspense fallback={<DashboardLoading />}>
-      <DashboardPageInner />
-    </Suspense>
-  );
-}
-
-// ── Icons ─────────────────────────────────────────────────────────────────────
-
-function LockIcon() {
-  return (
-    <svg
-      className="h-7 w-7 text-stellar-purple"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={1.5}
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"
-      />
-    </svg>
   );
 }

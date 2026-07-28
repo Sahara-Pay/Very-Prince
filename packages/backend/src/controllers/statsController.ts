@@ -289,31 +289,31 @@ export const statsController = {
   /**
    * Get the historical funding events and cumulative funding over time for a specific organization.
    *
+   * This method supports streaming by returning an AsyncIterable that fetches events in pages.
+   *
    * @param orgId - The ID/Symbol of the organization
    */
-  async getOrgFundingHistory(orgId: string): Promise<FundingHistoryResponse[]> {
-    const cacheKey = `stats:funding-history:${orgId}`;
-    const cached = await safeGet(cacheKey);
-    if (cached) {
-      return JSON.parse(cached);
-    }
-
-    const events = await prismaRead.fundingEvent.findMany({
-      where: {
-        orgId,
+  async *getOrgFundingHistoryStream(orgId: string): AsyncIterable<FundingHistoryResponse> {
+    const iterator = cursorIterable(
+      async (cursor) => {
+        return prismaRead.fundingEvent.findMany({
+          where: { orgId },
+          orderBy: { createdAt: "asc" },
+          take: 1000,
+          ...(cursor ? { skip: 1, cursor: { id_createdAt: cursor } } : {}),
+        });
       },
-      orderBy: {
-        createdAt: "asc",
-      },
-    });
+      (event) => ({ id: event.id, createdAt: event.createdAt }),
+      1000
+    );
 
     let cumulativeStroops = 0n;
 
-    const history = events.map((event) => {
+    for await (const event of iterator) {
       const amountStroops = BigInt(event.amountStroops);
       cumulativeStroops += amountStroops;
 
-      return {
+      yield {
         id: event.id,
         orgId: event.orgId,
         from: event.from,
@@ -324,11 +324,18 @@ export const statsController = {
         txHash: event.txHash,
         createdAt: event.createdAt.toISOString(),
       };
-    });
+    }
+  },
 
-    // Cache for 1 minute (60s)
-    await safeSet(cacheKey, JSON.stringify(history), 60);
-
+  /**
+   * Legacy version of getOrgFundingHistory that returns the full array.
+   * Keeps compatibility with existing tRPC routes until they are refactored.
+   */
+  async getOrgFundingHistory(orgId: string): Promise<FundingHistoryResponse[]> {
+    const history: FundingHistoryResponse[] = [];
+    for await (const record of this.getOrgFundingHistoryStream(orgId)) {
+      history.push(record);
+    }
     return history;
   },
 } as const;

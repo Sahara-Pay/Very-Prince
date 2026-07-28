@@ -14,6 +14,7 @@ import { queryComplexityMiddleware } from './queryComplexityMiddleware.js';
 import { deterministicStringify, cyrb53, compare } from './diff.js';
 import { safeGet, safeSet } from '../services/cache.js';
 import { tokenBucketMiddleware } from './tokenBucketMiddleware.js';
+import { streamAsyncEnvelope } from '../utils/streamingJson.js';
 
 const procedures = appRouter._def.procedures as Record<string, unknown>;
 
@@ -44,11 +45,20 @@ export async function configureTRPC(server: FastifyInstance) {
       // which procedures are hot across the entire tRPC surface.
       evictionEngine.recordAccess(`trpc:${path}`);
       
-      // Simple routing - this is a basic implementation
-      // In a real setup, you'd use the proper tRPC handler
-      const result = await handleTRPCRequest(path, body);
       const { result, cacheable } = await handleTRPCRequest(path, body, ctx);
       
+      // ─── Streaming Branch ───────────────────────────────────────────────────
+      // If the result is an AsyncIterable (e.g. from getOrgFundingHistoryStream),
+      // we bypass differential sync and stream the response directly to the buffer.
+      // This prevents OOM on massive ledger histories.
+      if (result && typeof result === 'object' && Symbol.asyncIterator in result) {
+        return await streamAsyncEnvelope(
+          reply.raw,
+          { status: 'full', hash: 'streamed' },
+          () => result as AsyncIterable<any>
+        );
+      }
+
       // Only queries are safe to serve as 304 Not Modified: mutations must
       // always return their actual result body to the caller.
       if (cacheable) {

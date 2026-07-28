@@ -105,6 +105,14 @@ export const appRouter = t.router({
           message: "Organization creation not yet implemented in tRPC",
         };
       }),
+
+    getMaintainerBalances: t.procedure
+      .input(z.object({
+        orgId: z.string().min(1).max(32),
+      }))
+      .query(async ({ input }) => {
+        return await organizationService.getMaintainerBalances(input.orgId);
+      }),
   }),
 
   contract: t.router({
@@ -160,7 +168,10 @@ export const appRouter = t.router({
         (input: { orgId: string }) => trpcCacheKeys.statsFundingHistory(input.orgId),
         TRPC_CACHE_TTL.STATS_FUNDING_HISTORY,
       ))
-      .query(({ input }) => statsController.getOrgFundingHistory(input.orgId)),
+      .query(({ input }) => {
+        // Return an AsyncIterable to opt-in to streaming serialization
+        return statsController.getOrgFundingHistoryStream(input.orgId);
+      }),
   }),
 
   analytics: t.router({

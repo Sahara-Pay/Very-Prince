@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useSuspenseQuery } from "@tanstack/react-query";
+import { trpcClient } from "@/trpc/client";
 import { DateRangePicker, DateRange } from "./ui/DateRangePicker";
 
 interface FundingHistoryPoint {
@@ -20,44 +21,16 @@ interface FundingHistoryChartProps {
   orgId: string;
 }
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001/api";
-
-const fetcher = async (url: string) => {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error("Failed to fetch funding history");
-  }
-  return res.json() as Promise<FundingHistoryPoint[]>;
-};
-
 export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
-  const { data, error, isLoading } = useQuery({
+  const { data } = useSuspenseQuery({
     queryKey: ["funding-history", orgId],
-    queryFn: () => fetcher(`${BACKEND_URL}/stats/funding-history/${orgId}`),
-    enabled: Boolean(orgId),
+    queryFn: () => trpcClient.stats.getFundingHistory.query({ orgId }),
     staleTime: 5000,
   });
 
   const [hoveredPoint, setHoveredPoint] = useState<FundingHistoryPoint | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
   const [dateRange, setDateRange] = useState<DateRange>({ fromDate: null, toDate: null });
-
-  if (isLoading) {
-    return (
-      <div className="glass-card p-6 animate-pulse space-y-4">
-        <div className="h-6 w-48 bg-white/10 rounded" />
-        <div className="h-48 bg-white/5 rounded-xl" />
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="glass-card p-6 border-red-500/30 bg-red-500/5 text-center">
-        <p className="text-red-400 text-sm">Failed to load funding history</p>
-      </div>
-    );
-  }
 
   if (!data || data.length === 0) {
     return (

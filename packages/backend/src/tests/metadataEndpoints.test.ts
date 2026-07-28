@@ -143,6 +143,7 @@ vi.mock("../services/cache.js", () => ({
 
 vi.mock("../services/db.js", () => ({
   prisma: mockPrisma,
+  prismaRead: mockPrisma,
 }));
 
 // ─── Mock: services/organizationService ─────────────────────────────────────

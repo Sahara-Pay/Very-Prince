@@ -34,7 +34,7 @@ vi.mock('../services/cache.js', () => ({
 }));
 
 vi.mock('../services/db.js', () => ({
-  prisma: {
+  prismaRead: {
     $queryRawUnsafe: queryRawUnsafeMock,
     invoice: { aggregate: vi.fn() },
     fundingEvent: { findMany: findManyMock },

@@ -1,0 +1,118 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Cilium Helm values – eBPF network observability for very-prince
+#
+# Install / upgrade:
+#   helm repo add cilium https://helm.cilium.io
+#   helm upgrade --install cilium cilium/cilium \
+#     --version 1.15.6 \
+#     --namespace kube-system \
+#     -f k8s/observability/cilium-values.yaml
+#
+# Cilium replaces kube-proxy and provides kernel-level TCP/socket visibility
+# via eBPF programs loaded into the host kernel – zero application changes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Core eBPF datapath ───────────────────────────────────────────────────────
+kubeProxyReplacement: true          # full kube-proxy replacement via eBPF
+bpf:
+  masquerade: true                  # eBPF-based masquerade (no iptables)
+  tproxy: true                      # transparent proxy for L7 visibility
+  lbExternalClusterIP: true
+
+# ── Hubble – in-kernel network observability ─────────────────────────────────
+hubble:
+  enabled: true
+
+  # Export L4/L7 flow telemetry from the eBPF ring buffer
+  metrics:
+    enabled:
+      - dns:query;ignoreAAAA
+      - drop
+      - tcp
+      - flow
+      - icmp
+      - http
+      - "tcp:sourceContext=workload-name|reserved-identity;destinationContext=workload-name|reserved-identity;labelsContext=source_namespace,destination_namespace"
+      - "flow:sourceContext=workload-name;destinationContext=workload-name;labelsContext=source_namespace,destination_namespace"
+    serviceMonitor:
+      # Hubble metrics are scraped by kube-prometheus-stack's Prometheus
+      enabled: true
+      labels:
+        release: kube-prometheus-stack   # must match Prometheus CR's serviceMonitorSelector
+    dashboards:
+      enabled: true
+      namespace: monitoring
+      annotations:
+        grafana_folder: "Cilium"
+
+  relay:
+    enabled: true
+    replicas: 2
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+  ui:
+    enabled: true
+    replicas: 1
+    service:
+      type: ClusterIP
+    ingress:
+      enabled: false      # expose via port-forward or your own Ingress rule
+
+# ── Socket LB + TCP latency tracing ─────────────────────────────────────────
+socketLB:
+  enabled: true
+
+# Collect per-endpoint bandwidth + latency from the kernel socket buffer
+bandwidthManager:
+  enabled: true
+
+# ── Container network policy ─────────────────────────────────────────────────
+policyEnforcementMode: "default"
+
+# ── Resource limits for the Cilium agent DaemonSet ──────────────────────────
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ── Operator ────────────────────────────────────────────────────────────────
+operator:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      labels:
+        release: kube-prometheus-stack
+
+# ── Prometheus integration ───────────────────────────────────────────────────
+prometheus:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+
+# ── Tolerations – run on all nodes including taints ─────────────────────────
+tolerations:
+  - operator: Exists
+
+# Node selector – target all Linux worker nodes
+nodeSelector:
+  kubernetes.io/os: linux

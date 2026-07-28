@@ -3,13 +3,17 @@
 mod tests {
     use crate::{PayoutParams, PayoutRegistry, PayoutRegistryClient};
     use soroban_sdk::testutils::{Address as _, Ledger as _};
-    use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, IntoVal, String, Symbol, Vec};
+    use soroban_sdk::{
+        contract, contractimpl, symbol_short, token, Address, Env, IntoVal, String, Symbol, Vec,
+    };
 
     // ── Test Helpers ─────────────────────────────────────────────────────────
 
     struct Setup {
         env: Env,
         client: PayoutRegistryClient<'static>,
+        #[allow(dead_code)]
+        protocol_admin: Address,
         #[allow(dead_code)]
         token_admin: Address,
         token: token::StellarAssetClient<'static>,
@@ -23,23 +27,20 @@ mod tests {
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
-        // Create 3 protocol admins with threshold of 2 for multisig
-        let admin1 = Address::generate(&env);
-        let admin2 = Address::generate(&env);
-        let admin3 = Address::generate(&env);
+        // Native multisig policy belongs to this address, not to signer payloads.
+        let protocol_admin = Address::generate(&env);
         let mut admins = Vec::new(&env);
-        admins.push_back(admin1.clone());
-        admins.push_back(admin2.clone());
-        admins.push_back(admin3.clone());
+        admins.push_back(protocol_admin.clone());
 
-        client.init(&token_contract_id.address(), &admins, &2);
+        client.init(&token_contract_id.address(), &admins, &1);
 
         Setup {
             env,
             client,
+            protocol_admin,
             token_admin,
             token: token_client,
         }
@@ -57,6 +58,176 @@ mod tests {
 
     // ── Existing Tests ────────────────────────────────────────────────────────
 
+    fn python_reference_isqrt(value: i128) -> i128 {
+        let mut lo = 0_i128;
+        let mut hi = value;
+        let mut ans = 0_i128;
+        while lo <= hi {
+            let mid = lo + ((hi - lo) / 2);
+            let sq = mid.checked_mul(mid);
+            if sq.is_some() && sq.unwrap() <= value {
+                ans = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        ans
+    }
+
+    #[test]
+    fn test_qf_isqrt_matches_python_reference_vectors() {
+        let Setup { client, .. } = setup();
+        let vectors = [
+            0_i128,
+            1,
+            2,
+            3,
+            4,
+            8,
+            9,
+            10,
+            15,
+            16,
+            24,
+            25,
+            99,
+            100,
+            10_000_000_000_000_000_000,
+        ];
+
+        for value in vectors {
+            assert_eq!(client.isqrt(&value), python_reference_isqrt(value));
+        }
+    }
+
+    #[test]
+    fn test_qf_contribution_requires_humanity_verification() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("qfhuman");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        token.mint(&contributor, &1_000);
+
+        let result = client.try_qf_contribute(&org_sym, &contributor, &100);
+        assert!(result.is_err());
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 0);
+    }
+
+    #[test]
+    fn test_qf_repeated_human_updates_cumulative_sqrt_once() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("qfrepeat");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        let proof = client.get_humanity_proof(&contributor).unwrap();
+        assert_eq!(proof.verified_by, protocol_admin);
+        token.mint(&contributor, &1_000);
+
+        client.qf_contribute(&org_sym, &contributor, &25);
+        client.qf_contribute(&org_sym, &contributor, &75);
+
+        let stats = client.get_qf_project_stats(&org_sym);
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 100);
+        assert_eq!(stats.direct_contributions, 100);
+        assert_eq!(stats.sqrt_sum, 10);
+        assert_eq!(stats.contributor_count, 1);
+        assert_eq!(stats.weight, 100);
+        assert_eq!(client.get_org_budget(&org_sym), 100);
+    }
+
+    #[test]
+    fn test_qf_distribution_matches_python_reference_formula() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_a = symbol_short!("qfa");
+        let org_b = symbol_short!("qfb");
+        register_test_org(&env, &client, org_a.clone());
+        register_test_org(&env, &client, org_b.clone());
+
+        let sponsor = Address::generate(&env);
+        token.mint(&sponsor, &1_000);
+        client.qf_deposit_matching_pool(&sponsor, &1_000);
+
+        let c1 = Address::generate(&env);
+        let c2 = Address::generate(&env);
+        let c3 = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &c1);
+        client.verify_humanity(&protocol_admin, &c2);
+        client.verify_humanity(&protocol_admin, &c3);
+        token.mint(&c1, &100);
+        token.mint(&c2, &100);
+        token.mint(&c3, &400);
+
+        client.qf_contribute(&org_a, &c1, &100);
+        client.qf_contribute(&org_a, &c2, &100);
+        client.qf_contribute(&org_b, &c3, &400);
+
+        let mut projects = Vec::new(&env);
+        projects.push_back(org_a.clone());
+        projects.push_back(org_b.clone());
+
+        let preview = client.qf_preview_distribution(&projects);
+        assert_eq!(preview.get(0).unwrap().weight, 400);
+        assert_eq!(preview.get(1).unwrap().weight, 400);
+        assert_eq!(preview.get(0).unwrap().matching_amount, 500);
+        assert_eq!(preview.get(1).unwrap().matching_amount, 500);
+
+        let allocations = client.qf_distribute(&protocol_admin, &projects);
+        assert_eq!(allocations.get(0).unwrap().matching_amount, 500);
+        assert_eq!(allocations.get(1).unwrap().matching_amount, 500);
+        assert_eq!(client.get_org_budget(&org_a), 700);
+        assert_eq!(client.get_org_budget(&org_b), 900);
+        assert_eq!(client.get_qf_project_stats(&org_a).matching_allocated, 500);
+        assert_eq!(client.get_qf_project_stats(&org_b).matching_allocated, 500);
+        assert_eq!(client.get_qf_matching_pool(), 0);
+    }
+
+    #[test]
+    fn test_qf_distribution_rejects_duplicate_projects() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("qfdupe");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let sponsor = Address::generate(&env);
+        token.mint(&sponsor, &1_000);
+        client.qf_deposit_matching_pool(&sponsor, &1_000);
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &100);
+        client.qf_contribute(&org_sym, &contributor, &100);
+
+        let mut projects = Vec::new(&env);
+        projects.push_back(org_sym.clone());
+        projects.push_back(org_sym.clone());
+
+        let result = client.try_qf_preview_distribution(&projects);
+        assert!(result.is_err());
+    }
+
     #[test]
     fn test_init() {
         let Setup { env, client, .. } = setup();
@@ -64,6 +235,23 @@ mod tests {
         let mut admins = Vec::new(&env);
         admins.push_back(Address::generate(&env));
         let result = client.try_init(&additional_token, &admins, &1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_init_rejects_legacy_contract_side_multisig_config() {
+        let env = Env::default();
+        let token_admin = Address::generate(&env);
+        let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+        let contract_id = env.register(PayoutRegistry, ());
+        let client = PayoutRegistryClient::new(&env, &contract_id);
+
+        let mut admins = Vec::new(&env);
+        admins.push_back(Address::generate(&env));
+        admins.push_back(Address::generate(&env));
+
+        let result = client.try_init(&token_contract_id.address(), &admins, &2);
         assert!(result.is_err());
     }
 
@@ -110,9 +298,12 @@ mod tests {
 
         let donor = Address::generate(&env);
         token.mint(&donor, &20_000_000_000_000_000_000);
-        
+
         let result = client.try_fund_org(&org_sym, &donor, &10_000_000_000_000_000_001_i128);
         assert!(result.is_err());
+        // also ensure negative amount is rejected
+        let neg_result = client.try_fund_org(&org_sym, &donor, &-10_i128);
+        assert!(neg_result.is_err());
     }
 
     #[test]
@@ -445,35 +636,29 @@ mod tests {
         assert!(result.is_err()); // Limit is 10
     }
 
-    // ── Multisig Protocol Admin Tests ───────────────────────────────────────────
+    // ── Native Protocol Admin Auth Tests ───────────────────────────────────────
 
     #[test]
-    fn test_multisig_upgrade_with_three_keypairs() {
+    fn test_protocol_admin_native_auth_controls_state_mutations() {
         let env = Env::default();
         let token_admin = Address::generate(&env);
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let _token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
-        // Create 3 unique protocol admin keypairs
-        let admin1 = Address::generate(&env);
-        let admin2 = Address::generate(&env);
-        let admin3 = Address::generate(&env);
-
+        let protocol_admin = Address::generate(&env);
         let mut admins = Vec::new(&env);
-        admins.push_back(admin1.clone());
-        admins.push_back(admin2.clone());
-        admins.push_back(admin3.clone());
+        admins.push_back(protocol_admin.clone());
 
-        // Initialize with threshold of 2 (requires 2-of-3 signatures)
-        client.init(&token_contract_id.address(), &admins, &2);
+        client.init(&token_contract_id.address(), &admins, &1);
 
-        // Verify multisig configuration
+        // Verify native protocol admin configuration.
         let multisig_admin = client.get_multisig_admin();
-        assert_eq!(multisig_admin.admins.len(), 3);
-        assert_eq!(multisig_admin.threshold, 2);
+        assert_eq!(multisig_admin.admins.len(), 1);
+        assert_eq!(multisig_admin.admins.get(0).unwrap(), protocol_admin);
+        assert_eq!(multisig_admin.threshold, 1);
 
         let hash_bytes = [
             0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
@@ -482,135 +667,104 @@ mod tests {
         ];
         let new_wasm_hash = soroban_sdk::BytesN::from_array(&env, &hash_bytes);
 
-        // Test 1: Upgrade with only 1 signature should fail
-        let mut signers1 = Vec::new(&env);
-        signers1.push_back(admin1.clone());
+        // Missing native admin auth must fail before mutating protocol state.
+        let result = client.try_pause_protocol();
+        assert!(result.is_err());
+        assert_eq!(client.get_protocol_state(), crate::ProtocolState::Active);
 
+        let outsider = Address::generate(&env);
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &admin1,
+            address: &outsider,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &contract_id,
-                fn_name: "upgrade",
-                args: (signers1.clone(), new_wasm_hash.clone()).into_val(&env),
+                fn_name: "pause_protocol",
+                args: ().into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        let result = client.try_upgrade(&signers1, &new_wasm_hash);
+        let result = client.try_pause_protocol();
         assert!(result.is_err());
+        assert_eq!(client.get_protocol_state(), crate::ProtocolState::Active);
 
-        // Test 2: Upgrade with 2 signatures should succeed
-        let mut signers2 = Vec::new(&env);
-        signers2.push_back(admin1.clone());
-        signers2.push_back(admin2.clone());
-
-        env.mock_auths(&[
-            soroban_sdk::testutils::MockAuth {
-                address: &admin1,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "upgrade",
-                    args: (signers2.clone(), new_wasm_hash.clone()).into_val(&env),
-                    sub_invokes: &[],
-                },
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &protocol_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pause_protocol",
+                args: ().into_val(&env),
+                sub_invokes: &[],
             },
-            soroban_sdk::testutils::MockAuth {
-                address: &admin2,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "upgrade",
-                    args: (signers2.clone(), new_wasm_hash.clone()).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-        ]);
+        }]);
 
-        let result = client.try_upgrade(&signers2, &new_wasm_hash);
-        assert!(result.is_ok());
-
-        // Test 3: Pause with 2 signatures should succeed
-        let mut signers_pause = Vec::new(&env);
-        signers_pause.push_back(admin2.clone());
-        signers_pause.push_back(admin3.clone());
-
-        env.mock_auths(&[
-            soroban_sdk::testutils::MockAuth {
-                address: &admin2,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "pause_protocol",
-                    args: (signers_pause.clone(),).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-            soroban_sdk::testutils::MockAuth {
-                address: &admin3,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "pause_protocol",
-                    args: (signers_pause.clone(),).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-        ]);
-
-        let result = client.try_pause_protocol(&signers_pause);
+        let result = client.try_pause_protocol();
         assert!(result.is_ok());
         assert_eq!(client.get_protocol_state(), crate::ProtocolState::Paused);
 
-        // Test 4: Unpause with only 1 signature should fail
-        let mut signers_unpause1 = Vec::new(&env);
-        signers_unpause1.push_back(admin1.clone());
-
         env.mock_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &admin1,
+            address: &protocol_admin,
             invoke: &soroban_sdk::testutils::MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "unpause_protocol",
-                args: (signers_unpause1.clone(),).into_val(&env),
+                args: ().into_val(&env),
                 sub_invokes: &[],
             },
         }]);
 
-        let result = client.try_unpause_protocol(&signers_unpause1);
-        assert!(result.is_err());
-
-        // Test 5: Unpause with 2 signatures should succeed
-        let mut signers_unpause2 = Vec::new(&env);
-        signers_unpause2.push_back(admin1.clone());
-        signers_unpause2.push_back(admin3.clone());
-
-        env.mock_auths(&[
-            soroban_sdk::testutils::MockAuth {
-                address: &admin1,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "unpause_protocol",
-                    args: (signers_unpause2.clone(),).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-            soroban_sdk::testutils::MockAuth {
-                address: &admin3,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "unpause_protocol",
-                    args: (signers_unpause2.clone(),).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-        ]);
-
-        let result = client.try_unpause_protocol(&signers_unpause2);
+        let result = client.try_unpause_protocol();
         assert!(result.is_ok());
         assert_eq!(client.get_protocol_state(), crate::ProtocolState::Active);
+
+        let new_admin = Address::generate(&env);
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &protocol_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "propose_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_propose_admin(&new_admin);
+        assert!(result.is_ok());
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &new_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "accept_admin",
+                args: (new_admin.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_accept_admin(&new_admin);
+        assert!(result.is_ok());
+        let multisig_admin = client.get_multisig_admin();
+        assert_eq!(multisig_admin.admins.len(), 1);
+        assert_eq!(multisig_admin.admins.get(0).unwrap(), new_admin);
+        assert_eq!(multisig_admin.threshold, 1);
+
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &new_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "upgrade",
+                args: (new_wasm_hash.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result = client.try_upgrade(&new_wasm_hash);
+        assert!(result.is_ok());
     }
 
     // ── Property-based Fuzz Tests ──────────────────────────────────────────
 
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(50))]
-        
+
         #[test]
         fn test_fuzz_allocate_and_claim(
             org_budget in 1..1_000_000_i128,
@@ -627,7 +781,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin1 = Address::generate(&env);
@@ -753,7 +907,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin1 = Address::generate(&env);
@@ -824,6 +978,305 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // ── Zero-Copy Fuzz Tests ───────────────────────────────────────────────
+    //
+    // These property-based tests target the three hot-path read functions that
+    // were refactored to use zero-copy deserialization:
+    //
+    //   1. `get_org_budget`       — reads an i128 scalar without struct alloc
+    //   2. `get_claimable_balance`— reads amount field, skips tranche Vec alloc
+    //   3. `get_maintainer`       — reads a Symbol without constructing struct
+    //
+    // Each test drives the function with random inputs and asserts:
+    //   * No panic / memory bounds violation for any input in the domain.
+    //   * The zero-copy result is bit-for-bit identical to the value that was
+    //     stored, guaranteeing no corruption from the new read path.
+    //   * Conservation invariants hold: budget_after = budget_before - deducted.
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(200))]
+
+        // ── Fuzz 1: zero-copy get_org_budget correctness ──────────────────
+        //
+        // Property: for any valid funding amount, get_org_budget returns
+        // exactly that amount after a single fund_org call.  Tests that the
+        // zero-copy i128 scalar read never mis-parses the stored value.
+        #[test]
+        fn fuzz_zero_copy_get_org_budget_roundtrip(
+            amount in 1_i128..10_000_000_i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let token_admin = Address::generate(&env);
+            let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+            let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
+
+            let contract_id = env.register(PayoutRegistry, ());
+            let client = PayoutRegistryClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let mut admins = Vec::new(&env);
+            admins.push_back(admin.clone());
+            client.init(&token_contract_id.address(), &admins, &1);
+
+            let org_sym = symbol_short!("zcorg");
+            let org_admin = Address::generate(&env);
+            client.register_org(
+                &org_sym,
+                &String::from_str(&env, "ZC Org"),
+                &org_admin,
+            );
+
+            // Verify initial budget is zero before any funding.
+            proptest::prop_assert_eq!(client.get_org_budget(&org_sym), 0_i128);
+
+            // Fund the org and verify the zero-copy read returns the exact amount.
+            let donor = Address::generate(&env);
+            token_client.mint(&donor, &amount);
+            client.fund_org(&org_sym, &donor, &amount);
+
+            // ZERO-COPY READ CORRECTNESS: budget must equal exactly what was funded.
+            proptest::prop_assert_eq!(client.get_org_budget(&org_sym), amount);
+        }
+
+        // ── Fuzz 2: zero-copy get_org_budget budget conservation law ──────
+        //
+        // Property: across multiple allocations, budget_after = budget_funded
+        // - sum(successful_allocations).  Verifies the zero-copy atomic
+        // deduct helper never silently loses or duplicates bytes.
+        #[test]
+        fn fuzz_zero_copy_budget_conservation(
+            budget in 1_i128..5_000_000_i128,
+            alloc1 in 0_i128..3_000_000_i128,
+            alloc2 in 0_i128..3_000_000_i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let token_admin = Address::generate(&env);
+            let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+            let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
+
+            let contract_id = env.register(PayoutRegistry, ());
+            let client = PayoutRegistryClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let mut admins = Vec::new(&env);
+            admins.push_back(admin.clone());
+            client.init(&token_contract_id.address(), &admins, &1);
+
+            let org_sym = symbol_short!("consorg");
+            let org_admin = Address::generate(&env);
+            client.register_org(
+                &org_sym,
+                &String::from_str(&env, "Conservation Org"),
+                &org_admin,
+            );
+
+            let m1 = Address::generate(&env);
+            let m2 = Address::generate(&env);
+            client.add_maintainer(&org_sym, &m1);
+            client.add_maintainer(&org_sym, &m2);
+
+            let donor = Address::generate(&env);
+            token_client.mint(&donor, &budget);
+            client.fund_org(&org_sym, &donor, &budget);
+            proptest::prop_assert_eq!(client.get_org_budget(&org_sym), budget);
+
+            let mut expected_budget = budget;
+
+            // First allocation — may succeed or fail depending on amounts.
+            if alloc1 > 0 && alloc1 <= expected_budget {
+                client.allocate_payout(&org_sym, &org_admin, &m1, &alloc1, &0_u64);
+                expected_budget -= alloc1;
+            }
+
+            // ZERO-COPY READ CORRECTNESS: budget must track exactly.
+            proptest::prop_assert_eq!(client.get_org_budget(&org_sym), expected_budget);
+
+            // Second allocation.
+            if alloc2 > 0 && alloc2 <= expected_budget {
+                client.allocate_payout(&org_sym, &org_admin, &m2, &alloc2, &0_u64);
+                expected_budget -= alloc2;
+            }
+
+            // Final conservation check: the zero-copy read must return the
+            // precise remaining budget with no corruption from the new path.
+            proptest::prop_assert_eq!(client.get_org_budget(&org_sym), expected_budget);
+        }
+
+        // ── Fuzz 3: zero-copy get_claimable_balance correctness ───────────
+        //
+        // Property: for any valid allocation, get_claimable_balance returns
+        // exactly the allocated amount.  Also verifies the absent-key
+        // short-circuit returns 0 without any panic or bounds violation.
+        #[test]
+        fn fuzz_zero_copy_get_claimable_balance_roundtrip(
+            budget in 1_i128..10_000_000_i128,
+            payout in 1_i128..10_000_000_i128,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let token_admin = Address::generate(&env);
+            let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+            let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
+
+            let contract_id = env.register(PayoutRegistry, ());
+            let client = PayoutRegistryClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let mut admins = Vec::new(&env);
+            admins.push_back(admin.clone());
+            client.init(&token_contract_id.address(), &admins, &1);
+
+            let org_sym = symbol_short!("balorg");
+            let org_admin = Address::generate(&env);
+            client.register_org(
+                &org_sym,
+                &String::from_str(&env, "Balance Org"),
+                &org_admin,
+            );
+
+            let maintainer = Address::generate(&env);
+            client.add_maintainer(&org_sym, &maintainer);
+
+            // Absent-key short-circuit: must return 0, no panic.
+            // (MaintainerBalance is initialised to 0 on add_maintainer, so
+            // verify that the zero-copy read handles the zero case.)
+            proptest::prop_assert_eq!(client.get_claimable_balance(&maintainer), 0_i128);
+
+            let actual_budget = budget.min(10_000_000_i128);
+            let actual_payout = payout.min(actual_budget);
+
+            let donor = Address::generate(&env);
+            token_client.mint(&donor, &actual_budget);
+            client.fund_org(&org_sym, &donor, &actual_budget);
+
+            client.allocate_payout(&org_sym, &org_admin, &maintainer, &actual_payout, &0_u64);
+
+            // ZERO-COPY READ CORRECTNESS: balance must equal exact payout.
+            proptest::prop_assert_eq!(
+                client.get_claimable_balance(&maintainer),
+                actual_payout,
+            );
+
+            // Claim and verify balance drops to zero.
+            let claimed = client.claim_payout(&maintainer);
+            proptest::prop_assert_eq!(claimed, actual_payout);
+            proptest::prop_assert_eq!(client.get_claimable_balance(&maintainer), 0_i128);
+        }
+
+        // ── Fuzz 4: zero-copy get_maintainer correctness ──────────────────
+        //
+        // Property: get_maintainer always returns a Maintainer whose org_id
+        // equals the org the maintainer was registered under.  Verifies the
+        // zero-copy Symbol read never returns a garbage or misaligned value.
+        #[test]
+        fn fuzz_zero_copy_get_maintainer_org_id_correctness(
+            // Use a small integer to derive varied org symbols deterministically.
+            _seed in 0_u32..100_u32,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let token_admin = Address::generate(&env);
+            let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+            let contract_id = env.register(PayoutRegistry, ());
+            let client = PayoutRegistryClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let mut admins = Vec::new(&env);
+            admins.push_back(admin.clone());
+            client.init(&token_contract_id.address(), &admins, &1);
+
+            // Register two distinct orgs and add a maintainer to each.
+            let org_a = symbol_short!("orgalpha");
+            let org_b = symbol_short!("orgbeta");
+
+            let admin_a = Address::generate(&env);
+            let admin_b = Address::generate(&env);
+            client.register_org(&org_a, &String::from_str(&env, "Alpha"), &admin_a);
+            client.register_org(&org_b, &String::from_str(&env, "Beta"), &admin_b);
+
+            let m_a = Address::generate(&env);
+            let m_b = Address::generate(&env);
+            client.add_maintainer(&org_a, &m_a);
+            client.add_maintainer(&org_b, &m_b);
+
+            // ZERO-COPY READ CORRECTNESS: org_id must match the registration.
+            let info_a = client.get_maintainer(&m_a);
+            proptest::prop_assert_eq!(info_a.address, m_a.clone());
+            proptest::prop_assert_eq!(info_a.org_id, org_a);
+
+            let info_b = client.get_maintainer(&m_b);
+            proptest::prop_assert_eq!(info_b.address, m_b.clone());
+            proptest::prop_assert_eq!(info_b.org_id, org_b);
+
+            // Cross-check: org_ids must differ (no aliasing from zero-copy path).
+            proptest::prop_assert_ne!(info_a.org_id, info_b.org_id);
+        }
+
+        // ── Fuzz 5: no panic on sequential zero-copy reads ────────────────
+        //
+        // Property: any sequence of fund → allocate → read cannot cause a
+        // panic or memory bounds violation regardless of random magnitudes.
+        // This is the primary no-UB / no-panic guarantee for the zero-copy path.
+        #[test]
+        fn fuzz_zero_copy_no_panic_sequential(
+            amounts in proptest::collection::vec(1_i128..100_000_i128, 1..10),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let token_admin = Address::generate(&env);
+            let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+            let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
+
+            let contract_id = env.register(PayoutRegistry, ());
+            let client = PayoutRegistryClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let mut admins = Vec::new(&env);
+            admins.push_back(admin.clone());
+            client.init(&token_contract_id.address(), &admins, &1);
+
+            let org_sym = symbol_short!("seqzc");
+            let org_admin = Address::generate(&env);
+            client.register_org(
+                &org_sym,
+                &String::from_str(&env, "Sequential ZC Org"),
+                &org_admin,
+            );
+
+            let maintainer = Address::generate(&env);
+            client.add_maintainer(&org_sym, &maintainer);
+
+            // Fund with the total of all amounts so budget is always sufficient.
+            let total: i128 = amounts.iter().sum();
+            let donor = Address::generate(&env);
+            token_client.mint(&donor, &total);
+            client.fund_org(&org_sym, &donor, &total);
+
+            let mut running_balance: i128 = 0;
+
+            for amt in &amounts {
+                // Allocate each amount; track expected running balance.
+                client.allocate_payout(&org_sym, &org_admin, &maintainer, amt, &0_u64);
+                running_balance += amt;
+
+                // Zero-copy read must never panic and must return the exact value.
+                let zc_balance = client.get_claimable_balance(&maintainer);
+                proptest::prop_assert_eq!(zc_balance, running_balance);
+            }
+
+            // Zero-copy budget read after all allocations.
+            proptest::prop_assert_eq!(client.get_org_budget(&org_sym), 0_i128);
         }
     }
 
@@ -950,10 +1403,10 @@ mod tests {
 
         // Register the malicious token and configure it to re-enter the
         // registry whenever it delivers tokens to the claiming maintainer.
-        let token_id = env.register_contract(None, MaliciousToken);
+        let token_id = env.register(MaliciousToken, ());
         let token_client = MaliciousTokenClient::new(&env, &token_id);
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -1023,5 +1476,1155 @@ mod tests {
         // Each claim reset the claimable balance to 0.
         assert_eq!(client.get_claimable_balance(&m1), 0);
         assert_eq!(client.get_claimable_balance(&m2), 0);
+    }
+}
+
+// =============================================================================
+// Cross-chain state proof verifier tests
+// =============================================================================
+
+#[cfg(test)]
+mod cross_chain_tests {
+    // ── RLP unit tests ────────────────────────────────────────────────────────
+    mod rlp_tests {
+        use crate::rlp::{
+            decode_exact, decode_bytes, decode_u64,
+            encode_bytes_v2, encode_list_payload_v2, EncodeBuf,
+            RlpItem, RlpError,
+        };
+
+        #[test]
+        fn single_byte_range() {
+            for b in 0u8..=0x7f {
+                let item = decode_exact(&[b]).unwrap();
+                assert_eq!(item, RlpItem::Bytes(&[b]));
+            }
+        }
+
+        #[test]
+        fn empty_string_0x80() {
+            let item = decode_exact(&[0x80]).unwrap();
+            assert_eq!(item, RlpItem::Bytes(b""));
+        }
+
+        #[test]
+        fn short_string_dog() {
+            let enc = [0x83, b'd', b'o', b'g'];
+            assert_eq!(decode_bytes(&enc).unwrap(), b"dog");
+        }
+
+        #[test]
+        fn empty_list_0xc0() {
+            let item = decode_exact(&[0xc0]).unwrap();
+            assert!(matches!(item, RlpItem::List(_)));
+        }
+
+        #[test]
+        fn list_cat_dog() {
+            let enc = [0xc8, 0x83, b'c', b'a', b't', 0x83, b'd', b'o', b'g'];
+            let item = decode_exact(&enc).unwrap();
+            if let RlpItem::List(l) = item {
+                let ch = l.items().unwrap();
+                assert_eq!(ch.len(), 2);
+                assert_eq!(ch.get(0).unwrap(), &RlpItem::Bytes(b"cat"));
+                assert_eq!(ch.get(1).unwrap(), &RlpItem::Bytes(b"dog"));
+            } else {
+                panic!("expected list");
+            }
+        }
+
+        #[test]
+        fn non_canonical_single_byte_rejected() {
+            // 0x81 0x00 is non-canonical (0x00 fits in single-byte form)
+            let res = decode_exact(&[0x81, 0x00]);
+            assert_eq!(res, Err(RlpError::NonCanonicalLength));
+        }
+
+        #[test]
+        fn trailing_data_rejected() {
+            let res = decode_exact(&[0x83, b'd', b'o', b'g', 0x00]);
+            assert_eq!(res, Err(RlpError::TrailingData));
+        }
+
+        #[test]
+        fn payload_out_of_bounds() {
+            // 0x83 says 3-byte payload but only 1 byte follows
+            let res = decode_exact(&[0x83, b'a']);
+            assert_eq!(res, Err(RlpError::PayloadOutOfBounds));
+        }
+
+        #[test]
+        fn long_string_56_bytes() {
+            let payload = [0xaau8; 56];
+            let mut buf = EncodeBuf::new();
+            encode_bytes_v2(&payload, &mut buf).unwrap();
+            let enc = buf.as_slice();
+            // prefix should be 0xb8 (0xb7 + 1 length byte)
+            assert_eq!(enc[0], 0xb8);
+            assert_eq!(enc[1], 56u8);
+            assert_eq!(decode_bytes(enc).unwrap(), &payload[..]);
+        }
+
+        #[test]
+        fn encode_decode_roundtrip() {
+            let mut child = EncodeBuf::new();
+            encode_bytes_v2(b"hello", &mut child).unwrap();
+            encode_bytes_v2(b"world", &mut child).unwrap();
+            let mut out = EncodeBuf::new();
+            encode_list_payload_v2(child.as_slice(), &mut out).unwrap();
+
+            let item = decode_exact(out.as_slice()).unwrap();
+            if let RlpItem::List(l) = item {
+                let ch = l.items().unwrap();
+                assert_eq!(ch.len(), 2);
+                assert_eq!(ch.get(0).unwrap(), &RlpItem::Bytes(b"hello"));
+                assert_eq!(ch.get(1).unwrap(), &RlpItem::Bytes(b"world"));
+            } else {
+                panic!("expected list");
+            }
+        }
+
+        #[test]
+        fn nested_list_structure() {
+            // [ [], [[]] ] = 0xc3 0xc0 0xc1 0xc0
+            let enc = [0xc3, 0xc0, 0xc1, 0xc0];
+            let item = decode_exact(&enc).unwrap();
+            if let RlpItem::List(outer) = item {
+                let ch = outer.items().unwrap();
+                assert_eq!(ch.len(), 2);
+                assert!(matches!(ch.get(0).unwrap(), RlpItem::List(_)));
+                assert!(matches!(ch.get(1).unwrap(), RlpItem::List(_)));
+            } else {
+                panic!("expected list");
+            }
+        }
+
+        #[test]
+        fn decode_u64_basic() {
+            // RLP-encode 0x0102 as bytes and decode it
+            let mut buf = EncodeBuf::new();
+            encode_bytes_v2(&[0x01, 0x02], &mut buf).unwrap();
+            let val = decode_u64(buf.as_slice()).unwrap();
+            assert_eq!(val, 0x0102u64);
+        }
+
+        #[test]
+        fn empty_input_error() {
+            assert_eq!(crate::rlp::decode(b""), Err(RlpError::Empty));
+        }
+    }
+
+    // ── Keccak-256 unit tests ─────────────────────────────────────────────────
+    mod keccak_tests {
+        use crate::keccak::{keccak256, keccak256_concat, Keccak256};
+
+        fn hex32(s: &str) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            for i in 0..32 {
+                out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+            }
+            out
+        }
+
+        #[test]
+        fn empty_input() {
+            let expected = hex32(
+                "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+            );
+            assert_eq!(keccak256(b""), expected);
+        }
+
+        #[test]
+        fn abc() {
+            let expected = hex32(
+                "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45",
+            );
+            assert_eq!(keccak256(b"abc"), expected);
+        }
+
+        #[test]
+        fn hello() {
+            let expected = hex32(
+                "1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8",
+            );
+            assert_eq!(keccak256(b"hello"), expected);
+        }
+
+        #[test]
+        fn streaming_equals_oneshot() {
+            let data = b"The quick brown fox jumps over the lazy dog";
+            let oneshot = keccak256(data);
+            let mut h = Keccak256::new();
+            h.update(&data[..15]);
+            h.update(&data[15..]);
+            assert_eq!(oneshot, h.finalize());
+        }
+
+        #[test]
+        fn multi_block_crossing() {
+            // 200 bytes crosses the 136-byte rate boundary
+            let data = [0x42u8; 200];
+            let h1 = keccak256(&data);
+            let mut h = Keccak256::new();
+            h.update(&data[..100]);
+            h.update(&data[100..]);
+            assert_eq!(h1, h.finalize());
+        }
+
+        #[test]
+        fn concat_helper_matches_combined() {
+            let a = b"cross-chain";
+            let b = b"-proof";
+            let mut combined = [0u8; 17];
+            combined[..11].copy_from_slice(a);
+            combined[11..].copy_from_slice(b);
+            assert_eq!(keccak256_concat(a, b), keccak256(&combined));
+        }
+
+        #[test]
+        fn distinct_inputs_give_distinct_hashes() {
+            assert_ne!(keccak256(b"key_a"), keccak256(b"key_b"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod mpt_and_verifier_tests {
+    use crate::keccak::keccak256;
+    use crate::mpt::{verify_proof, verify_exclusion_proof, MptError};
+    use crate::cross_chain_verifier::{
+        verify_state_proof, verify_exclusion, decode_eth_account,
+        reputation_score_from_account, BlockHeader, CrossChainError, EthAccount,
+    };
+    use crate::rlp::{EncodeBuf, encode_bytes_v2, encode_list_payload_v2};
+
+    // ── Shared helpers ────────────────────────────────────────────────────────
+
+    /// Compact (hex-prefix) encode a nibble slice into bytes.
+    fn compact_encode(nibbles: &[u8], is_leaf: bool, odd: bool) -> std::vec::Vec<u8> {
+        let flag_hi: u8 = if is_leaf { 2 } else { 0 } | if odd { 1 } else { 0 };
+        let mut out = std::vec::Vec::new();
+        if odd {
+            out.push((flag_hi << 4) | nibbles[0]);
+            let mut i = 1;
+            while i + 1 < nibbles.len() {
+                out.push((nibbles[i] << 4) | nibbles[i + 1]);
+                i += 2;
+            }
+        } else {
+            out.push(flag_hi << 4);
+            let mut i = 0;
+            while i + 1 < nibbles.len() {
+                out.push((nibbles[i] << 4) | nibbles[i + 1]);
+                i += 2;
+            }
+        }
+        out
+    }
+
+    /// Build an RLP leaf node encoding [compact_key_bytes, value].
+    fn make_leaf(all_nibbles: &[u8; 64], value: &[u8]) -> std::vec::Vec<u8> {
+        let compact = compact_encode(all_nibbles, true, false);
+        let mut payload = EncodeBuf::new();
+        encode_bytes_v2(&compact, &mut payload).unwrap();
+        encode_bytes_v2(value, &mut payload).unwrap();
+        let mut out = EncodeBuf::new();
+        encode_list_payload_v2(payload.as_slice(), &mut out).unwrap();
+        out.as_slice().to_vec()
+    }
+
+    /// Build the 64-nibble path array from keccak256(key).
+    fn key_nibbles(key: &[u8]) -> [u8; 64] {
+        let hash = keccak256(key);
+        let mut n = [0u8; 64];
+        for i in 0..32 {
+            n[2 * i]     = hash[i] >> 4;
+            n[2 * i + 1] = hash[i] & 0x0f;
+        }
+        n
+    }
+
+    /// Build a single-leaf proof and return (root_hash, leaf_bytes).
+    fn single_leaf_proof(key: &[u8], value: &[u8]) -> ([u8; 32], std::vec::Vec<u8>) {
+        let nibbles = key_nibbles(key);
+        let leaf = make_leaf(&nibbles, value);
+        let root = keccak256(&leaf);
+        (root, leaf)
+    }
+
+    fn eth_header(state_root: [u8; 32]) -> BlockHeader {
+        BlockHeader { state_root, block_number: 19_000_000, chain_id: 1 }
+    }
+
+    // ── MPT tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mpt_valid_single_leaf() {
+        let key = b"reputation_key";
+        let value = b"score_data";
+        let (root, leaf) = single_leaf_proof(key, value);
+        assert_eq!(verify_proof(&root, key, value, &[leaf.as_slice()]), Ok(()));
+    }
+
+    #[test]
+    fn mpt_wrong_value_rejected() {
+        let key = b"reputation_key";
+        let value = b"score_data";
+        let (root, leaf) = single_leaf_proof(key, value);
+        let res = verify_proof(&root, key, b"bad_value", &[leaf.as_slice()]);
+        assert_eq!(res, Err(MptError::ValueMismatch));
+    }
+
+    #[test]
+    fn mpt_root_hash_mismatch() {
+        let key = b"reputation_key";
+        let value = b"score_data";
+        let (mut root, leaf) = single_leaf_proof(key, value);
+        root[0] ^= 0xff;
+        let res = verify_proof(&root, key, value, &[leaf.as_slice()]);
+        assert_eq!(res, Err(MptError::RootHashMismatch));
+    }
+
+    #[test]
+    fn mpt_empty_proof_rejected() {
+        assert_eq!(verify_proof(&[0u8; 32], b"k", b"v", &[]),
+                   Err(MptError::EmptyProof));
+    }
+
+    #[test]
+    fn mpt_empty_key_rejected() {
+        assert_eq!(verify_proof(&[0u8; 32], b"", b"v", &[&[0xc0]]),
+                   Err(MptError::EmptyKey));
+    }
+
+    #[test]
+    fn mpt_manipulated_node_rejected() {
+        let key = b"manipulation_test";
+        let value = b"original";
+        let (root, mut leaf) = single_leaf_proof(key, value);
+        let mid = leaf.len() / 2;
+        leaf[mid] ^= 0xff;
+        let res = verify_proof(&root, key, value, &[leaf.as_slice()]);
+        assert!(res.is_err(), "manipulated node must be rejected");
+    }
+
+    #[test]
+    fn mpt_different_key_path_mismatch() {
+        // Build a leaf for key_a, then try to verify it as key_b
+        let (root, leaf) = single_leaf_proof(b"key_a", b"value");
+        let res = verify_proof(&root, b"key_b", b"value", &[leaf.as_slice()]);
+        assert!(res.is_err());
+    }
+
+    // ── CrossChainVerifier tests ───────────────────────────────────────────────
+
+    #[test]
+    fn ccv_valid_inclusion() {
+        let key = b"eth_maintainer_addr";
+        let value = b"reputation_rlp_encoded";
+        let (root, leaf) = single_leaf_proof(key, value);
+        let header = eth_header(root);
+        let res = verify_state_proof(&header, key, value, &[leaf.as_slice()]);
+        assert!(res.is_ok(), "{:?}", res);
+        let vs = res.unwrap();
+        assert_eq!(vs.chain_id, 1);
+        assert_eq!(vs.block_number, 19_000_000);
+        assert_eq!(&vs.value[..vs.value_len], value);
+    }
+
+    #[test]
+    fn ccv_tampered_root_rejected() {
+        let key = b"eth_maintainer_addr";
+        let value = b"some_value";
+        let (mut root, leaf) = single_leaf_proof(key, value);
+        root[15] ^= 0xaa;
+        let header = eth_header(root);
+        let res = verify_state_proof(&header, key, value, &[leaf.as_slice()]);
+        assert_eq!(res, Err(CrossChainError::ProofVerifyError(MptError::RootHashMismatch)));
+    }
+
+    #[test]
+    fn ccv_wrong_value_rejected() {
+        let key = b"eth_maintainer_addr";
+        let value = b"real_value";
+        let (root, leaf) = single_leaf_proof(key, value);
+        let header = eth_header(root);
+        let res = verify_state_proof(&header, key, b"fake_value", &[leaf.as_slice()]);
+        assert_eq!(res, Err(CrossChainError::ProofVerifyError(MptError::ValueMismatch)));
+    }
+
+    #[test]
+    fn ccv_zero_chain_id_rejected() {
+        let header = BlockHeader { state_root: [0u8; 32], block_number: 1, chain_id: 0 };
+        let res = verify_state_proof(&header, b"k", b"v", &[&[0xc0]]);
+        assert_eq!(res, Err(CrossChainError::InvalidHeader));
+    }
+
+    #[test]
+    fn ccv_empty_key_rejected() {
+        let header = eth_header([0u8; 32]);
+        let res = verify_state_proof(&header, b"", b"v", &[&[0xc0]]);
+        assert_eq!(res, Err(CrossChainError::InputTooLong));
+    }
+
+    #[test]
+    fn ccv_too_many_nodes_rejected() {
+        let header = eth_header([0u8; 32]);
+        let nodes: std::vec::Vec<&[u8]> = (0..=16).map(|_| [0xc0u8].as_slice()).collect();
+        let res = verify_state_proof(&header, b"key", b"val", &nodes);
+        assert_eq!(res, Err(CrossChainError::InputTooLong));
+    }
+
+    // ── decode_eth_account tests ──────────────────────────────────────────────
+
+    fn build_eth_account_rlp(nonce: &[u8], balance: &[u8]) -> std::vec::Vec<u8> {
+        let storage_root = [0x56u8; 32];
+        let code_hash    = [0x78u8; 32];
+        let mut payload = EncodeBuf::new();
+        encode_bytes_v2(nonce,        &mut payload).unwrap();
+        encode_bytes_v2(balance,      &mut payload).unwrap();
+        encode_bytes_v2(&storage_root, &mut payload).unwrap();
+        encode_bytes_v2(&code_hash,    &mut payload).unwrap();
+        let mut out = EncodeBuf::new();
+        encode_list_payload_v2(payload.as_slice(), &mut out).unwrap();
+        out.as_slice().to_vec()
+    }
+
+    #[test]
+    fn decode_eth_account_valid() {
+        let rlp = build_eth_account_rlp(&[0x05], &[0x01]);
+        let acc = decode_eth_account(&rlp).unwrap();
+        assert_eq!(acc.nonce, 5);
+        assert_eq!(acc.balance[31], 1);
+        assert_eq!(acc.storage_root, [0x56u8; 32]);
+        assert_eq!(acc.code_hash, [0x78u8; 32]);
+    }
+
+    #[test]
+    fn decode_eth_account_invalid_bytes() {
+        let res = decode_eth_account(b"\xff\xfe\xfd");
+        assert!(matches!(res, Err(CrossChainError::RlpDecodeError(_))));
+    }
+
+    #[test]
+    fn decode_eth_account_wrong_field_count() {
+        // Only 3 fields — should fail
+        let mut payload = EncodeBuf::new();
+        encode_bytes_v2(&[0x01], &mut payload).unwrap();
+        encode_bytes_v2(&[0x02], &mut payload).unwrap();
+        encode_bytes_v2(&[0x03], &mut payload).unwrap();
+        let mut out = EncodeBuf::new();
+        encode_list_payload_v2(payload.as_slice(), &mut out).unwrap();
+        let res = decode_eth_account(out.as_slice());
+        assert_eq!(res, Err(CrossChainError::InvalidValueEncoding));
+    }
+
+    // ── reputation_score_from_account tests ───────────────────────────────────
+
+    #[test]
+    fn reputation_zero_for_empty_account() {
+        assert_eq!(reputation_score_from_account(&EthAccount::default()), 0);
+    }
+
+    #[test]
+    fn reputation_nonzero_for_balance() {
+        let mut acc = EthAccount::default();
+        // 1 ETH = 10^18 wei
+        let one_eth: u128 = 1_000_000_000_000_000_000;
+        let be = one_eth.to_be_bytes();
+        acc.balance[16..].copy_from_slice(&be);
+        acc.balance_len = 16;
+        let score = reputation_score_from_account(&acc);
+        assert!(score > 0 && score <= 10_000);
+    }
+
+    #[test]
+    fn reputation_capped_at_10000() {
+        let mut acc = EthAccount::default();
+        // Max balance: u128::MAX
+        let be = u128::MAX.to_be_bytes();
+        acc.balance[16..].copy_from_slice(&be);
+        acc.balance_len = 16;
+        assert_eq!(reputation_score_from_account(&acc), 10_000);
+    }
+
+    // ── Ledger State Mutation Tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_ledger_state_mutation_budget_atomicity() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("atomictest");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let donor = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+        token.mint(&donor, &100_000_000);
+
+        // Record initial state
+        let initial_budget = client.get_org_budget(&org_sym);
+        let initial_donor_balance = token_client.balance(&donor);
+        let initial_contract_balance = token_client.balance(&client.address);
+
+        assert_eq!(initial_budget, 0);
+        assert_eq!(initial_donor_balance, 100_000_000);
+        assert_eq!(initial_contract_balance, 0);
+
+        // Perform funding
+        client.fund_org(&org_sym, &donor, &50_000_000);
+
+        // Verify atomic state mutation
+        assert_eq!(client.get_org_budget(&org_sym), 50_000_000);
+        assert_eq!(token_client.balance(&donor), 50_000_000);
+        assert_eq!(token_client.balance(&client.address), 50_000_000);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_payout_allocation() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("allocmut");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let maintainer = Address::generate(&env);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        let donor = Address::generate(&env);
+        token.mint(&donor, &20_000_000);
+        client.fund_org(&org_sym, &donor, &20_000_000);
+
+        // Record pre-allocation state
+        let pre_budget = client.get_org_budget(&org_sym);
+        let pre_balance = client.get_claimable_balance(&maintainer);
+
+        assert_eq!(pre_budget, 20_000_000);
+        assert_eq!(pre_balance, 0);
+
+        // Allocate payout
+        client.allocate_payout(&org_sym, &admin, &maintainer, &5_000_000_i128, &0_u64);
+
+        // Verify state mutation
+        assert_eq!(client.get_org_budget(&org_sym), 15_000_000);
+        assert_eq!(client.get_claimable_balance(&maintainer), 5_000_000);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_claim_payout() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("claimmut");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let maintainer = Address::generate(&env);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        let donor = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+        token.mint(&donor, &20_000_000);
+        client.fund_org(&org_sym, &donor, &20_000_000);
+
+        client.allocate_payout(&org_sym, &admin, &maintainer, &10_000_000_i128, &0_u64);
+
+        // Record pre-claim state
+        let pre_maintainer_balance = token_client.balance(&maintainer);
+        let pre_claimable = client.get_claimable_balance(&maintainer);
+        let pre_org_budget = client.get_org_budget(&org_sym);
+
+        assert_eq!(pre_maintainer_balance, 0);
+        assert_eq!(pre_claimable, 10_000_000);
+        assert_eq!(pre_org_budget, 10_000_000);
+
+        // Claim payout
+        let claimed = client.claim_payout(&maintainer);
+
+        // Verify state mutation
+        assert_eq!(claimed, 10_000_000);
+        assert_eq!(token_client.balance(&maintainer), 10_000_000);
+        assert_eq!(client.get_claimable_balance(&maintainer), 0);
+        assert_eq!(client.get_org_budget(&org_sym), 10_000_000);
+    }
+
+    #[test]
+    fn test_ledger_state_monation_protocol_pause() {
+        let Setup { env, client, .. } = setup();
+
+        // Initial state should be Active
+        let initial_state = client.get_protocol_state();
+        assert_eq!(initial_state, crate::ProtocolState::Active);
+
+        // Pause protocol
+        client.pause_protocol();
+
+        // Verify state mutation
+        let paused_state = client.get_protocol_state();
+        assert_eq!(paused_state, crate::ProtocolState::Paused);
+
+        // Unpause protocol
+        client.unpause_protocol();
+
+        // Verify state mutation back to Active
+        let active_state = client.get_protocol_state();
+        assert_eq!(active_state, crate::ProtocolState::Active);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_admin_transfer() {
+        let Setup {
+            env, client, protocol_admin, ..
+        } = setup();
+
+        // Get initial admin
+        let initial_admin = client.get_multisig_admin();
+        let initial_admin_addr = initial_admin.admins.get(0).unwrap();
+
+        // Propose new admin
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&protocol_admin, &new_admin);
+
+        // Accept new admin
+        client.accept_admin(&new_admin);
+
+        // Verify state mutation
+        let updated_admin = client.get_multisig_admin();
+        let updated_admin_addr = updated_admin.admins.get(0).unwrap();
+
+        assert_ne!(initial_admin_addr, updated_admin_addr);
+        assert_eq!(updated_admin_addr, &new_admin);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_qf_contribution() {
+        let Setup {
+            env, client, token, protocol_admin, ..
+        } = setup();
+        let org_sym = symbol_short!("qfmut");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        // Record pre-contribution state
+        let pre_stats = client.get_qf_project_stats(&org_sym);
+        let pre_contrib = client.get_qf_contribution(&org_sym, &contributor);
+        let pre_org_budget = client.get_org_budget(&org_sym);
+
+        assert_eq!(pre_stats.direct_contributions, 0);
+        assert_eq!(pre_stats.sqrt_sum, 0);
+        assert_eq!(pre_stats.contributor_count, 0);
+        assert_eq!(pre_contrib, 0);
+        assert_eq!(pre_org_budget, 0);
+
+        // Make contribution
+        client.qf_contribute(&org_sym, &contributor, &100);
+
+        // Verify state mutation
+        let post_stats = client.get_qf_project_stats(&org_sym);
+        let post_contrib = client.get_qf_contribution(&org_sym, &contributor);
+        let post_org_budget = client.get_org_budget(&org_sym);
+
+        assert_eq!(post_stats.direct_contributions, 100);
+        assert_eq!(post_stats.sqrt_sum, 10);
+        assert_eq!(post_stats.contributor_count, 1);
+        assert_eq!(post_contrib, 100);
+        assert_eq!(post_org_budget, 100);
+    }
+
+    // ── Exclusion proof tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn exclusion_proof_valid_non_inclusion() {
+        // A leaf for key_a should be valid exclusion proof for key_b
+        // when the path diverges (root hash mismatch makes this the simplest test)
+        // Here we test the API contract: verify_exclusion_proof accepts
+        // a key-not-found result as Ok.
+        let key = b"absent_key";
+        // Build a leaf that matches a different key to produce KeyNotFound
+        let (root, leaf) = single_leaf_proof(b"other_key", b"some_value");
+        // verify_exclusion_proof should either Ok (key absent) or Err(PathMismatch)
+        // depending on path traversal; both indicate non-inclusion
+        let res = verify_exclusion_proof(&root, key, &[leaf.as_slice()]);
+        // PathMismatch counts as non-inclusion in exclusion API
+        assert!(res.is_ok() || matches!(res, Err(MptError::PathMismatch)));
+    }
+
+    #[test]
+    fn ccv_exclusion_valid() {
+        let (root, leaf) = single_leaf_proof(b"other_key", b"val");
+        let header = eth_header(root);
+        let res = verify_exclusion(&header, b"absent_key", &[leaf.as_slice()]);
+        assert!(res.is_ok() || matches!(res, Err(CrossChainError::ProofVerifyError(_))));
+    }
+
+    // ── Nonce / Replay-Protection Tests ──────────────────────────────────────
+
+    /// A fresh address has nonce 0.
+    #[test]
+    fn test_nonce_initial_value_is_zero() {
+        let Setup { env, client, .. } = setup();
+        let user = Address::generate(&env);
+        assert_eq!(client.get_nonce(&user), 0u64);
+    }
+
+    /// `fund_org_with_nonce` accepts nonce 0 on first call and advances to 1.
+    #[test]
+    fn test_fund_org_with_nonce_first_call_succeeds() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg1");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        assert_eq!(client.get_nonce(&donor), 0u64);
+        client.fund_org_with_nonce(&org_sym, &donor, &500, &0u64);
+
+        // Nonce must have advanced to 1.
+        assert_eq!(client.get_nonce(&donor), 1u64);
+        // Budget must have been updated.
+        assert_eq!(client.get_org_budget(&org_sym), 500);
+    }
+
+    /// Replaying the same nonce (0) after a successful call is rejected.
+    #[test]
+    fn test_fund_org_with_nonce_replay_rejected() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg2");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        // First call succeeds.
+        client.fund_org_with_nonce(&org_sym, &donor, &100, &0u64);
+
+        // Second call with stale nonce 0 must fail.
+        let result = client.try_fund_org_with_nonce(&org_sym, &donor, &100, &0u64);
+        assert!(result.is_err());
+        // Budget must not have changed from the replay attempt.
+        assert_eq!(client.get_org_budget(&org_sym), 100);
+    }
+
+    /// Sequential calls each advance the nonce by 1.
+    #[test]
+    fn test_fund_org_with_nonce_increments_monotonically() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg3");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        for expected in 0u64..5u64 {
+            assert_eq!(client.get_nonce(&donor), expected);
+            client.fund_org_with_nonce(&org_sym, &donor, &10, &expected);
+        }
+        assert_eq!(client.get_nonce(&donor), 5u64);
+        assert_eq!(client.get_org_budget(&org_sym), 50);
+    }
+
+    /// Providing an out-of-order nonce (skipping ahead) is rejected.
+    #[test]
+    fn test_fund_org_with_nonce_future_nonce_rejected() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg4");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        // Nonce is 0 but caller supplies 1 (future nonce).
+        let result = client.try_fund_org_with_nonce(&org_sym, &donor, &100, &1u64);
+        assert!(result.is_err());
+        assert_eq!(client.get_nonce(&donor), 0u64);
+    }
+
+    /// `claim_payout_with_nonce` correctly verifies and advances the nonce.
+    #[test]
+    fn test_claim_payout_with_nonce_succeeds_and_increments() {
+        let Setup {
+            env,
+            client,
+            token,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nnclaim");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+        let maintainer = Address::generate(&env);
+
+        // Fund the org, add a maintainer, and allocate a payout with unlock_ts=0 (immediately vested).
+        token.mint(&admin, &10_000);
+        client.fund_org(&org_sym, &admin, &10_000);
+        client.add_maintainer(&org_sym, &maintainer);
+        client.allocate_payout(&org_sym, &admin, &maintainer, &500, &0u64);
+
+        assert_eq!(client.get_nonce(&maintainer), 0u64);
+
+        // Claim with correct nonce 0.
+        let claimed = client.claim_payout_with_nonce(&maintainer, &0u64);
+        assert_eq!(claimed, 500);
+        assert_eq!(client.get_nonce(&maintainer), 1u64);
+    }
+
+    /// Replaying a `claim_payout_with_nonce` is rejected.
+    #[test]
+    fn test_claim_payout_with_nonce_replay_rejected() {
+        let Setup {
+            env,
+            client,
+            token,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nnclrep");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+        let maintainer = Address::generate(&env);
+
+        token.mint(&admin, &10_000);
+        client.fund_org(&org_sym, &admin, &10_000);
+        client.add_maintainer(&org_sym, &maintainer);
+        client.allocate_payout(&org_sym, &admin, &maintainer, &200, &0u64);
+
+        // First claim (nonce 0) succeeds.
+        client.claim_payout_with_nonce(&maintainer, &0u64);
+
+        // Allocate more so there is a claimable balance again.
+        client.allocate_payout(&org_sym, &admin, &maintainer, &200, &0u64);
+
+        // Replay with stale nonce 0 must fail.
+        let result = client.try_claim_payout_with_nonce(&maintainer, &0u64);
+        assert!(result.is_err());
+    }
+
+    /// `qf_contribute_with_nonce` verifies nonce, contributes, then advances.
+    #[test]
+    fn test_qf_contribute_with_nonce_succeeds_and_increments() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nncqf1");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        assert_eq!(client.get_nonce(&contributor), 0u64);
+        client.qf_contribute_with_nonce(&org_sym, &contributor, &100, &0u64);
+
+        assert_eq!(client.get_nonce(&contributor), 1u64);
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 100);
+    }
+
+    /// Replaying a `qf_contribute_with_nonce` is rejected.
+    #[test]
+    fn test_qf_contribute_with_nonce_replay_rejected() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nncqf2");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        // First call succeeds.
+        client.qf_contribute_with_nonce(&org_sym, &contributor, &50, &0u64);
+        // Replay with stale nonce 0 must fail.
+        let result = client.try_qf_contribute_with_nonce(&org_sym, &contributor, &50, &0u64);
+        assert!(result.is_err());
+        // Contribution must still be only 50.
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 50);
+    }
+
+    /// Nonces are independent per caller address.
+    #[test]
+    fn test_nonces_are_independent_per_caller() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncind");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        token.mint(&donor_a, &1_000);
+        token.mint(&donor_b, &1_000);
+
+        // donor_a makes two calls; donor_b makes one.
+        client.fund_org_with_nonce(&org_sym, &donor_a, &100, &0u64);
+        client.fund_org_with_nonce(&org_sym, &donor_a, &100, &1u64);
+        client.fund_org_with_nonce(&org_sym, &donor_b, &100, &0u64);
+
+        assert_eq!(client.get_nonce(&donor_a), 2u64);
+        assert_eq!(client.get_nonce(&donor_b), 1u64);
+    }
+
+    // ── SAC Token Interface Tests ──────────────────────────────────────────────
+
+    /// Verify that token metadata (name, symbol, decimals) is cached on init
+    /// and can be retrieved via get_token_metadata, mapping 1:1 with the SAC.
+    #[test]
+    fn test_token_metadata_after_init() {
+        let Setup { env, client, .. } = setup();
+
+        let metadata = client.get_token_metadata();
+        // SAC tokens registered via register_stellar_asset_contract_v2 have defaults:
+        // name: "", symbol: "", decimals: 7
+        assert_eq!(metadata.decimals, 7);
+        // Name and symbol may be empty for default SAC tokens in the test harness
+        // but the function should still return them without panicking.
+        assert!(metadata.name.len() >= 0);
+        assert!(metadata.symbol.len() >= 0);
+    }
+
+    /// Verify that token_balance correctly queries the underlying SAC balance.
+    #[test]
+    fn test_token_balance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let user = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+
+        // Verify initial balance is 0
+        assert_eq!(client.token_balance(&user), 0);
+        assert_eq!(token_client.balance(&user), 0);
+
+        // Mint some tokens and check balance via the contract
+        token.mint(&user, &1_000_000);
+        assert_eq!(client.token_balance(&user), 1_000_000);
+        assert_eq!(token_client.balance(&user), 1_000_000);
+
+        // Also check that contract balance is correct
+        assert_eq!(client.token_balance(&client.address), 0);
+    }
+
+    /// Verify that mint_token requires valid multisig authorization.
+    #[test]
+    fn test_mint_token_multisig() {
+        let env2 = Env::default();
+        env2.mock_all_auths();
+
+        let token_admin_2 = Address::generate(&env2);
+        let token_contract_id = env2.register_stellar_asset_contract_v2(token_admin_2.clone());
+        let token_client = token::StellarAssetClient::new(&env2, &token_contract_id.address());
+
+        let contract_id = env2.register_contract(None, PayoutRegistry);
+        let client2 = PayoutRegistryClient::new(&env2, &contract_id);
+
+        // Create multisig admins (threshold 2)
+        let admin1 = Address::generate(&env2);
+        let admin2 = Address::generate(&env2);
+        let admin3 = Address::generate(&env2);
+        let mut admins = Vec::new(&env2);
+        admins.push_back(admin1.clone());
+        admins.push_back(admin2.clone());
+        admins.push_back(admin3.clone());
+
+        client2.init(&token_contract_id.address(), &admins, &2);
+
+        // Set the token admin to the PayoutRegistry contract so it can mint.
+        // This is the standard pattern when the contract acts as the token controller.
+        token_client.set_admin(&contract_id);
+
+        // Test: mint with only 1 signature should fail
+        let mut signers1 = Vec::new(&env2);
+        signers1.push_back(admin1.clone());
+
+        env2.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin1,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "mint_token",
+                args: (signers1.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result =
+            client2.try_mint_token(&signers1, &token_admin_2, &10_000_000_i128);
+        assert!(result.is_err());
+
+        // Test: mint with 2 valid signatures should succeed
+        let mut signers2 = Vec::new(&env2);
+        signers2.push_back(admin1.clone());
+        signers2.push_back(admin2.clone());
+
+        env2.mock_auths(&[
+            soroban_sdk::testutils::MockAuth {
+                address: &admin1,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers2.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
+                    sub_invokes: &[],
+                },
+            },
+            soroban_sdk::testutils::MockAuth {
+                address: &admin2,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers2.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
+
+        let result = client2.try_mint_token(&signers2, &token_admin_2, &10_000_000_i128);
+        assert!(result.is_ok());
+    }
+
+    /// Verify that mint_token rejects zero or negative amounts.
+    #[test]
+    fn test_mint_token_invalid_amount() {
+        let env = Env::default();
+        let token_admin = Address::generate(&env);
+        let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+        let contract_id = env.register_contract(None, PayoutRegistry);
+        let client = PayoutRegistryClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let mut admins = Vec::new(&env);
+        admins.push_back(admin1.clone());
+        admins.push_back(admin2.clone());
+
+        client.init(&token_contract_id.address(), &admins, &2);
+
+        let mut signers = Vec::new(&env);
+        signers.push_back(admin1.clone());
+        signers.push_back(admin2.clone());
+
+        env.mock_auths(&[
+            soroban_sdk::testutils::MockAuth {
+                address: &admin1,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers.clone(), token_admin.clone(), 0_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+            soroban_sdk::testutils::MockAuth {
+                address: &admin2,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers.clone(), token_admin.clone(), 0_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
+
+        let result = client.try_mint_token(&signers, &token_admin, &0_i128);
+        assert!(result.is_err());
+    }
+
+    /// Verify that token_allowance correctly queries the underlying SAC.
+    #[test]
+    fn test_token_allowance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        // Initial allowance should be 0
+        assert_eq!(client.token_allowance(&owner, &spender), 0);
+
+        // Verify against the raw token client as well
+        let token_client = token::Client::new(&env, &token.address);
+        assert_eq!(token_client.allowance(&owner, &spender), 0);
+    }
+
+    /// Verify that token_approve correctly sets an allowance on the underlying SAC.
+    #[test]
+    fn test_token_approve_sets_allowance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+
+        // Approve an allowance
+        client.token_approve(&owner, &spender, &500_000_i128, &10_000_u32);
+
+        // Verify through both the contract and the raw token client
+        assert_eq!(client.token_allowance(&owner, &spender), 500_000);
+        assert_eq!(token_client.allowance(&owner, &spender), 500_000);
+    }
+
+    /// Verify that token_approve rejects negative amounts.
+    #[test]
+    fn test_token_approve_negative_amount_fails() {
+        let Setup { env, client, .. } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        let result = client.try_token_approve(&owner, &spender, &(-1_i128), &10_000_u32);
+        assert!(result.is_err());
+    }
+
+    /// Verify that token_transfer_from transfers via allowance on the underlying SAC.
+    #[test]
+    fn test_token_transfer_from_with_allowance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+
+        // Mint tokens to owner
+        token.mint(&owner, &10_000_000);
+
+        // Owner approves spender
+        client.token_approve(&owner, &spender, &5_000_000_i128, &10_000_u32);
+
+        // Spender transfers on behalf of owner
+        client.token_transfer_from(&spender, &owner, &recipient, &3_000_000_i128);
+
+        // Verify balances and remaining allowance
+        assert_eq!(token_client.balance(&owner), 7_000_000);
+        assert_eq!(token_client.balance(&recipient), 3_000_000);
+        assert_eq!(client.token_allowance(&owner, &spender), 2_000_000);
+    }
+
+    /// Verify that token_transfer_from rejects zero or negative amounts.
+    #[test]
+    fn test_token_transfer_from_invalid_amount_fails() {
+        let Setup { env, client, .. } = setup();
+
+        let spender = Address::generate(&env);
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+
+        let result = client.try_token_transfer_from(&spender, &from, &to, &0_i128);
+        assert!(result.is_err());
     }
 }

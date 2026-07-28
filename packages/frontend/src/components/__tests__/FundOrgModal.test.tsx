@@ -4,10 +4,14 @@ import "@testing-library/jest-dom";
 import { vi } from "vitest";
 import { FundOrgModal } from "../FundOrgModal";
 
-const mockFundOrg = vi.fn();
+const { mockFundOrg } = vi.hoisted(() => ({ mockFundOrg: vi.fn() }));
 
 vi.mock("@/hooks/useFundOrg", () => ({
-  useFundOrg: (options?: { onProgress?: (step: string) => void }) => mockUseFundOrg(options),
+  useFundOrg: () => ({
+    fundOrg: mockFundOrg,
+    isSubmitting: false,
+    error: null,
+  }),
 }));
 
 let mockWalletIsConnected = true;

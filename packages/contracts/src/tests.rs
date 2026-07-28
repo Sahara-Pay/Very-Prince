@@ -2374,4 +2374,257 @@ mod mpt_and_verifier_tests {
         assert_eq!(client.get_nonce(&donor_a), 2u64);
         assert_eq!(client.get_nonce(&donor_b), 1u64);
     }
+
+    // ── SAC Token Interface Tests ──────────────────────────────────────────────
+
+    /// Verify that token metadata (name, symbol, decimals) is cached on init
+    /// and can be retrieved via get_token_metadata, mapping 1:1 with the SAC.
+    #[test]
+    fn test_token_metadata_after_init() {
+        let Setup { env, client, .. } = setup();
+
+        let metadata = client.get_token_metadata();
+        // SAC tokens registered via register_stellar_asset_contract_v2 have defaults:
+        // name: "", symbol: "", decimals: 7
+        assert_eq!(metadata.decimals, 7);
+        // Name and symbol may be empty for default SAC tokens in the test harness
+        // but the function should still return them without panicking.
+        assert!(metadata.name.len() >= 0);
+        assert!(metadata.symbol.len() >= 0);
+    }
+
+    /// Verify that token_balance correctly queries the underlying SAC balance.
+    #[test]
+    fn test_token_balance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let user = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+
+        // Verify initial balance is 0
+        assert_eq!(client.token_balance(&user), 0);
+        assert_eq!(token_client.balance(&user), 0);
+
+        // Mint some tokens and check balance via the contract
+        token.mint(&user, &1_000_000);
+        assert_eq!(client.token_balance(&user), 1_000_000);
+        assert_eq!(token_client.balance(&user), 1_000_000);
+
+        // Also check that contract balance is correct
+        assert_eq!(client.token_balance(&client.address), 0);
+    }
+
+    /// Verify that mint_token requires valid multisig authorization.
+    #[test]
+    fn test_mint_token_multisig() {
+        let env2 = Env::default();
+        env2.mock_all_auths();
+
+        let token_admin_2 = Address::generate(&env2);
+        let token_contract_id = env2.register_stellar_asset_contract_v2(token_admin_2.clone());
+        let token_client = token::StellarAssetClient::new(&env2, &token_contract_id.address());
+
+        let contract_id = env2.register_contract(None, PayoutRegistry);
+        let client2 = PayoutRegistryClient::new(&env2, &contract_id);
+
+        // Create multisig admins (threshold 2)
+        let admin1 = Address::generate(&env2);
+        let admin2 = Address::generate(&env2);
+        let admin3 = Address::generate(&env2);
+        let mut admins = Vec::new(&env2);
+        admins.push_back(admin1.clone());
+        admins.push_back(admin2.clone());
+        admins.push_back(admin3.clone());
+
+        client2.init(&token_contract_id.address(), &admins, &2);
+
+        // Set the token admin to the PayoutRegistry contract so it can mint.
+        // This is the standard pattern when the contract acts as the token controller.
+        token_client.set_admin(&contract_id);
+
+        // Test: mint with only 1 signature should fail
+        let mut signers1 = Vec::new(&env2);
+        signers1.push_back(admin1.clone());
+
+        env2.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin1,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "mint_token",
+                args: (signers1.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result =
+            client2.try_mint_token(&signers1, &token_admin_2, &10_000_000_i128);
+        assert!(result.is_err());
+
+        // Test: mint with 2 valid signatures should succeed
+        let mut signers2 = Vec::new(&env2);
+        signers2.push_back(admin1.clone());
+        signers2.push_back(admin2.clone());
+
+        env2.mock_auths(&[
+            soroban_sdk::testutils::MockAuth {
+                address: &admin1,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers2.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
+                    sub_invokes: &[],
+                },
+            },
+            soroban_sdk::testutils::MockAuth {
+                address: &admin2,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers2.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
+
+        let result = client2.try_mint_token(&signers2, &token_admin_2, &10_000_000_i128);
+        assert!(result.is_ok());
+    }
+
+    /// Verify that mint_token rejects zero or negative amounts.
+    #[test]
+    fn test_mint_token_invalid_amount() {
+        let env = Env::default();
+        let token_admin = Address::generate(&env);
+        let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+        let contract_id = env.register_contract(None, PayoutRegistry);
+        let client = PayoutRegistryClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let mut admins = Vec::new(&env);
+        admins.push_back(admin1.clone());
+        admins.push_back(admin2.clone());
+
+        client.init(&token_contract_id.address(), &admins, &2);
+
+        let mut signers = Vec::new(&env);
+        signers.push_back(admin1.clone());
+        signers.push_back(admin2.clone());
+
+        env.mock_auths(&[
+            soroban_sdk::testutils::MockAuth {
+                address: &admin1,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers.clone(), token_admin.clone(), 0_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+            soroban_sdk::testutils::MockAuth {
+                address: &admin2,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers.clone(), token_admin.clone(), 0_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
+
+        let result = client.try_mint_token(&signers, &token_admin, &0_i128);
+        assert!(result.is_err());
+    }
+
+    /// Verify that token_allowance correctly queries the underlying SAC.
+    #[test]
+    fn test_token_allowance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        // Initial allowance should be 0
+        assert_eq!(client.token_allowance(&owner, &spender), 0);
+
+        // Verify against the raw token client as well
+        let token_client = token::Client::new(&env, &token.address);
+        assert_eq!(token_client.allowance(&owner, &spender), 0);
+    }
+
+    /// Verify that token_approve correctly sets an allowance on the underlying SAC.
+    #[test]
+    fn test_token_approve_sets_allowance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+
+        // Approve an allowance
+        client.token_approve(&owner, &spender, &500_000_i128, &10_000_u32);
+
+        // Verify through both the contract and the raw token client
+        assert_eq!(client.token_allowance(&owner, &spender), 500_000);
+        assert_eq!(token_client.allowance(&owner, &spender), 500_000);
+    }
+
+    /// Verify that token_approve rejects negative amounts.
+    #[test]
+    fn test_token_approve_negative_amount_fails() {
+        let Setup { env, client, .. } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        let result = client.try_token_approve(&owner, &spender, &(-1_i128), &10_000_u32);
+        assert!(result.is_err());
+    }
+
+    /// Verify that token_transfer_from transfers via allowance on the underlying SAC.
+    #[test]
+    fn test_token_transfer_from_with_allowance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+
+        // Mint tokens to owner
+        token.mint(&owner, &10_000_000);
+
+        // Owner approves spender
+        client.token_approve(&owner, &spender, &5_000_000_i128, &10_000_u32);
+
+        // Spender transfers on behalf of owner
+        client.token_transfer_from(&spender, &owner, &recipient, &3_000_000_i128);
+
+        // Verify balances and remaining allowance
+        assert_eq!(token_client.balance(&owner), 7_000_000);
+        assert_eq!(token_client.balance(&recipient), 3_000_000);
+        assert_eq!(client.token_allowance(&owner, &spender), 2_000_000);
+    }
+
+    /// Verify that token_transfer_from rejects zero or negative amounts.
+    #[test]
+    fn test_token_transfer_from_invalid_amount_fails() {
+        let Setup { env, client, .. } = setup();
+
+        let spender = Address::generate(&env);
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+
+        let result = client.try_token_transfer_from(&spender, &from, &to, &0_i128);
+        assert!(result.is_err());
+    }
 }

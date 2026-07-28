@@ -5,19 +5,24 @@
 
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import Link from "next/link";
-import useSWR from "swr";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { WalletButton } from "@/components/WalletButton";
 import { RegisterOrgModal } from "@/components/RegisterOrgModal";
 import type { Org } from "@/lib/api";
 import { useSSEWithSWR } from "@/hooks/useSSE";
+import { usePredictivePrefetch } from "@/hooks/usePredictivePrefetch";
+import { prefetchOrganizationIntent } from "@/lib/predictivePrefetch";
+import type { PrefetchTarget } from "@/lib/predictivePrefetch";
 
 export default function OrganizationsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
+  const cardEls = useRef(new Map<string, HTMLElement>());
 
   // Enable SSE for real-time updates
   useSSEWithSWR();
@@ -31,14 +36,28 @@ export default function OrganizationsPage() {
     return () => clearTimeout(timer);
   }, [searchTerm]);
 
-  // SWR fetcher function
-  const fetcher = async ([url]: [string]) => {
+  const fetchOrganizationsPage = async (url: string) => {
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`Failed to fetch organizations: ${response.statusText}`);
     }
     return response.json();
   };
+
+  const router = useRouter();
+  const queryClient = useQueryClient();
+
+  const handlePrefetchOrg = useCallback(
+    (orgId: string) => {
+      void prefetchOrganizationIntent(orgId, { queryClient, router });
+    },
+    [queryClient, router],
+  );
+
+  const setCardEl = useCallback((orgId: string, el: HTMLElement | null) => {
+    if (el) cardEls.current.set(orgId, el);
+    else cardEls.current.delete(orgId);
+  }, []);
 
   // Build API URL with search and pagination
   const apiUrl = useMemo(() => {
@@ -52,20 +71,41 @@ export default function OrganizationsPage() {
     return `${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:3001/api/v1/contract"}/orgs?${params}`;
   }, [page, debouncedSearch]);
 
-  // SWR hook for data fetching
-  const { data, error, isLoading, mutate } = useSWR(
-    [apiUrl],
-    fetcher,
-    {
-      revalidateOnFocus: false,
-      revalidateOnReconnect: true,
-      dedupingInterval: 5000,
-    }
-  );
+  const { data, error, isLoading, refetch } = useQuery({
+    queryKey: ["organizations", page, debouncedSearch],
+    queryFn: () => fetchOrganizationsPage(apiUrl),
+    staleTime: 5000,
+  });
 
   const orgs = data?.data || [];
   const totalPages = data?.meta?.totalPages || 1;
   const totalCount = data?.meta?.totalCount || 0;
+
+  // Trajectory prefetch — fires ~100–300ms before click when the cursor
+  // is aiming at an org card. Hover/focus handlers remain as a fallback.
+  const predictiveTargets: PrefetchTarget[] = useMemo(
+    () =>
+      orgs.map((org: Org) => ({
+        id: `org:${org.id}`,
+        getRect: () => {
+          const el = cardEls.current.get(org.id);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return null;
+          return {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+          };
+        },
+        prefetch: (signal: AbortSignal) =>
+          prefetchOrganizationIntent(org.id, { queryClient, router, signal }),
+      })),
+    [orgs, queryClient, router],
+  );
+
+  usePredictivePrefetch({ targets: predictiveTargets });
 
   const handleLoadMore = () => {
     if (page < totalPages) {
@@ -132,7 +172,7 @@ export default function OrganizationsPage() {
 
         {error && (
           <div className="mb-8 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-            {error}
+            {error instanceof Error ? error.message : String(error)}
           </div>
         )}
 
@@ -141,6 +181,9 @@ export default function OrganizationsPage() {
             <Link
               key={org.id}
               href={`/dashboard?org=${org.id}`}
+              ref={(el) => setCardEl(org.id, el)}
+              onMouseEnter={() => handlePrefetchOrg(org.id)}
+              onFocus={() => handlePrefetchOrg(org.id)}
               className="glass-card group flex flex-col p-6 transition-all hover:border-stellar-purple/50 hover:bg-white/[0.08]"
             >
               <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-stellar-purple/20 text-xl group-hover:bg-stellar-purple/30">
@@ -188,7 +231,7 @@ export default function OrganizationsPage() {
           onClose={() => setShowRegisterModal(false)}
           onSuccess={() => {
             setShowRegisterModal(false);
-            void mutate(); // Refresh the data using SWR
+            void refetch();
           }}
         />
       )}

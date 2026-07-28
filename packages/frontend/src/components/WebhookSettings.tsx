@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 interface WebhookDelivery {
   id: string;
@@ -24,53 +25,48 @@ interface Props {
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
 
 export function WebhookSettings({ orgId, publicKey }: Props) {
+  const queryClient = useQueryClient();
   const [url, setUrl] = useState("");
-  const [config, setConfig] = useState<WebhookConfig | null>(null);
-  const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
-  const [isSaving, setIsSaving] = useState(false);
-  const [isTesting, setIsTesting] = useState(false);
   const [revealedSecret, setRevealedSecret] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<any>(null);
 
-  const fetchConfig = async () => {
-    try {
+  const configQuery = useQuery({
+    queryKey: ["webhook-config", orgId, publicKey],
+    enabled: Boolean(orgId && publicKey),
+    queryFn: async () => {
       const res = await fetch(`${BACKEND_URL}/api/org/${orgId}/webhook`, {
         headers: { Authorization: `Bearer ${publicKey}` },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setConfig(data);
-        setUrl(data.url);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch webhook config: ${res.statusText}`);
       }
-    } catch (err) {
-      console.error("Failed to fetch webhook config", err);
-    }
-  };
+      return res.json() as Promise<WebhookConfig>;
+    },
+  });
 
-  const fetchDeliveries = async () => {
-    try {
+  const deliveriesQuery = useQuery({
+    queryKey: ["webhook-deliveries", orgId, publicKey],
+    enabled: Boolean(orgId && publicKey),
+    queryFn: async () => {
       const res = await fetch(`${BACKEND_URL}/api/org/${orgId}/webhook/deliveries`, {
         headers: { Authorization: `Bearer ${publicKey}` },
       });
-      if (res.ok) {
-        setDeliveries(await res.json());
+      if (!res.ok) {
+        throw new Error(`Failed to fetch deliveries: ${res.statusText}`);
       }
-    } catch (err) {
-      console.error("Failed to fetch deliveries", err);
-    }
-  };
+      return res.json() as Promise<WebhookDelivery[]>;
+    },
+  });
 
   useEffect(() => {
-    fetchConfig();
-    fetchDeliveries();
-  }, [orgId]);
+    if (configQuery.data) {
+      setUrl(configQuery.data.url);
+    }
+  }, [configQuery.data]);
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSaving(true);
-    setError(null);
-    try {
+  const saveMutation = useMutation({
+    mutationFn: async () => {
       const res = await fetch(`${BACKEND_URL}/api/org/${orgId}/webhook`, {
         method: "POST",
         headers: {
@@ -79,49 +75,72 @@ export function WebhookSettings({ orgId, publicKey }: Props) {
         },
         body: JSON.stringify({ url }),
       });
-      if (res.ok) {
-        await fetchConfig();
-      } else {
+      if (!res.ok) {
         const data = await res.json();
-        setError(data.message || "Failed to update webhook");
+        throw new Error(data.message || "Failed to update webhook");
       }
-    } catch (err) {
-      setError("Network error. Please try again.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["webhook-config", orgId, publicKey] });
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : "Network error. Please try again.");
+    },
+  });
 
-  const handleReveal = async () => {
-    try {
+  const revealMutation = useMutation({
+    mutationFn: async () => {
       const res = await fetch(`${BACKEND_URL}/api/org/${orgId}/webhook/reveal`, {
         headers: { Authorization: `Bearer ${publicKey}` },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setRevealedSecret(data.secret);
+      if (!res.ok) {
+        throw new Error(`Failed to reveal secret: ${res.statusText}`);
       }
-    } catch (err) {
+      return res.json() as Promise<{ secret: string }>;
+    },
+    onSuccess: (data) => {
+      setRevealedSecret(data.secret);
+    },
+    onError: (err) => {
       console.error("Failed to reveal secret", err);
-    }
-  };
+    },
+  });
 
-  const handleTest = async () => {
-    setIsTesting(true);
-    setTestResult(null);
-    try {
+  const testMutation = useMutation({
+    mutationFn: async () => {
       const res = await fetch(`${BACKEND_URL}/api/org/${orgId}/webhook/test`, {
         method: "POST",
         headers: { Authorization: `Bearer ${publicKey}` },
       });
-      const data = await res.json();
+      return res.json();
+    },
+    onSuccess: async (data) => {
       setTestResult(data);
-      fetchDeliveries();
-    } catch (err) {
+      await queryClient.invalidateQueries({ queryKey: ["webhook-deliveries", orgId, publicKey] });
+    },
+    onError: () => {
       setError("Test failed");
-    } finally {
-      setIsTesting(false);
-    }
+    },
+  });
+
+  const config = configQuery.data;
+  const deliveries = deliveriesQuery.data || [];
+  const isSaving = saveMutation.isPending;
+  const isTesting = testMutation.isPending;
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    saveMutation.mutate();
+  };
+
+  const handleReveal = async () => {
+    revealMutation.mutate();
+  };
+
+  const handleTest = async () => {
+    setTestResult(null);
+    testMutation.mutate();
   };
 
   return (

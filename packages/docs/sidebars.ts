@@ -10,7 +10,7 @@ const sidebars: SidebarsConfig = {
     {
       type: "category",
       label: "API Reference",
-      items: ["api-reference"],
+      items: ["api-reference", "smart-contract"],
     },
   ],
 };

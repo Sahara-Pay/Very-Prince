@@ -7,24 +7,9 @@
  */
 
 import { authService, NonceResponse } from "../services/authService.js";
-
-// ─── Response Types ───────────────────────────────────────────────────────
-
-export interface NonceSuccessResponse {
-  success: true;
-  data: NonceResponse;
-}
-
-export interface VerifySuccessResponse {
-  success: true;
-  message: string;
-}
-
-export interface ErrorResponse {
-  success: false;
-  error: string;
-  message: string;
-}
+import type {
+  AuthVerifySuccessResponse,
+} from "@very-prince/types";
 
 // ─── Controller ─────────────────────────────────────────────────────────────
 
@@ -51,7 +36,7 @@ export const authController = {
     publicKey: string,
     _signature: string,
     originalMessage: string
-  ): Promise<VerifySuccessResponse> {
+  ): Promise<AuthVerifySuccessResponse> {
     // Extract nonce from the original message
     const nonceMatch = originalMessage.match(/Nonce: ([a-f0-9]+)/);
     if (!nonceMatch) {

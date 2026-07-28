@@ -112,7 +112,16 @@ export async function verifySignature(
       throw new Error(errorData.message || `Authentication failed: ${response.statusText}`);
     }
     
-    return response.json();
+    const result = await response.json();
+    if (result.success) {
+      return {
+        token: `mock-jwt-token-for-${publicKey}`,
+        user: {
+          publicKey,
+        },
+      };
+    }
+    throw new Error(result.message || "Verification failed");
   } catch (error) {
     console.error("Error verifying signature:", error);
     throw error;

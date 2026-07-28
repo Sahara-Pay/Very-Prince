@@ -1,37 +1,35 @@
-/**
- * @file analytics.ts
- * @description HTTP route definitions for analytics.
- */
+import type { FastifyPluginAsync } from 'fastify';
+import { analyticsController } from '../controllers/analyticsController.js';
 
-import type { FastifyPluginAsync } from "fastify";
-import { analyticsController } from "../controllers/analyticsController.js";
-
-/**
- * Analytics routes.
- * Registered at: /api/v1/analytics
- */
 export const analyticsRoutes: FastifyPluginAsync = async (fastify) => {
   /**
    * GET /leaderboard
-   * Returns the leaderboard of top traders based on 7-day volume.
+   * Returns the top traders ranked by 7-day USD volume.
    *
-   * @example
-   * GET /api/v1/analytics/leaderboard
+   * @param _request - Fastify request (unused).
+   * @param reply - Fastify reply.
+   * @returns Array of leaderboard entries with rank, wallet address, and volume.
    */
   fastify.get(
-    "/leaderboard",
+    '/leaderboard',
     {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: '1 minute',
+        },
+      },
       schema: {
         response: {
           200: {
-            type: "array",
+            type: 'array',
             items: {
-              type: "object",
+              type: 'object',
               properties: {
-                rank: { type: "integer" },
-                walletAddress: { type: "string" },
-                truncatedAddress: { type: "string" },
-                volumeUSD: { type: "number" },
+                rank: { type: 'integer' },
+                walletAddress: { type: 'string' },
+                truncatedAddress: { type: 'string' },
+                volumeUSD: { type: 'number' },
               },
             },
           },

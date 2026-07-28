@@ -11,6 +11,7 @@
 
 import crypto from 'crypto';
 import { prisma } from './db.js';
+import { logger } from '../utils/logger.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -83,6 +84,11 @@ class ApiKeyService {
         isActive: true,
       },
     });
+
+    logger.info(
+      { organizationId, apiKeyId: apiKey.id, name: apiKey.name },
+      "API key generated"
+    );
 
     return {
       plainTextKey,
@@ -171,7 +177,14 @@ class ApiKeyService {
       },
     });
 
-    return result.count > 0;
+    const revoked = result.count > 0;
+    if (revoked) {
+      logger.info({ organizationId, apiKeyId }, "API key revoked");
+    } else {
+      logger.warn({ organizationId, apiKeyId }, "API key revocation requested but no matching key found");
+    }
+
+    return revoked;
   }
 
   /**

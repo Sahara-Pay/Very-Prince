@@ -6,7 +6,7 @@ sidebar_label: Smart Contract API
 
 # Smart Contract API Reference
 
-The core logic of the **Very-Prince** payout infrastructure is implemented as a Soroban smart contract in Rust. The contract manages organization registration, public budgets, maintainer enrollment, and payout allocations with built-in multisig security controls and protocol pause features.
+The core logic of the **Very-Prince** payout infrastructure is implemented as a Soroban smart contract in Rust. The contract manages organization registration, public budgets, maintainer enrollment, and payout allocations with native Soroban authorization and protocol pause features.
 
 ---
 
@@ -42,11 +42,12 @@ pub struct PayoutParams {
 ```
 
 ### `MaintainerPayout`
-Represents the claimable balance and unlock timestamp for a maintainer.
+Represents the remaining locked balance and vesting schedule for a maintainer.
 ```rust
 pub struct MaintainerPayout {
     pub amount: i128,
-    pub unlock_timestamp: u64,
+    pub claimed_amount: i128,
+    pub tranches: Vec<VestingTranche>,
 }
 ```
 
@@ -67,10 +68,10 @@ pub enum ProtocolState {
 |---|---|---|
 | `1` | `AlreadyInitialized` | Contract has already been initialized. |
 | `2` | `EmptyAdminList` | Administrator list provided during initialization is empty. |
-| `3` | `InvalidThreshold` | Multisig threshold is invalid (e.g. 0 or greater than admins length). |
+| `3` | `InvalidThreshold` | Native protocol admin config must contain exactly one admin and threshold `1`. |
 | `4` | `ContractNotInitialized` | Attempted to call a function requiring contract initialization. |
 | `5` | `ProtocolPaused` | Protocol is currently paused. |
-| `6` | `InsufficientMultisigAuth` | Number of valid administrator signatures is below the threshold. |
+| `6` | `InsufficientMultisigAuth` | Legacy signer payloads are no longer accepted for protocol admin operations. |
 | `7` | `OrgAlreadyRegistered` | Organization with the specified ID already exists. |
 | `8` | `OrgNotFound` | Organization could not be found. |
 | `9` | `NotAuthorized` | The caller lacks permissions for this operation. |
@@ -101,11 +102,11 @@ pub enum ProtocolState {
 ```rust
 pub fn init(env: Env, token: Address, admins: Vec<Address>, threshold: u32)
 ```
-Initializes the contract with the token address, global admin list, and threshold for multisig admin actions.
+Initializes the contract with the token address and a single native protocol admin address. If threshold policies are needed, configure them on that Stellar account or Soroban account contract.
 - **Panics**:
   - `AlreadyInitialized` if already initialized.
   - `EmptyAdminList` if `admins` is empty.
-  - `InvalidThreshold` if `threshold` is 0 or greater than `admins.len()`.
+  - `InvalidThreshold` if `admins.len() != 1` or `threshold != 1`.
 
 ### `get_token`
 ```rust
@@ -119,7 +120,7 @@ Returns the Stellar Asset Contract address configured during initialization.
 ```rust
 pub fn get_multisig_admin(env: Env) -> MultisigAdmin
 ```
-Returns the global multisig configuration (admins and threshold).
+Returns the native protocol admin configuration. The legacy shape is retained, but `admins[0]` is the address authorized with Soroban native auth.
 - **Panics**:
   - `ContractNotInitialized` if not initialized.
 
@@ -137,7 +138,7 @@ Returns the current protocol state (`Active` or `Paused`).
 ```rust
 pub fn register_org(env: Env, id: Symbol, name: String, admin: Address)
 ```
-Registers a new organization. Requires admin signature.
+Registers a new organization. Requires admin authorization.
 - **Panics**:
   - `OrgAlreadyRegistered` if an organization with `id` exists.
 
@@ -153,7 +154,7 @@ Retrieves the organization struct.
 ```rust
 pub fn update_org_metadata(env: Env, id: Symbol, admin: Address, metadata_cid: String)
 ```
-Updates the metadata IPFS CID (Logo/Description) for the organization. Requires signature from one of the organization admins.
+Updates the metadata IPFS CID (Logo/Description) for the organization. Requires authorization from one of the organization admins.
 - **Panics**:
   - `OrgNotFound` if organization does not exist.
   - `NotAuthorized` if caller is not an admin of the organization.
@@ -204,7 +205,7 @@ Returns the remaining token budget for `id`.
 ```rust
 pub fn add_maintainer(env: Env, org_id: Symbol, maintainer: Address)
 ```
-Enrolls `maintainer` under `org_id`. Requires organization admin signature.
+Enrolls `maintainer` under `org_id`. Requires organization admin authorization.
 - **Panics**:
   - `OrgNotFound` if organization does not exist.
   - `MaintainerAlreadyRegistered` if maintainer is already registered with another org.
@@ -229,7 +230,7 @@ Lists all maintainer addresses registered under `org_id`.
 ```rust
 pub fn allocate_payout(env: Env, org_id: Symbol, admin: Address, maintainer: Address, amount: i128, unlock_timestamp: u64)
 ```
-Allocates a payout to a maintainer. The payout is locked until `unlock_timestamp` (Unix epoch time in seconds). Requires organization admin signature.
+Allocates a payout to a maintainer. The payout is locked until `unlock_timestamp` (Unix epoch time in seconds). Requires organization admin authorization.
 - **Panics**:
   - `ProtocolPaused` if paused.
   - `NotAuthorized` if caller is not an admin.
@@ -264,7 +265,7 @@ Returns the total claimable payout balance for `maintainer`.
 ```rust
 pub fn claim_payout(env: Env, maintainer: Address) -> i128
 ```
-Claims the accumulated payout balance. Requires signature from `maintainer`.
+Claims the accumulated payout balance. Requires authorization from `maintainer`.
 - **Panics**:
   - `ProtocolPaused` if paused.
   - `NoClaimableBalance` if claimable balance is 0.
@@ -274,30 +275,30 @@ Claims the accumulated payout balance. Requires signature from `maintainer`.
 
 ### `pause_protocol`
 ```rust
-pub fn pause_protocol(env: Env, signers: Vec<Address>)
+pub fn pause_protocol(env: Env)
 ```
-Pauses the protocol, blocking funding, allocation, and claim functions. Requires global multisig admin authorization.
+Pauses the protocol, blocking funding, allocation, and claim functions. Requires native authorization from the configured protocol admin address.
 
 ### `unpause_protocol`
 ```rust
-pub fn unpause_protocol(env: Env, signers: Vec<Address>)
+pub fn unpause_protocol(env: Env)
 ```
-Unpauses the protocol. Requires global multisig admin authorization.
+Unpauses the protocol. Requires native authorization from the configured protocol admin address.
 
 ### `propose_admin`
 ```rust
-pub fn propose_admin(env: Env, signers: Vec<Address>, new_admin: Address)
+pub fn propose_admin(env: Env, new_admin: Address)
 ```
-Proposes a new global admin. Requires global multisig admin authorization.
+Proposes a new global admin. Requires native authorization from the configured protocol admin address.
 
 ### `accept_admin`
 ```rust
 pub fn accept_admin(env: Env, new_admin: Address)
 ```
-Accepts the proposed global admin role and updates the multisig configuration. Requires `new_admin` authorization.
+Accepts the proposed global admin role and updates the native protocol admin configuration. Requires `new_admin` authorization.
 
 ### `upgrade`
 ```rust
-pub fn upgrade(env: Env, signers: Vec<Address>, new_wasm_hash: BytesN<32>)
+pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>)
 ```
-Upgrades the contract binary to the new WASM hash. Requires global multisig admin authorization.
+Upgrades the contract binary to the new WASM hash. Requires native authorization from the configured protocol admin address.

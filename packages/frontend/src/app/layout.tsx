@@ -12,6 +12,7 @@ import { Toaster } from "sonner";
 import { WalletProvider } from "@/contexts/WalletContext";
 import { AuthProvider } from "@/contexts/AuthContext";
 import DebugToggleClient from "@/components/DebugToggleClient";
+import RoutePrefetcher from "@/components/RoutePrefetcher";
 import { TRPCProvider } from "@/trpc/provider";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
@@ -19,13 +20,14 @@ import "./globals.css";
 const inter = Inter({
   subsets: ["latin"],
   variable: "--font-inter",
+  display: "swap",
 });
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-jetbrains-mono",
+  display: "swap",
 });
-
 
 
 // ── SEO Metadata ──────────────────────────────────────────────────────────────
@@ -77,6 +79,10 @@ export default function RootLayout({
     <html lang="en" translate="no" suppressHydrationWarning className={`${inter.variable} ${jetbrainsMono.variable} notranslate`}>
       <head>
         <meta name="google" content="notranslate" />
+        {/* PWA — Apple/iOS meta tags for home screen install */}
+        <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         {/* Plausible — privacy-first analytics, no cookies, GDPR-compliant */}
         {plausibleDomain && (
           <Script
@@ -99,6 +105,7 @@ export default function RootLayout({
               {/* Page content */}
               <div className="relative">{children}</div>
               <DebugToggleClient />
+              <RoutePrefetcher />
 
               {/* Toast notifications */}
               <Toaster

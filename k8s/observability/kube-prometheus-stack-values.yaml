@@ -1,0 +1,128 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# kube-prometheus-stack Helm values – enable ServiceMonitor/PodMonitor CRDs
+# and the Grafana dashboard sidecar.
+#
+# Install / upgrade:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm upgrade --install kube-prometheus-stack \
+#     prometheus-community/kube-prometheus-stack \
+#     --version 58.3.3 \
+#     --namespace monitoring --create-namespace \
+#     -f k8s/observability/kube-prometheus-stack-values.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ── Prometheus Operator ───────────────────────────────────────────────────────
+prometheusOperator:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ── Prometheus instance ───────────────────────────────────────────────────────
+prometheus:
+  prometheusSpec:
+    # Match all ServiceMonitors / PodMonitors with label release=kube-prometheus-stack
+    serviceMonitorSelector:
+      matchLabels:
+        release: kube-prometheus-stack
+    podMonitorSelector:
+      matchLabels:
+        release: kube-prometheus-stack
+    ruleSelector:
+      matchLabels:
+        release: kube-prometheus-stack
+
+    # Scrape every 15 s – fine-grained enough for microsecond eBPF data
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+
+    retention: 15d
+    retentionSize: "10GB"
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 50Gi
+
+# ── Grafana ──────────────────────────────────────────────────────────────────
+grafana:
+  enabled: true
+
+  adminPassword: ""    # set via --set grafana.adminPassword=<secret> or Sealed Secret
+
+  sidecar:
+    dashboards:
+      enabled: true
+      searchNamespace: ALL        # picks up ConfigMaps from any namespace
+      label: grafana_dashboard
+      labelValue: "1"
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          type: prometheus
+          url: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+          access: proxy
+          isDefault: true
+          jsonData:
+            timeInterval: 15s
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 5Gi
+
+# ── Alertmanager ─────────────────────────────────────────────────────────────
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+# ── Node exporter (host-level cgroup/disk metrics) ────────────────────────────
+nodeExporter:
+  enabled: true
+
+# ── kube-state-metrics ───────────────────────────────────────────────────────
+kubeStateMetrics:
+  enabled: true

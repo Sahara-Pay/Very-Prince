@@ -1,0 +1,194 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# ServiceMonitor – scrape Hubble metrics from the Cilium DaemonSet
+#
+# Requires: kube-prometheus-stack (or any Prometheus Operator deployment)
+#           with serviceMonitorSelector matching label release=kube-prometheus-stack
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cilium-hubble
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: cilium-hubble
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  selector:
+    matchLabels:
+      k8s-app: hubble
+  endpoints:
+    - port: hubble-metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        # Attach the source node name for per-node dashboards
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# ServiceMonitor – scrape Cilium agent metrics (CPU throttling, BPF map usage)
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cilium-agent
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: cilium-agent
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  endpoints:
+    - port: prometheus
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# PodMonitor – scrape OTEL-collector metrics forwarded from Pixie PEMs
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: pixie-pem
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: pixie-pem
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - pl
+  selector:
+    matchLabels:
+      app: pem
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - sourceLabels: [__meta_kubernetes_pod_namespace]
+          targetLabel: namespace
+
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# PrometheusRule – alerting rules derived from eBPF kernel telemetry
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: very-prince-ebpf-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: very-prince-ebpf-alerts
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # ── TCP / Network latency ───────────────────────────────────────────────
+    - name: ebpf.network.latency
+      interval: 30s
+      rules:
+        - alert: HighTCPForwardLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(hubble_flows_processed_total{type="trace",verdict="FORWARDED"}[5m]))
+              by (le, source, destination)
+            ) > 0.1
+          for: 2m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "High TCP forward latency (p99 > 100 ms)"
+            description: >
+              99th-percentile TCP forwarding latency between
+              {{ $labels.source }} and {{ $labels.destination }}
+              is {{ $value | humanizeDuration }}.
+
+        - alert: TCPDropRateHigh
+          expr: |
+            sum(rate(hubble_drop_total[5m])) by (reason, namespace) > 5
+          for: 1m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "Elevated TCP drop rate in {{ $labels.namespace }}"
+            description: >
+              {{ $value | humanize }} packets/sec are being dropped
+              (reason: {{ $labels.reason }}).
+
+    # ── PostgreSQL / Disk I/O ───────────────────────────────────────────────
+    - name: ebpf.postgres.io
+      interval: 30s
+      rules:
+        - alert: PostgresQueryLatencyHigh
+          # Uses the pg_query_duration histogram emitted by Pixie's
+          # postgres_events PxL script and exposed via OTEL bridge
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(px_postgres_query_duration_seconds_bucket[5m]))
+              by (le, namespace, pod)
+            ) > 0.5
+          for: 3m
+          labels:
+            severity: warning
+            team: backend
+          annotations:
+            summary: "PostgreSQL p95 query latency > 500 ms"
+            description: >
+              Pod {{ $labels.pod }} in {{ $labels.namespace }}
+              has p95 PostgreSQL query latency of
+              {{ $value | humanizeDuration }}.
+
+        - alert: ContainerDiskIOPressure
+          expr: |
+            sum(rate(container_fs_reads_bytes_total[5m])) by (pod, namespace)
+            + sum(rate(container_fs_writes_bytes_total[5m])) by (pod, namespace)
+            > 52428800   # 50 MiB/s
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "Container disk I/O pressure in {{ $labels.namespace }}"
+            description: >
+              Pod {{ $labels.pod }} is sustaining >50 MiB/s aggregate disk I/O.
+
+    # ── CPU throttling ──────────────────────────────────────────────────────
+    - name: ebpf.container.cpu
+      interval: 30s
+      rules:
+        - alert: ContainerCPUThrottlingHigh
+          expr: |
+            sum(increase(container_cpu_cfs_throttled_periods_total[5m])) by (pod, namespace)
+            / sum(increase(container_cpu_cfs_periods_total[5m])) by (pod, namespace)
+            > 0.25
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "CPU throttling >25% for pod {{ $labels.pod }}"
+            description: >
+              {{ $labels.pod }} in {{ $labels.namespace }} is CPU-throttled
+              for {{ $value | humanizePercentage }} of scheduling periods.

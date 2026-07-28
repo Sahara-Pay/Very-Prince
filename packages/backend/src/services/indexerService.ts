@@ -2,8 +2,11 @@ import * as cron from 'node-cron';
 import { CONTRACT_ID, DEPLOYMENT_LEDGER } from '../config/env.js';
 import { stellarService } from './stellarService.js';
 import { prisma } from './db.js';
+import { invalidateOnFundingEvent, invalidateOnTransactionEvent } from './cacheInvalidation.js';
 import { emitSSEEvent } from './sse.js';
 import { webhookService } from './webhookService.js';
+import { txHashFilter } from './txHashFilter.js';
+import { publishToStream } from './redisStreams.js';
 import { logger } from '../utils/logger.js';
 import {
   decodeSorobanEvent,
@@ -139,9 +142,34 @@ export class IndexerService {
   }
 
   private async handleContractEvent(event: ContractEvent, eventIndex: number): Promise<void> {
+    const createdAt = new Date(event.ledgerClosedAt);
+
+    // ── HLL replay-attack filter ──────────────────────────────────────────────
+    // Check before any SSE emission, webhook dispatch, stream publish, or DB write.
+    // The filter is probabilistic: confirmed positives are dropped immediately;
+    // false positives are verified against the DB and allowed through.
+    const { isDuplicate, decidedBy } = await txHashFilter.check(event.txHash, eventIndex, createdAt);
+    if (isDuplicate) {
+      logger.debug(
+        { txHash: event.txHash, eventIndex, eventName: event.eventName, decidedBy },
+        '[IndexerService] Duplicate event suppressed by HLL filter',
+      );
+      return;
+    }
+
+    // ── Redis Streams push (live path) ────────────────────────────────────────
+    // Publish to the central stream BEFORE DB persistence so connected clients
+    // see the mutation instantly even under slow transaction commits. If the
+    // stream is unavailable, `publishToStream` degrades to the local event bus.
+    void publishToStream(event, eventIndex);
+    // Log filter metrics periodically for observability (every 500 events).
+    if (txHashFilter.getMetrics().totalChecked % 500 === 0) {
+      logger.info(txHashFilter.getMetrics(), '[TxHashFilter] metrics snapshot');
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     let walletAddress = '';
     let volumeUSD = BigInt(0);
-    const createdAt = new Date(event.ledgerClosedAt);
 
     switch (event.eventName) {
       case 'PayoutAllocated': {
@@ -218,6 +246,7 @@ export class IndexerService {
           ],
           skipDuplicates: true,
         });
+        void invalidateOnFundingEvent(fundEvent.orgId);
         break;
       }
       case 'OrgRegistered': {
@@ -263,6 +292,7 @@ export class IndexerService {
       update: {},
       create: { txHash: event.txHash, eventIndex, walletAddress, volumeUSD: volumeUSD.toString(), type: event.eventName, ledger: event.ledger, rawData: JSON.stringify(event), createdAt },
     });
+    void invalidateOnTransactionEvent();
   }
 
   getStatus(): { isRunning: boolean; lastProcessedLedger?: number; consecutiveFailures: number; currentBackoffMs: number } {

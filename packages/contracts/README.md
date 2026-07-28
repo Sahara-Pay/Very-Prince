@@ -6,8 +6,21 @@ The contracts package contains the Soroban smart contract implementation for the
 
 - Defines the on-chain registry for organizations and maintainers.
 - Tracks public funding and payout balances for each organization.
+- Runs an on-chain quadratic funding vault with integer-only matching math.
 - Enforces payout claims through Stellar-native authorization flows.
 - Provides contract tests for the grant and payout lifecycle.
+
+## Quadratic funding vault
+
+The contract exposes a quadratic funding flow that stays fully deterministic on-chain:
+
+- `verify_humanity` and `revoke_humanity` let the protocol admin issue non-transferable proof-of-humanity verification records with issuer and timestamp metadata.
+- `qf_deposit_matching_pool` transfers tokens into the shared matching pool.
+- `qf_contribute` accepts verified-human project contributions, stores each human's cumulative contribution, and updates project `sqrt_sum` incrementally.
+- `qf_preview_distribution` computes `pool * project_weight / total_weight`, where `project_weight = sum(isqrt(cumulative_human_contribution))^2`.
+- `qf_distribute` moves the computed matching amounts into existing organization budgets, while storing each project's cumulative `matching_allocated` total.
+
+All quadratic calculations use integer arithmetic. The exported `isqrt` method mirrors Python's `math.isqrt` semantics and avoids floating-point operations in WASM.
 
 ## Prerequisites
 

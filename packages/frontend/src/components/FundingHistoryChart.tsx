@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import { useSuspenseQuery } from "@tanstack/react-query";
+import { trpcClient } from "@/trpc/client";
+import { DateRangePicker, DateRange } from "./ui/DateRangePicker";
 
 interface FundingHistoryPoint {
   id: string;
@@ -19,25 +21,16 @@ interface FundingHistoryChartProps {
   orgId: string;
 }
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:3001/api";
-
-const fetcher = async (url: string) => {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error("Failed to fetch funding history");
-  }
-  return res.json() as Promise<FundingHistoryPoint[]>;
-};
-
 export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
-  const { data } = useSuspenseQuery({
+  const { data } = useSuspenseQuery<FundingHistoryPoint[]>({
     queryKey: ["funding-history", orgId],
-    queryFn: () => fetcher(`${BACKEND_URL}/stats/funding-history/${orgId}`),
+    queryFn: () => trpcClient.stats.getFundingHistory.query({ orgId }) as unknown as Promise<FundingHistoryPoint[]>,
     staleTime: 5000,
   });
 
   const [hoveredPoint, setHoveredPoint] = useState<FundingHistoryPoint | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const [dateRange, setDateRange] = useState<DateRange>({ fromDate: null, toDate: null });
 
   if (!data || data.length === 0) {
     return (
@@ -71,15 +64,23 @@ export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
     time: new Date(pt.createdAt).getTime(),
   }));
 
-  const tMin = parsedPoints[0]!.time;
-  const tMax = parsedPoints[parsedPoints.length - 1]!.time;
-  const yMax = Math.max(...parsedPoints.map((p) => p.valXlm));
+  // Filter parsed points client-side based on the selected date range
+  const filteredPoints = parsedPoints.filter((pt) => {
+    if (dateRange.fromDate && pt.time < dateRange.fromDate.getTime()) return false;
+    if (dateRange.toDate && pt.time > dateRange.toDate.getTime()) return false;
+    return true;
+  });
+
+  const hasFilteredPoints = filteredPoints.length > 0;
+  const tMin = hasFilteredPoints ? filteredPoints[0]!.time : 0;
+  const tMax = hasFilteredPoints ? filteredPoints[filteredPoints.length - 1]!.time : 0;
+  const yMax = hasFilteredPoints ? Math.max(...filteredPoints.map((p) => p.valXlm)) : 0;
   const yLimit = yMax === 0 ? 10 : yMax * 1.15; // 15% top padding
 
-  const pointsWithCoords = parsedPoints.map((pt) => {
+  const pointsWithCoords = filteredPoints.map((pt) => {
     // X calculation
     let ratioX = 0;
-    if (parsedPoints.length > 1 && tMax !== tMin) {
+    if (filteredPoints.length > 1 && tMax !== tMin) {
       ratioX = (pt.time - tMin) / (tMax - tMin);
     } else {
       ratioX = 0.5; // Single point in center
@@ -135,7 +136,7 @@ export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
 
   return (
     <div className="glass-card p-6 relative">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
         <div>
           <h3 className="font-semibold text-white text-sm uppercase tracking-wider">
             Funding History
@@ -144,14 +145,24 @@ export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
             Cumulative budget contributions over time (in XLM)
           </p>
         </div>
-        <div className="flex items-baseline gap-1 text-right">
-          <span className="text-lg font-bold text-stellar-teal">{yMax.toFixed(2)}</span>
-          <span className="text-xs text-stellar-teal font-medium">XLM Total</span>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+          <DateRangePicker onChange={setDateRange} />
+          {hasFilteredPoints && (
+            <div className="flex items-baseline gap-1 text-right">
+              <span className="text-lg font-bold text-stellar-teal">{yMax.toFixed(2)}</span>
+              <span className="text-xs text-stellar-teal font-medium">XLM Total</span>
+            </div>
+          )}
         </div>
       </div>
 
       <div className="relative">
-        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto select-none overflow-visible">
+        {!hasFilteredPoints ? (
+          <div className="flex flex-col items-center justify-center min-h-[240px] text-center" aria-label="No data for selected date range">
+            <p className="text-white/40 text-sm">No funding history found for the selected date range.</p>
+          </div>
+        ) : (
+          <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto select-none overflow-visible">
           <defs>
             <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#7B61FF" stopOpacity="0.25" />
@@ -303,7 +314,8 @@ export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
               </g>
             );
           })}
-        </svg>
+          </svg>
+        )}
       </div>
 
       {/* Floating Tooltip */}

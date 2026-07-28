@@ -12,6 +12,7 @@ import type {
   PaginatedResponse,
   OrgListItem,
   FundResponse,
+  TRPCOrganizationListResponse,
 } from '@very-prince/types';
 
 export type { OrganizationDetailsResponse as Org, PaginatedResponse, OrgListItem };
@@ -25,6 +26,21 @@ export async function fetchOrganizationWithTRPC(id: string): Promise<Organizatio
     return await trpcClient.organization.get.query({ id });
   } catch (error) {
     throw new Error(`Failed to fetch organization: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+/**
+ * Fetch a cursor-paginated list of organizations using tRPC with full type safety.
+ */
+export async function fetchOrganizationsWithTRPC(
+  cursor?: string,
+  limit: number = 10,
+  search?: string
+): Promise<TRPCOrganizationListResponse> {
+  try {
+    return await trpcClient.organization.list.query({ cursor, limit, search });
+  } catch (error) {
+    throw new Error(`Failed to fetch organizations: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
 

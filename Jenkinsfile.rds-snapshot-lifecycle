@@ -1,0 +1,130 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Jenkinsfile — RDS Snapshot Lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+// Declarative pipeline that plans and applies the
+// terraform/modules/rds-snapshot-lifecycle module which keeps manual RDS
+// snapshots from accumulating forever.
+//
+// Cross-platform notes:
+//   - Uses native Windows `bat` (no WSL, no Git-Bash-only constructs).
+//   - Uses `sh` on Linux/macOS agents.
+//   - Terraform installation on Windows is handled by scripts/terraform-setup.ps1
+//     (chocolatey / scoop / zip), so this pipeline assumes `terraform.exe`
+//     is already on PATH.
+//
+// Build/deploy steps are abstracted into jenkins-shared-library/vars/*.groovy,
+// loaded via load() until the library is extracted into its own repo and
+// registered as a Jenkins Global Pipeline Library (see
+// jenkins-shared-library/README.md).
+// ─────────────────────────────────────────────────────────────────────────────
+
+def lib = [:]
+
+pipeline {
+    agent {
+        label 'terraform'
+    }
+
+    environment {
+        TF_VERSION          = '1.9.0'
+        AWS_DEFAULT_REGION  = 'us-east-1'
+        TERRAFORM_DIR       = 'terraform'
+        MODULE_DIR          = 'terraform/modules/rds-snapshot-lifecycle'
+        PLAN_FILE           = 'tfplan-rds-lifecycle'
+    }
+
+    options {
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                script {
+                    lib.tfSetup       = load('jenkins-shared-library/vars/tfSetup.groovy')
+                    lib.tfInit        = load('jenkins-shared-library/vars/tfInit.groovy')
+                    lib.tfFormatCheck = load('jenkins-shared-library/vars/tfFormatCheck.groovy')
+                    lib.tfValidate    = load('jenkins-shared-library/vars/tfValidate.groovy')
+                    lib.tfPlan        = load('jenkins-shared-library/vars/tfPlan.groovy')
+                    lib.tfApply       = load('jenkins-shared-library/vars/tfApply.groovy')
+
+                    lib.tfSetup(tools: ['terraform', 'aws'])
+                }
+            }
+        }
+
+        stage('Format Check') {
+            steps {
+                script {
+                    lib.tfFormatCheck(dir: env.MODULE_DIR)
+                }
+            }
+        }
+
+        stage('Init') {
+            steps {
+                script {
+                    lib.tfInit(dir: env.TERRAFORM_DIR)
+                }
+            }
+        }
+
+        stage('Validate Module') {
+            steps {
+                script {
+                    lib.tfValidate(dir: env.MODULE_DIR, standalone: true)
+                }
+            }
+        }
+
+        stage('Plan') {
+            steps {
+                script {
+                    lib.tfPlan(
+                        dir: env.TERRAFORM_DIR,
+                        planFile: env.PLAN_FILE,
+                        stashName: 'rds-lifecycle-plan',
+                        target: 'module.rds_snapshot_lifecycle',
+                        inputFalse: true
+                    )
+                }
+            }
+        }
+
+        stage('Apply') {
+            when {
+                branch 'main'
+            }
+            input {
+                message 'Apply RDS snapshot lifecycle changes to production?'
+                ok 'Apply'
+                submitterParameter 'APPROVER'
+            }
+            steps {
+                script {
+                    lib.tfApply(
+                        dir: env.TERRAFORM_DIR,
+                        planFile: env.PLAN_FILE,
+                        stashName: 'rds-lifecycle-plan',
+                        inputFalse: true
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs()
+        }
+        success {
+            echo 'RDS snapshot lifecycle pipeline completed successfully'
+        }
+        failure {
+            echo 'RDS snapshot lifecycle pipeline failed'
+        }
+    }
+}

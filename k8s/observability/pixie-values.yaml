@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pixie Helm values – eBPF auto-instrumentation for very-prince
+#
+# Pixie deploys a DaemonSet of eBPF probes that capture HTTP/tRPC request
+# latency, PostgreSQL wire-protocol queries, and DNS latency directly at the
+# kernel layer.  Zero application code changes are required.
+#
+# Prerequisites:
+#   1. A Pixie Cloud deploy key (https://work.withpixie.ai → Admin → Keys)
+#      stored as a Kubernetes Secret (see below).
+#   2. Kernel ≥ 4.14 on worker nodes (5.8+ recommended for BTF support).
+#
+# Create the deploy-key secret once:
+#   kubectl create namespace pl
+#   kubectl create secret generic pixie-deploy-key \
+#     --namespace pl \
+#     --from-literal=deploy-key=<YOUR_PIXIE_DEPLOY_KEY>
+#
+# Install / upgrade:
+#   helm repo add pixie https://pixie-operator-charts.storage.googleapis.com
+#   helm upgrade --install pixie-operator pixie/pixie-operator-chart \
+#     --namespace pl --create-namespace \
+#     -f k8s/observability/pixie-values.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+deployKeySecret: pixie-deploy-key    # K8s secret name that holds deploy-key
+
+# ── Vizier – the per-cluster eBPF data collector ────────────────────────────
+vizier:
+  version: "0.14.5"
+
+  # Enable eBPF tracing protocols
+  customPEMs:
+    enabled: false   # Use pre-built PEM binaries shipped with this version
+
+  # Data-collector (PEM) DaemonSet runs on every Linux worker node
+  pem:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+    tolerations:
+      - operator: Exists
+    nodeSelector:
+      kubernetes.io/os: linux
+
+  # Namespace filter – only trace pods in these namespaces
+  dataAccess: Full    # Full | Restricted; Full captures HTTP body payloads
+
+  # ── Prometheus export (OpenTelemetry bridge) ─────────────────────────────
+  # Pixie exports OTEL metrics that are scraped by Prometheus via the
+  # otel-collector sidecar configured in prometheus-scrape-configs.yaml.
+  exporterAddress: "otel-collector.monitoring.svc.cluster.local:4317"
+
+# ── Self-hosted Pixie Cloud (optional, comment out to use Pixie SaaS) ───────
+# cloudAddr: "self-hosted-cloud.example.com:443"

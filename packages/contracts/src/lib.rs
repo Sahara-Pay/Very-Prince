@@ -188,6 +188,10 @@ pub enum PrinceError {
     /// The provided nonce does not match the expected next nonce for this caller.
     /// This indicates a replayed or out-of-order payload — reject immediately.
     InvalidNonce = 34,
+    /// The BLS signature provided for the DAO approval is mathematically invalid.
+    InvalidBlsSignature = 35,
+    /// The BLS Proof-of-Possession (PoP) provided during key registration is invalid.
+    InvalidPoP = 36,
 }
 
 #[contracttype]
@@ -225,6 +229,10 @@ pub enum DataKey {
     /// atomically incremented to `expected + 1` on each accepted call. Replayed
     /// payloads that present a stale nonce are rejected with `InvalidNonce`.
     Nonce(Address),
+    /// Aggregated BLS12-381 public key for a DAO (G2 point, 96 bytes).
+    DaoAggregatedPublicKey(Symbol),
+    /// Number of registered signers in a DAO.
+    DaoSignerCount(Symbol),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2218,6 +2226,7 @@ pub mod rlp;
 pub mod keccak;
 pub mod mpt;
 pub mod cross_chain_verifier;
+pub mod bls_verifier;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cross-chain contract entrypoints (added to the existing PayoutRegistry)
@@ -2482,6 +2491,102 @@ impl PayoutRegistry {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // BLS DAO Signature Aggregation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Register a new signer for a DAO by providing their BLS public key and a PoP.
+    ///
+    /// Verifies the Proof-of-Possession (PoP) to prevent rogue-key attacks. If
+    /// successful, updates the DAO's aggregated public key.
+    pub fn register_bls_signer(
+        env: Env,
+        dao_id: Symbol,
+        public_key: soroban_sdk::Bytes,
+        pop: soroban_sdk::Bytes,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        // Only DAO admins (org admins) can register signers
+        Self::get_org_admin_requirement(&env, &dao_id);
+
+        let mut pk_arr = [0u8; 96];
+        public_key.copy_into_slice(&mut pk_arr);
+        let mut pop_arr = [0u8; 48];
+        pop.copy_into_slice(&mut pop_arr);
+
+        if !bls_verifier::verify_pop(&pk_arr, &pop_arr) {
+            panic_with_error!(&env, PrinceError::InvalidPoP);
+        }
+
+        let agg_key = DataKey::DaoAggregatedPublicKey(dao_id.clone());
+        let current_agg: [u8; 96] = env
+            .storage()
+            .persistent()
+            .get(&agg_key)
+            .unwrap_or([0u8; 96]);
+
+        let updated_agg = bls_verifier::aggregate_pk(&current_agg, &pk_arr)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::InvalidPoP));
+
+        env.storage().persistent().set(&agg_key, &updated_agg);
+
+        // Update signer count
+        let count_key = DataKey::DaoSignerCount(dao_id.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        env.storage().persistent().set(&count_key, &(count + 1));
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "BlsSignerRegistered"),
+            ),
+            (dao_id, public_key),
+        );
+    }
+
+    /// Verify a DAO approval for a payout batch using an aggregated BLS signature.
+    ///
+    /// This allows a single 48-byte signature to represent approvals from all
+    /// registered DAO signers, drastically reducing gas costs for large DAOs.
+    pub fn verify_dao_payout_approval(
+        env: Env,
+        dao_id: Symbol,
+        payout_id: u64,
+        aggregated_signature: soroban_sdk::Bytes,
+    ) -> bool {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        let agg_key = DataKey::DaoAggregatedPublicKey(dao_id.clone());
+        let agg_pk: [u8; 96] = env
+            .storage()
+            .persistent()
+            .get(&agg_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NotAuthorized));
+
+        let mut sig_arr = [0u8; 48];
+        aggregated_signature.copy_into_slice(&mut sig_arr);
+
+        // The message is the payout_id (converted to bytes)
+        let msg_buf = payout_id.to_be_bytes();
+
+        let verified = bls_verifier::verify_aggregated(&sig_arr, &agg_pk, &msg_buf);
+
+        if verified {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "VeryPrince"),
+                    Symbol::new(&env, "BlsApprovalVerified"),
+                ),
+                (dao_id, payout_id),
+            );
+        }
+
+        verified
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -2492,3 +2597,5 @@ impl PayoutRegistry {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod bls_tests;

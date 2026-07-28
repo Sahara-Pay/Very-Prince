@@ -47,6 +47,7 @@ import { webhookWorker } from './workers/WebhookWorker.js';
 import { claimSagaService } from './services/claimSagaService.js';
 import { redisStreamsConsumer } from './services/redisStreams.js';
 import { evictionEngine } from './services/probabilisticEviction.js';
+import { diagnosticMonitor, diagnosticRoutes } from './services/diagnosticMonitor.js';
 import * as cron from 'node-cron';
 import * as Sentry from '@sentry/node';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
@@ -131,6 +132,7 @@ await server.register(apiKeyRoutes, { prefix: '/api/org' });
 await server.register(exportRoutes, { prefix: '/api/export' });
 await server.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
 await server.register(rateLimitRoutes, { prefix: '/api/v1' });
+await server.register(diagnosticRoutes, { prefix: '/api/v1' });
 
 await configureTRPC(server);
 
@@ -193,6 +195,7 @@ try {
   await server.listen({ port: SERVER_PORT, host: SERVER_HOST });
   server.log.info('Very-prince backend listening on http://' + SERVER_HOST + ':' + SERVER_PORT);
   await redisStreamsConsumer.start();
+  diagnosticMonitor.start();
   indexerService.start();
 
   // Start the Saga recovery worker to check for stalled/timed out transactions every minute
@@ -217,6 +220,7 @@ try {
     }
     indexerService.stop();
     await redisStreamsConsumer.stop();
+    diagnosticMonitor.stop();
     await webhookWorker.stop();
     evictionEngine.destroy();
     uwsApp.close();

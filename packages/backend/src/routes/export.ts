@@ -17,6 +17,7 @@ import { z } from "zod";
 import csv from "fast-csv";
 import { prismaRead } from "../services/db.js";
 import type { ExportRecord } from "@very-prince/types";
+import { streamAsyncEnvelope, cursorIterable } from "../utils/streamingJson.js";
 
 const ExportQuerySchema = z.object({
   type: z.enum(['csv', 'json']),
@@ -67,87 +68,135 @@ export const exportRoutes: FastifyPluginAsync = async (fastify) => {
         if (startDate) dateFilter.gte = new Date(startDate);
         if (endDate) dateFilter.lte = new Date(endDate);
 
-        const transactions = await prismaRead.transaction.findMany({
+        // Pre-fetch organizations to avoid N+1 queries during streaming.
+        // Even if there are 10k orgs, this is ~1MB of heap, which is safe.
+        const organizations = await prismaRead.organization.findMany({
+          select: { id: true, name: true },
+        });
+        const orgMap = new Map(organizations.map(org => [org.id, org.name]));
+
+        const filename = `payout-history-${address}-${new Date().toISOString().split('T')[0]}`;
+        const totalCount = await prismaRead.transaction.count({
           where: {
             walletAddress: address,
             type: { in: ['PAYOUT_CLAIMED', 'PAYOUT_ALLOCATED'] },
             ...(Object.keys(dateFilter).length > 0 && { createdAt: dateFilter }),
           },
-          orderBy: { createdAt: 'desc' },
         });
 
-        const orgIds = [...new Set(transactions.map(tx => tx.rawData ? JSON.parse(tx.rawData).orgId : null).filter(Boolean))];
-        const organizations = await prismaRead.organization.findMany({
-          where: { id: { in: orgIds } },
-          select: { id: true, name: true },
-        });
+        const recordFetcher = async function* () {
+          const iterator = cursorIterable(
+            async (cursor) => {
+              return prismaRead.transaction.findMany({
+                where: {
+                  walletAddress: address,
+                  type: { in: ['PAYOUT_CLAIMED', 'PAYOUT_ALLOCATED'] },
+                  ...(Object.keys(dateFilter).length > 0 && { createdAt: dateFilter }),
+                },
+                orderBy: { createdAt: 'desc' },
+                take: 1000,
+                ...(cursor ? { skip: 1, cursor: { id_createdAt: cursor } } : {}),
+              });
+            },
+            (tx) => ({ id: tx.id, createdAt: tx.createdAt }),
+            1000
+          );
 
-        const orgMap = new Map(organizations.map(org => [org.id, org.name]));
+          for await (const tx of iterator) {
+            let orgId = '';
+            let orgName: string | undefined;
+            let maintainerAddress = address;
+            let amountStroops = '0';
+            let amountXlm = '0';
+            const usdValue = tx.volumeUSD?.toString() || '0';
 
-        const exportData: ExportRecord[] = transactions.map((tx) => {
-          let orgId = '';
-          let orgName: string | undefined;
-          let maintainerAddress = address;
-          let amountStroops = '0';
-          let amountXlm = '0';
-          const usdValue = tx.volumeUSD?.toString() || '0';
-
-          try {
-            const rawData = tx.rawData ? JSON.parse(tx.rawData) : {};
-            orgId = rawData.orgId || '';
-            orgName = orgMap.get(orgId);
-            if (tx.type === 'PAYOUT_ALLOCATED') {
-              maintainerAddress = rawData.maintainer || address;
-              amountStroops = rawData.amount || '0';
-            } else if (tx.type === 'PAYOUT_CLAIMED') {
-              amountStroops = rawData.amount || '0';
+            try {
+              const rawData = tx.rawData ? JSON.parse(tx.rawData) : {};
+              orgId = rawData.orgId || '';
+              orgName = orgMap.get(orgId);
+              if (tx.type === 'PAYOUT_ALLOCATED') {
+                maintainerAddress = rawData.maintainer || address;
+                amountStroops = rawData.amount || '0';
+              } else if (tx.type === 'PAYOUT_CLAIMED') {
+                amountStroops = rawData.amount || '0';
+              }
+              amountXlm = (Number(amountStroops) / 10_000_000).toFixed(7);
+            } catch (error) {
+              fastify.log.error(error as Error, 'Error parsing transaction raw data');
             }
-            amountXlm = (Number(amountStroops) / 10_000_000).toFixed(7);
-          } catch (error) {
-            fastify.log.error(error as Error, 'Error parsing transaction raw data');
+
+            const record: ExportRecord = {
+              date: tx.createdAt.toISOString(),
+              orgId,
+              orgName,
+              maintainerAddress,
+              amountXlm,
+              amountStroops,
+              usdValue,
+              transactionHash: tx.txHash,
+              ledger: tx.ledger,
+              eventType: tx.type,
+            };
+            yield record;
           }
-
-          return {
-            date: tx.createdAt.toISOString(),
-            orgId,
-            orgName,
-            maintainerAddress,
-            amountXlm,
-            amountStroops,
-            usdValue,
-            transactionHash: tx.txHash,
-            ledger: tx.ledger,
-            eventType: tx.type,
-          };
-        });
-
-        const filename = 'payout-history-' + address + '-' + new Date().toISOString().split('T')[0];
+        };
 
         if (type === 'csv') {
           reply.header('Content-Type', 'text/csv');
-          reply.header('Content-Disposition', 'attachment; filename="' + filename + '.csv"');
+          reply.header('Content-Disposition', `attachment; filename="${filename}.csv"`);
+          reply.header('X-Accel-Buffering', 'no');
 
           const csvStream = csv.format({
             headers: ['Date', 'Org ID', 'Org Name', 'Maintainer Address', 'Amount XLM', 'Amount Stroops', 'USD Value', 'Transaction Hash', 'Ledger', 'Event Type'],
           });
 
-          reply.send(csvStream);
+          csvStream.pipe(reply.raw);
 
-          for (const record of exportData) {
-            csvStream.write([record.date, record.orgId, record.orgName || '', record.maintainerAddress, record.amountXlm, record.amountStroops, record.usdValue, record.transactionHash, record.ledger.toString(), record.eventType]);
+          for await (const record of recordFetcher()) {
+            csvStream.write([
+              record.date,
+              record.orgId,
+              record.orgName || '',
+              record.maintainerAddress,
+              record.amountXlm,
+              record.amountStroops,
+              record.usdValue,
+              record.transactionHash,
+              record.ledger.toString(),
+              record.eventType
+            ]);
           }
 
           csvStream.end();
           return reply;
         } else {
-          reply.header('Content-Type', 'application/json');
-          reply.header('Content-Disposition', 'attachment; filename="' + filename + '.json"');
-          return { metadata: { address, exportDate: new Date().toISOString(), recordCount: exportData.length, dateRange: { start: startDate || null, end: endDate || null } }, data: exportData };
+          // Streaming JSON implementation
+          reply.header('Content-Disposition', `attachment; filename="${filename}.json"`);
+          
+          const metadata = {
+            address,
+            exportDate: new Date().toISOString(),
+            recordCount: totalCount,
+            dateRange: { start: startDate || null, end: endDate || null }
+          };
+
+          await streamAsyncEnvelope(
+            reply.raw,
+            metadata,
+            recordFetcher
+          );
+          return reply;
         }
       } catch (error) {
         fastify.log.error(error as Error, 'Export error');
-        return reply.status(500).send({ error: 'Failed to export data', message: error instanceof Error ? error.message : 'Unknown error' });
+        if (!reply.raw.headersSent) {
+          return reply.status(500).send({ 
+            error: 'Failed to export data', 
+            message: error instanceof Error ? error.message : 'Unknown error' 
+          });
+        }
       }
     }
   );
 };
+

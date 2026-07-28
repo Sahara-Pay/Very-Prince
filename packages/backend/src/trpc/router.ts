@@ -105,6 +105,14 @@ export const appRouter = t.router({
           message: "Organization creation not yet implemented in tRPC",
         };
       }),
+
+    getMaintainerBalances: t.procedure
+      .input(z.object({
+        orgId: z.string().min(1).max(32),
+      }))
+      .query(async ({ input }) => {
+        return await organizationService.getMaintainerBalances(input.orgId);
+      }),
   }),
 
   contract: t.router({

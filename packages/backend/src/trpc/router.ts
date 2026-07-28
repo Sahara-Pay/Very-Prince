@@ -160,7 +160,10 @@ export const appRouter = t.router({
         (input: { orgId: string }) => trpcCacheKeys.statsFundingHistory(input.orgId),
         TRPC_CACHE_TTL.STATS_FUNDING_HISTORY,
       ))
-      .query(({ input }) => statsController.getOrgFundingHistory(input.orgId)),
+      .query(({ input }) => {
+        // Return an AsyncIterable to opt-in to streaming serialization
+        return statsController.getOrgFundingHistoryStream(input.orgId);
+      }),
   }),
 
   analytics: t.router({

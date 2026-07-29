@@ -198,6 +198,8 @@ pub enum PrinceError {
     InvalidPoP = 36,
     /// Token metadata (name/symbol/decimals) could not be fetched during initialisation.
     TokenMetadataUnavailable = 37,
+    /// Flash mint execution resulted in a non-zero supply delta.
+    FlashMintSupplyMismatch = 38,
     /// The linked list traversal depth limit was reached.
     ListTraversalLimitExceeded = 38,
     /// The provided insertion point for the sorted list is invalid.
@@ -2743,6 +2745,52 @@ impl PayoutRegistry {
         }
 
         verified
+    }
+
+    pub fn flash_mint(
+        env: Env,
+        receiver: Address,
+        amount: i128,
+        args: Vec<soroban_sdk::Val>,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let token_addr = Self::get_token(env.clone());
+
+        let pre_supply: i128 = env.invoke_contract(
+            &token_addr,
+            &Symbol::new(&env, "total_supply"),
+            Vec::new(&env),
+        );
+
+        token_interface::sac_mint(&env, &token_addr, &receiver, &amount);
+
+        env.invoke_contract::<()>(
+            &receiver,
+            &Symbol::new(&env, "execute_flash_mint"),
+            (amount.clone(), args).into_val(&env),
+        );
+
+        token_interface::sac_burn(&env, &token_addr, &receiver, &amount);
+
+        let post_supply: i128 = env.invoke_contract(
+            &token_addr,
+            &Symbol::new(&env, "total_supply"),
+            Vec::new(&env),
+        );
+
+        if pre_supply != post_supply {
+            panic_with_error!(&env, PrinceError::FlashMintSupplyMismatch);
+        }
+        
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "FlashMint")),
+            (receiver, amount),
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ import { GlassButton } from "@/components/GlassButton";
 import { sortAndBuildBatchTransaction } from "@/utils/xdrWorkerManager";
 import { OperationIntent } from "@/utils/dagSorter";
 import { Networks } from "@stellar/stellar-sdk";
-import toast from "react-hot-toast";
+import { toast } from "sonner";
 import { submitSignedTransaction } from "@/lib/sorobanClient";
 
 const CONTRACT_ID = process.env.NEXT_PUBLIC_CONTRACT_ID || "CCWPMAC2IR4CC4COY3LQQC2NQQ4UQQ4NQQ4UQQ4NQQ4UQQ4NQQ4UQQ4N";

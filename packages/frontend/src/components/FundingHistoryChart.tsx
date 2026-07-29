@@ -22,9 +22,9 @@ interface FundingHistoryChartProps {
 }
 
 export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
-  const { data } = useSuspenseQuery({
+  const { data } = useSuspenseQuery<FundingHistoryPoint[]>({
     queryKey: ["funding-history", orgId],
-    queryFn: () => trpcClient.stats.getFundingHistory.query({ orgId }),
+    queryFn: () => trpcClient.stats.getFundingHistory.query({ orgId }) as unknown as Promise<FundingHistoryPoint[]>,
     staleTime: 5000,
   });
 

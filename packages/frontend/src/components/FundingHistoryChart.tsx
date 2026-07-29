@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { useSuspenseQuery } from "@tanstack/react-query";
 import { trpcClient } from "@/trpc/client";
 import { DateRangePicker, DateRange } from "./ui/DateRangePicker";
+import { useFundingHistoryOPFS } from "@/hooks/useOPFSStorage";
 
 interface FundingHistoryPoint {
   id: string;
@@ -22,15 +22,36 @@ interface FundingHistoryChartProps {
 }
 
 export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
-  const { data } = useSuspenseQuery<FundingHistoryPoint[]>({
-    queryKey: ["funding-history", orgId],
-    queryFn: () => trpcClient.stats.getFundingHistory.query({ orgId }) as unknown as Promise<FundingHistoryPoint[]>,
-    staleTime: 5000,
-  });
+  const { data, isLoading, fromCache, hasNewData } = useFundingHistoryOPFS(
+    orgId,
+    async (fromTimestamp?: number) => {
+      return trpcClient.stats.getFundingHistory.query({ orgId, fromTimestamp }) as unknown as Promise<FundingHistoryPoint[]>;
+    },
+    {
+      staleTime: 5 * 60 * 1000, // 5 minutes
+    }
+  );
 
   const [hoveredPoint, setHoveredPoint] = useState<FundingHistoryPoint | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
   const [dateRange, setDateRange] = useState<DateRange>({ fromDate: null, toDate: null });
+
+  if (isLoading) {
+    return (
+      <div className="glass-card p-8 text-center flex flex-col items-center justify-center min-h-[220px]">
+        <div className="h-12 w-12 rounded-full bg-stellar-purple/10 flex items-center justify-center mb-3 animate-pulse">
+          <svg className="h-6 w-6 text-stellar-purple animate-spin" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+        </div>
+        <h4 className="text-white font-medium mb-1">Loading Chart Data</h4>
+        <p className="text-white/40 text-xs">
+          {fromCache ? 'Reading from local cache...' : 'Fetching from server...'}
+        </p>
+      </div>
+    );
+  }
 
   if (!data || data.length === 0) {
     return (
@@ -151,6 +172,14 @@ export function FundingHistoryChart({ orgId }: FundingHistoryChartProps) {
             <div className="flex items-baseline gap-1 text-right">
               <span className="text-lg font-bold text-stellar-teal">{yMax.toFixed(2)}</span>
               <span className="text-xs text-stellar-teal font-medium">XLM Total</span>
+            </div>
+          )}
+          {fromCache && (
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-green-500/10 border border-green-500/20">
+              <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></div>
+              <span className="text-[10px] text-green-400 font-medium">
+                {hasNewData ? 'Updated' : 'Cached'}
+              </span>
             </div>
           )}
         </div>

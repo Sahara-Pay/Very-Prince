@@ -210,11 +210,17 @@ pub enum PrinceError {
     /// Flash mint execution resulted in a non-zero supply delta.
     FlashMintSupplyMismatch = 38,
     /// The linked list traversal depth limit was reached.
-    ListTraversalLimitExceeded = 38,
+    ListTraversalLimitExceeded = 43,
     /// The provided insertion point for the sorted list is invalid.
     InvalidListInsertionPoint = 39,
     /// The requested node was not found in the linked list.
     ListNodeNotFound = 40,
+    /// The flash loan callback failed to return the borrowed amount plus fee.
+    /// `balance_after < balance_before + fee` — the invariant was violated and
+    /// the entire transaction is atomically reverted.
+    FlashLoanRepaymentFailed = 41,
+    /// The requested flash loan amount exceeds the contract's available liquidity.
+    FlashLoanInsufficientLiquidity = 42,
 }
 
 #[contracttype]
@@ -275,6 +281,10 @@ pub enum DataKey {
     ListNode(Symbol, u64),
     /// The next available node ID for a specific list.
     ListNextId(Symbol),
+    /// A non-custodial time-lock vault keyed by (owner, maturity_timestamp).
+    Vault(Address, u64),
+    /// The flash loan fee in basis points (e.g. 30 = 0.30%). Set by protocol admin.
+    FlashLoanFeeBps,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2924,6 +2934,195 @@ impl PayoutRegistry {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Flash Loan Module
+    //
+    // Intra-transaction, zero-collateral borrowing of the vault's fractional
+    // liquidity, secured entirely by a deterministic post-execution balance
+    // invariant:
+    //
+    //   balance_after >= balance_before + fee
+    //
+    // The protocol admin can configure the fee in basis points via
+    // `set_flash_loan_fee`. The default fee is 30 bps (0.30%).
+    //
+    // Execution flow:
+    //   1. Cache `balance_before` (contract's token balance).
+    //   2. Compute `fee = ceil(amount * fee_bps / 10_000)`.
+    //   3. Transfer `amount` tokens to `receiver` (interaction #1).
+    //   4. Invoke `receiver.execute_flash_loan(amount, fee, data)` via
+    //      `env.invoke_contract`. The borrower MUST repay `amount + fee` to
+    //      this contract address before returning.
+    //   5. Read `balance_after` (contract's token balance).
+    //   6. Assert `balance_after >= balance_before + fee`. If violated, the
+    //      entire transaction panics and reverts — the token transfer in step 3
+    //      and every side-effect inside the callback are atomically undone.
+    //   7. Emit a `FlashLoan` event crediting the fee to existing depositors.
+    //
+    // Security notes:
+    //   - The reentrancy guard prevents callbacks from re-entering this
+    //     contract while the flash loan is in flight.
+    //   - Balance checks use the SAC `balance()` function, not local state,
+    //     so they cannot be spoofed by manipulating contract storage.
+    //   - Fee math uses `checked_add`/`checked_mul` to prevent overflow.
+    //   - The `amount` is validated: must be > 0, <= MAX_AMOUNT_LIMIT, and
+    //     <= the contract's available liquidity before disbursement.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Set the flash loan fee in basis points (1 bps = 0.01%).
+    ///
+    /// # Arguments
+    /// * `env`     - The contract environment.
+    /// * `admin`   - Protocol admin address (must match stored admin).
+    /// * `fee_bps` - Fee in basis points. Typical value: 30 (= 0.30%).
+    ///
+    /// # Panics
+    /// * `NotAuthorized`        - If `admin` is not the protocol admin.
+    /// * `InvalidAmount`        - If `fee_bps` is 0 or exceeds 1000 (10%).
+    /// * `ContractNotInitialized` - If the contract has not been initialized.
+    pub fn set_flash_loan_fee(env: Env, admin: Address, fee_bps: u32) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        if admin != Self::get_protocol_admin(&env) {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+        admin.require_auth_for_args((fee_bps,).into_val(&env));
+
+        // Guard against a 0-fee (free loans) or an unreasonably high fee (>10%).
+        if fee_bps == 0 || fee_bps > 1000 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::FlashLoanFeeBps, &fee_bps);
+        env.storage().persistent().extend_ttl(
+            &DataKey::FlashLoanFeeBps,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "FlashLoanFeeSet"),
+            ),
+            (admin, fee_bps),
+        );
+    }
+
+    /// Return the currently configured flash loan fee in basis points.
+    /// Defaults to 30 bps (0.30%) if never explicitly set.
+    pub fn get_flash_loan_fee(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FlashLoanFeeBps)
+            .unwrap_or(30u32)
+    }
+
+    /// Execute a flash loan.
+    ///
+    /// Lends `amount` tokens to `receiver`, invokes
+    /// `receiver.execute_flash_loan(amount, fee, data)`, then asserts the
+    /// strict post-execution balance invariant
+    /// `balance_after >= balance_before + fee`. Any violation causes an
+    /// uncatchable panic that atomically reverts the entire transaction.
+    ///
+    /// # Arguments
+    /// * `env`      - The contract environment.
+    /// * `receiver` - Address of the borrower contract that must implement
+    ///                `execute_flash_loan(amount: i128, fee: i128, data: Vec<Val>)`.
+    /// * `amount`   - Number of tokens to borrow (in stroops).
+    /// * `data`     - Arbitrary caller-supplied data forwarded verbatim to the
+    ///                callback. Useful for passing swap routes or identifiers.
+    ///
+    /// # Panics
+    /// * `ProtocolPaused`                 - If the protocol is paused.
+    /// * `InvalidAmount`                  - If `amount` is ≤ 0 or > MAX_AMOUNT_LIMIT.
+    /// * `FlashLoanInsufficientLiquidity` - If the contract holds fewer tokens
+    ///                                      than requested.
+    /// * `FlashLoanRepaymentFailed`       - If `balance_after < balance_before + fee`
+    ///                                      after the callback returns.
+    pub fn flash_loan(
+        env: Env,
+        receiver: Address,
+        amount: i128,
+        data: soroban_sdk::Vec<soroban_sdk::Val>,
+    ) {
+        // ── 0. Guards ────────────────────────────────────────────────────────
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+
+        // ── 1. Read pre-execution vault balance ──────────────────────────────
+        // Read directly from the SAC — immune to storage manipulation.
+        let token_addr = Self::get_token(env.clone());
+        let contract_addr = env.current_contract_address();
+
+        let balance_before = token_interface::sac_balance(&env, &token_addr, &contract_addr);
+
+        // Ensure we actually have enough liquidity to lend.
+        if amount > balance_before {
+            panic_with_error!(&env, PrinceError::FlashLoanInsufficientLiquidity);
+        }
+
+        // ── 2. Compute fee = ceil(amount * fee_bps / 10_000) ────────────────
+        let fee_bps = Self::get_flash_loan_fee(env.clone()) as i128;
+        // Use ceiling division so even tiny amounts always incur at least 1
+        // stroop of fee when fee_bps > 0.
+        let fee = amount
+            .checked_mul(fee_bps)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow))
+            .checked_add(9_999)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow))
+            / 10_000;
+
+        // Minimum repayment that satisfies the invariant.
+        let required_repayment = amount
+            .checked_add(fee)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+
+        // ── 3. Disburse loan to receiver ─────────────────────────────────────
+        token_interface::sac_transfer(&env, &token_addr, &contract_addr, &receiver, &amount);
+
+        // ── 4. Invoke borrower callback ──────────────────────────────────────
+        // The callback must repay `amount + fee` to `contract_addr` before
+        // returning. Any failure inside the callback propagates as a panic and
+        // reverts the transfer above along with every side-effect.
+        env.invoke_contract::<()>(
+            &receiver,
+            &Symbol::new(&env, "execute_flash_loan"),
+            (amount, fee, data).into_val(&env),
+        );
+
+        // ── 5. Read post-execution vault balance ─────────────────────────────
+        let balance_after = token_interface::sac_balance(&env, &token_addr, &contract_addr);
+
+        // ── 6. Enforce strict balance invariant ──────────────────────────────
+        // balance_after must be at least balance_before + fee (the principal
+        // was returned plus a fee for fractional asset holders).
+        let min_expected = balance_before
+            .checked_add(fee)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+
+        if balance_after < min_expected {
+            // This panic is uncatchable — Soroban unwinds the entire call
+            // stack, atomically reverting the disbursement and every
+            // state mutation the callback performed.
+            panic_with_error!(&env, PrinceError::FlashLoanRepaymentFailed);
+        }
+
+        // ── 7. Emit event ────────────────────────────────────────────────────
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "FlashLoan"),
+            ),
+            (receiver, amount, fee, required_repayment),
     // Capability Tokens — Issue #478
     //
     // Single-use, ledger-scoped capability tokens that flatten multi-hop
@@ -3017,3 +3216,5 @@ mod bls_tests;
 mod vault_tests;
 #[cfg(test)]
 mod list_tests;
+#[cfg(test)]
+mod flash_loan_tests;

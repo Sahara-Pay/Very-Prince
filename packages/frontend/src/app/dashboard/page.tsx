@@ -105,6 +105,7 @@ function DashboardPageInner() {
   const organization = orgData?.organization ?? null;
 
   // Predictive prefetch for Fund Org — warms the modal chunk before mousedown.
+  // On mobile (coarse pointer) falls back to IntersectionObserver prefetching.
   const fundPrefetchTargets: PrefetchTarget[] = useMemo(
     () => [
       {
@@ -121,6 +122,7 @@ function DashboardPageInner() {
             bottom: r.bottom,
           };
         },
+        getElement: () => fundButtonRef.current,
         prefetch: (signal) => prefetchFundOrgIntent(signal),
       },
     ],

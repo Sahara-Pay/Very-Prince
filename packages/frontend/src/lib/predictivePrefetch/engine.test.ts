@@ -13,6 +13,67 @@ function makeTarget(
   };
 }
 
+function makeElementTarget(
+  id: string,
+  el: Element | null,
+  prefetch: PrefetchTarget["prefetch"],
+): PrefetchTarget {
+  return {
+    id,
+    getRect: () => {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    },
+    getElement: () => el,
+    prefetch,
+  };
+}
+
+class FakeIntersectionObserver {
+  readonly callback: IntersectionObserverCallback;
+  readonly options: IntersectionObserverInit;
+  readonly elements: Set<Element> = new Set();
+
+  constructor(
+    callback: IntersectionObserverCallback,
+    options?: IntersectionObserverInit,
+  ) {
+    this.callback = callback;
+    this.options = options ?? {};
+  }
+
+  observe(target: Element): void {
+    this.elements.add(target);
+  }
+
+  unobserve(target: Element): void {
+    this.elements.delete(target);
+  }
+
+  disconnect(): void {
+    this.elements.clear();
+  }
+
+  /** Simulate an element entering the viewport. */
+  fireIntersecting(target: Element): void {
+    this.callback(
+      [
+        {
+          target,
+          isIntersecting: true,
+          intersectionRatio: 1,
+          boundingClientRect: {} as DOMRectReadOnly,
+          intersectionRect: {} as DOMRectReadOnly,
+          rootBounds: null,
+          time: performance.now(),
+        },
+      ],
+      this as unknown as IntersectionObserver,
+    );
+  }
+}
+
 describe("PredictivePrefetchEngine", () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -141,6 +202,152 @@ describe("PredictivePrefetchEngine", () => {
     engine.evaluateNow(1100);
 
     expect(prefetch).not.toHaveBeenCalled();
+    engine.stop();
+  });
+});
+
+describe("PredictivePrefetchEngine - IntersectionObserver fallback", () => {
+  let fakeIo: FakeIntersectionObserver;
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockReturnValue({ matches: false, addListener: vi.fn(), removeListener: vi.fn() }),
+    );
+    vi.stubGlobal(
+      "IntersectionObserver",
+      vi.fn(
+        (cb: IntersectionObserverCallback, opts?: IntersectionObserverInit) => {
+          fakeIo = new FakeIntersectionObserver(cb, opts);
+          return fakeIo;
+        },
+      ),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("falls back to IntersectionObserver on coarse pointer", () => {
+    const prefetch = vi.fn().mockResolvedValue(undefined);
+    const engine = new PredictivePrefetchEngine({
+      requireFinePointer: true,
+    });
+
+    const el = document.createElement("div");
+    engine.setTargets([
+      makeElementTarget("org-1", el, prefetch),
+    ]);
+    engine.start();
+
+    expect(fakeIo).toBeDefined();
+    expect(fakeIo.elements.has(el)).toBe(true);
+    expect(prefetch).not.toHaveBeenCalled();
+
+    engine.stop();
+    expect(fakeIo.elements.size).toBe(0);
+  });
+
+  it("prefetches when an element becomes intersecting", async () => {
+    const prefetch = vi.fn().mockResolvedValue(undefined);
+    const debug = vi.fn();
+    const engine = new PredictivePrefetchEngine({
+      requireFinePointer: true,
+      cooldownMs: 0,
+      globalCooldownMs: 0,
+      onDebug: debug,
+    });
+
+    const el = document.createElement("div");
+    engine.setTargets([
+      makeElementTarget("org-1", el, prefetch),
+    ]);
+    engine.start();
+
+    fakeIo.fireIntersecting(el);
+    await Promise.resolve();
+
+    expect(prefetch).toHaveBeenCalledTimes(1);
+    expect(debug).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "io-prefetch", targetId: "org-1" }),
+    );
+
+    engine.stop();
+  });
+
+  it("respects cooldown between IO-fallback prefetches", async () => {
+    const prefetch = vi.fn().mockResolvedValue(undefined);
+    const engine = new PredictivePrefetchEngine({
+      requireFinePointer: true,
+      cooldownMs: 5000,
+      globalCooldownMs: 0,
+    });
+
+    const el = document.createElement("div");
+    engine.setTargets([
+      makeElementTarget("org-1", el, prefetch),
+    ]);
+    engine.start();
+
+    fakeIo.fireIntersecting(el);
+    await Promise.resolve();
+    expect(prefetch).toHaveBeenCalledTimes(1);
+
+    fakeIo.fireIntersecting(el);
+    await Promise.resolve();
+    expect(prefetch).toHaveBeenCalledTimes(1); // cooldown
+
+    engine.stop();
+  });
+
+  it("skips targets without an element reference", () => {
+    const prefetch = vi.fn().mockResolvedValue(undefined);
+    const debug = vi.fn();
+    const engine = new PredictivePrefetchEngine({
+      requireFinePointer: true,
+      cooldownMs: 0,
+      globalCooldownMs: 0,
+      onDebug: debug,
+    });
+
+    // Target without getElement
+    engine.setTargets([
+      makeTarget("no-el", { left: 0, top: 0, right: 100, bottom: 100 }, prefetch),
+    ]);
+    engine.start();
+
+    expect(fakeIo.elements.size).toBe(0);
+    expect(debug).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "io-skip", targetId: "no-el", reason: "no-element" }),
+    );
+
+    engine.stop();
+  });
+
+  it("reconnects IO when setTargets is called", () => {
+    const prefetch = vi.fn().mockResolvedValue(undefined);
+    const engine = new PredictivePrefetchEngine({
+      requireFinePointer: true,
+    });
+
+    const el1 = document.createElement("div");
+    engine.setTargets([
+      makeElementTarget("t1", el1, prefetch),
+    ]);
+    engine.start();
+
+    expect(fakeIo.elements.has(el1)).toBe(true);
+
+    const el2 = document.createElement("div");
+    engine.setTargets([
+      makeElementTarget("t2", el2, prefetch),
+    ]);
+
+    expect(fakeIo.elements.has(el1)).toBe(false);
+    expect(fakeIo.elements.has(el2)).toBe(true);
+
     engine.stop();
   });
 });

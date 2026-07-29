@@ -1,0 +1,31 @@
+[package]
+name = "amm-math"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Gas-efficient integer square root and AMM calculations for on-chain liquidity pools"
+
+[lib]
+name = "amm_math"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No external dependencies for #![no_std] compatibility
+
+[dev-dependencies]
+proptest = "1.4"
+criterion = "0.5"
+
+[[bench]]
+name = "isqrt_benchmark"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+inherits = "release"

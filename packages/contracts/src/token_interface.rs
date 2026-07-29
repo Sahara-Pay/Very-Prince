@@ -177,7 +177,7 @@ pub fn sac_burn(
     amount: &i128,
 ) {
     let sac_admin = token::StellarAssetClient::new(env, token_address);
-    sac_admin.clawback(from, amount);
+    sac_admin.burn(from, amount);
 }
 
 /// Set the administrator of the SAC token.

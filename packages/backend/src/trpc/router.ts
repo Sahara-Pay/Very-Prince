@@ -5,6 +5,8 @@
 
 import { z } from 'zod';
 import { stellarService } from '../services/stellarService.js';
+import { safeGet, safeSet } from '../services/cache.js';
+import { evictionEngine } from '../services/probabilisticEviction.js';
 import { statsController } from '../controllers/statsController.js';
 import { analyticsController } from '../controllers/analyticsController.js';
 import { logger } from '../utils/logger.js';
@@ -12,7 +14,6 @@ import { t } from './trpc.js';
 import { withTrpcCache } from './cacheMiddleware.js';
 import { TRPC_CACHE_TTL, trpcCacheKeys } from './cacheKeys.js';
 import { organizationService } from '../services/organizationService.js';
-
 import {
   fundOrgInputSchema,
   allocatePayoutInputSchema,
@@ -35,9 +36,34 @@ export const appRouter = t.router({
       ))
       .query(async ({ input }) => {
         const { id } = input;
+        
+        // Check cache first (5-second base TTL, adaptive for hot keys)
+        const cacheKey = `org_details:${id}`;
+        const cachedResult = await safeGet(cacheKey);
+        
+        if (cachedResult) {
+          // Record this access so the eviction engine promotes the key
+          evictionEngine.recordAccess(cacheKey);
+          try {
+            return JSON.parse(cachedResult);
+          } catch (error) {
+            // Cache corrupted, continue to fetch from contract
+            console.warn(`Cache corruption for key ${cacheKey}:`, error);
+          }
+        }
 
         try {
-          return await stellarService.readOrganizationDetails(id);
+          // Fetch organization details directly from contract
+          const orgDetails = await stellarService.readOrganizationDetails(id);
+          
+          // Record the access AND get an adaptive TTL in one call.
+          // The eviction engine increments the sketch counter *before*
+          // computing the TTL so that cache misses still contribute to
+          // the frequency estimate.
+          const adaptiveTTL = evictionEngine.recordAndGetTTL(cacheKey, 5);
+          await safeSet(cacheKey, JSON.stringify(orgDetails), adaptiveTTL);
+          
+          return orgDetails;
         } catch (error) {
           logger.error({ err: error, orgId: id }, "Failed to fetch organization details from contract");
 
@@ -75,6 +101,14 @@ export const appRouter = t.router({
           success: false,
           message: "Organization creation not yet implemented in tRPC",
         };
+      }),
+
+    getMaintainerBalances: t.procedure
+      .input(z.object({
+        orgId: z.string().min(1).max(32),
+      }))
+      .query(async ({ input }) => {
+        return await organizationService.getMaintainerBalances(input.orgId);
       }),
   }),
 
@@ -131,7 +165,10 @@ export const appRouter = t.router({
         (input: { orgId: string }) => trpcCacheKeys.statsFundingHistory(input.orgId),
         TRPC_CACHE_TTL.STATS_FUNDING_HISTORY,
       ))
-      .query(({ input }) => statsController.getOrgFundingHistory(input.orgId)),
+      .query(({ input }) => {
+        // Return an AsyncIterable to opt-in to streaming serialization
+        return statsController.getOrgFundingHistoryStream(input.orgId);
+      }),
   }),
 
   analytics: t.router({

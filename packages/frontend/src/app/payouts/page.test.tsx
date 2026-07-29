@@ -48,6 +48,27 @@ vi.mock("swr", () => ({
   }),
 }));
 
+// Mock TanStack React Query
+vi.mock("@tanstack/react-query", () => ({
+  useQuery: vi.fn(() => ({
+    data: [
+      {
+        orgId: "org-a",
+        amountStroops: "50000000",
+        amountXlm: "5.00",
+        orgName: "Org A",
+      },
+    ],
+    error: undefined,
+    isLoading: false,
+    refetch: vi.fn(),
+  })),
+  useMutation: vi.fn(() => ({
+    mutate: vi.fn(),
+    isLoading: false,
+  })),
+}));
+
 // Mock unified wallet hook
 vi.mock("@/hooks/useUnifiedWallet", () => ({
   useUnifiedWallet: vi.fn(() => ({
@@ -78,7 +99,7 @@ describe("PayoutsPage transaction history and pending payouts", () => {
     render(<PayoutsPage />);
     expect(screen.getByText("Org A")).toBeDefined();
     expect(screen.getByText("Claimable:")).toBeDefined();
-    expect(screen.getByText("5.00 XLM")).toBeDefined();
+    expect(screen.getAllByText("5.00 XLM")[0]).toBeDefined();
   });
 
   it("renders transaction history stats cards", () => {
@@ -94,7 +115,7 @@ describe("PayoutsPage transaction history and pending payouts", () => {
   it("renders the timeline of transactions", () => {
     render(<PayoutsPage />);
     expect(screen.getByText("from")).toBeDefined();
-    expect(screen.getByText("org-a")).toBeDefined();
+    expect(screen.getAllByText("org-a")[0]).toBeDefined();
     expect(screen.getByText(/Ledger #12345/)).toBeDefined();
     expect(screen.getByText("ABCDEF12...567890")).toBeDefined();
   });

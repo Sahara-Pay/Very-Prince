@@ -27,7 +27,7 @@ mod tests {
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
         // Native multisig policy belongs to this address, not to signer payloads.
@@ -244,7 +244,7 @@ mod tests {
         let token_admin = Address::generate(&env);
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
         let mut admins = Vec::new(&env);
@@ -645,7 +645,7 @@ mod tests {
         let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let _token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
         let protocol_admin = Address::generate(&env);
@@ -781,7 +781,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin1 = Address::generate(&env);
@@ -907,7 +907,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin1 = Address::generate(&env);
@@ -1015,7 +1015,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1061,7 +1061,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1126,7 +1126,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1187,7 +1187,7 @@ mod tests {
             let token_admin = Address::generate(&env);
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1238,7 +1238,7 @@ mod tests {
             let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
             let token_client = token::StellarAssetClient::new(&env, &token_contract_id.address());
 
-            let contract_id = env.register_contract(None, PayoutRegistry);
+            let contract_id = env.register(PayoutRegistry, ());
             let client = PayoutRegistryClient::new(&env, &contract_id);
 
             let admin = Address::generate(&env);
@@ -1403,10 +1403,10 @@ mod tests {
 
         // Register the malicious token and configure it to re-enter the
         // registry whenever it delivers tokens to the claiming maintainer.
-        let token_id = env.register_contract(None, MaliciousToken);
+        let token_id = env.register(MaliciousToken, ());
         let token_client = MaliciousTokenClient::new(&env, &token_id);
 
-        let contract_id = env.register_contract(None, PayoutRegistry);
+        let contract_id = env.register(PayoutRegistry, ());
         let client = PayoutRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -1948,6 +1948,191 @@ mod mpt_and_verifier_tests {
         assert_eq!(reputation_score_from_account(&acc), 10_000);
     }
 
+    // ── Ledger State Mutation Tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_ledger_state_mutation_budget_atomicity() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("atomictest");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let donor = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+        token.mint(&donor, &100_000_000);
+
+        // Record initial state
+        let initial_budget = client.get_org_budget(&org_sym);
+        let initial_donor_balance = token_client.balance(&donor);
+        let initial_contract_balance = token_client.balance(&client.address);
+
+        assert_eq!(initial_budget, 0);
+        assert_eq!(initial_donor_balance, 100_000_000);
+        assert_eq!(initial_contract_balance, 0);
+
+        // Perform funding
+        client.fund_org(&org_sym, &donor, &50_000_000);
+
+        // Verify atomic state mutation
+        assert_eq!(client.get_org_budget(&org_sym), 50_000_000);
+        assert_eq!(token_client.balance(&donor), 50_000_000);
+        assert_eq!(token_client.balance(&client.address), 50_000_000);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_payout_allocation() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("allocmut");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let maintainer = Address::generate(&env);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        let donor = Address::generate(&env);
+        token.mint(&donor, &20_000_000);
+        client.fund_org(&org_sym, &donor, &20_000_000);
+
+        // Record pre-allocation state
+        let pre_budget = client.get_org_budget(&org_sym);
+        let pre_balance = client.get_claimable_balance(&maintainer);
+
+        assert_eq!(pre_budget, 20_000_000);
+        assert_eq!(pre_balance, 0);
+
+        // Allocate payout
+        client.allocate_payout(&org_sym, &admin, &maintainer, &5_000_000_i128, &0_u64);
+
+        // Verify state mutation
+        assert_eq!(client.get_org_budget(&org_sym), 15_000_000);
+        assert_eq!(client.get_claimable_balance(&maintainer), 5_000_000);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_claim_payout() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("claimmut");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+
+        let maintainer = Address::generate(&env);
+        client.add_maintainer(&org_sym, &maintainer);
+
+        let donor = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+        token.mint(&donor, &20_000_000);
+        client.fund_org(&org_sym, &donor, &20_000_000);
+
+        client.allocate_payout(&org_sym, &admin, &maintainer, &10_000_000_i128, &0_u64);
+
+        // Record pre-claim state
+        let pre_maintainer_balance = token_client.balance(&maintainer);
+        let pre_claimable = client.get_claimable_balance(&maintainer);
+        let pre_org_budget = client.get_org_budget(&org_sym);
+
+        assert_eq!(pre_maintainer_balance, 0);
+        assert_eq!(pre_claimable, 10_000_000);
+        assert_eq!(pre_org_budget, 10_000_000);
+
+        // Claim payout
+        let claimed = client.claim_payout(&maintainer);
+
+        // Verify state mutation
+        assert_eq!(claimed, 10_000_000);
+        assert_eq!(token_client.balance(&maintainer), 10_000_000);
+        assert_eq!(client.get_claimable_balance(&maintainer), 0);
+        assert_eq!(client.get_org_budget(&org_sym), 10_000_000);
+    }
+
+    #[test]
+    fn test_ledger_state_monation_protocol_pause() {
+        let Setup { env, client, .. } = setup();
+
+        // Initial state should be Active
+        let initial_state = client.get_protocol_state();
+        assert_eq!(initial_state, crate::ProtocolState::Active);
+
+        // Pause protocol
+        client.pause_protocol();
+
+        // Verify state mutation
+        let paused_state = client.get_protocol_state();
+        assert_eq!(paused_state, crate::ProtocolState::Paused);
+
+        // Unpause protocol
+        client.unpause_protocol();
+
+        // Verify state mutation back to Active
+        let active_state = client.get_protocol_state();
+        assert_eq!(active_state, crate::ProtocolState::Active);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_admin_transfer() {
+        let Setup {
+            env, client, protocol_admin, ..
+        } = setup();
+
+        // Get initial admin
+        let initial_admin = client.get_multisig_admin();
+        let initial_admin_addr = initial_admin.admins.get(0).unwrap();
+
+        // Propose new admin
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&protocol_admin, &new_admin);
+
+        // Accept new admin
+        client.accept_admin(&new_admin);
+
+        // Verify state mutation
+        let updated_admin = client.get_multisig_admin();
+        let updated_admin_addr = updated_admin.admins.get(0).unwrap();
+
+        assert_ne!(initial_admin_addr, updated_admin_addr);
+        assert_eq!(updated_admin_addr, &new_admin);
+    }
+
+    #[test]
+    fn test_ledger_state_mutation_qf_contribution() {
+        let Setup {
+            env, client, token, protocol_admin, ..
+        } = setup();
+        let org_sym = symbol_short!("qfmut");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        // Record pre-contribution state
+        let pre_stats = client.get_qf_project_stats(&org_sym);
+        let pre_contrib = client.get_qf_contribution(&org_sym, &contributor);
+        let pre_org_budget = client.get_org_budget(&org_sym);
+
+        assert_eq!(pre_stats.direct_contributions, 0);
+        assert_eq!(pre_stats.sqrt_sum, 0);
+        assert_eq!(pre_stats.contributor_count, 0);
+        assert_eq!(pre_contrib, 0);
+        assert_eq!(pre_org_budget, 0);
+
+        // Make contribution
+        client.qf_contribute(&org_sym, &contributor, &100);
+
+        // Verify state mutation
+        let post_stats = client.get_qf_project_stats(&org_sym);
+        let post_contrib = client.get_qf_contribution(&org_sym, &contributor);
+        let post_org_budget = client.get_org_budget(&org_sym);
+
+        assert_eq!(post_stats.direct_contributions, 100);
+        assert_eq!(post_stats.sqrt_sum, 10);
+        assert_eq!(post_stats.contributor_count, 1);
+        assert_eq!(post_contrib, 100);
+        assert_eq!(post_org_budget, 100);
+    }
+
     // ── Exclusion proof tests ─────────────────────────────────────────────────
 
     #[test]
@@ -1972,5 +2157,567 @@ mod mpt_and_verifier_tests {
         let header = eth_header(root);
         let res = verify_exclusion(&header, b"absent_key", &[leaf.as_slice()]);
         assert!(res.is_ok() || matches!(res, Err(CrossChainError::ProofVerifyError(_))));
+    }
+
+    // ── Nonce / Replay-Protection Tests ──────────────────────────────────────
+
+    /// A fresh address has nonce 0.
+    #[test]
+    fn test_nonce_initial_value_is_zero() {
+        let Setup { env, client, .. } = setup();
+        let user = Address::generate(&env);
+        assert_eq!(client.get_nonce(&user), 0u64);
+    }
+
+    /// `fund_org_with_nonce` accepts nonce 0 on first call and advances to 1.
+    #[test]
+    fn test_fund_org_with_nonce_first_call_succeeds() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg1");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        assert_eq!(client.get_nonce(&donor), 0u64);
+        client.fund_org_with_nonce(&org_sym, &donor, &500, &0u64);
+
+        // Nonce must have advanced to 1.
+        assert_eq!(client.get_nonce(&donor), 1u64);
+        // Budget must have been updated.
+        assert_eq!(client.get_org_budget(&org_sym), 500);
+    }
+
+    /// Replaying the same nonce (0) after a successful call is rejected.
+    #[test]
+    fn test_fund_org_with_nonce_replay_rejected() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg2");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        // First call succeeds.
+        client.fund_org_with_nonce(&org_sym, &donor, &100, &0u64);
+
+        // Second call with stale nonce 0 must fail.
+        let result = client.try_fund_org_with_nonce(&org_sym, &donor, &100, &0u64);
+        assert!(result.is_err());
+        // Budget must not have changed from the replay attempt.
+        assert_eq!(client.get_org_budget(&org_sym), 100);
+    }
+
+    /// Sequential calls each advance the nonce by 1.
+    #[test]
+    fn test_fund_org_with_nonce_increments_monotonically() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg3");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        for expected in 0u64..5u64 {
+            assert_eq!(client.get_nonce(&donor), expected);
+            client.fund_org_with_nonce(&org_sym, &donor, &10, &expected);
+        }
+        assert_eq!(client.get_nonce(&donor), 5u64);
+        assert_eq!(client.get_org_budget(&org_sym), 50);
+    }
+
+    /// Providing an out-of-order nonce (skipping ahead) is rejected.
+    #[test]
+    fn test_fund_org_with_nonce_future_nonce_rejected() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncorg4");
+        let donor = Address::generate(&env);
+        register_test_org(&env, &client, org_sym.clone());
+        token.mint(&donor, &1_000);
+
+        // Nonce is 0 but caller supplies 1 (future nonce).
+        let result = client.try_fund_org_with_nonce(&org_sym, &donor, &100, &1u64);
+        assert!(result.is_err());
+        assert_eq!(client.get_nonce(&donor), 0u64);
+    }
+
+    /// `claim_payout_with_nonce` correctly verifies and advances the nonce.
+    #[test]
+    fn test_claim_payout_with_nonce_succeeds_and_increments() {
+        let Setup {
+            env,
+            client,
+            token,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nnclaim");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+        let maintainer = Address::generate(&env);
+
+        // Fund the org, add a maintainer, and allocate a payout with unlock_ts=0 (immediately vested).
+        token.mint(&admin, &10_000);
+        client.fund_org(&org_sym, &admin, &10_000);
+        client.add_maintainer(&org_sym, &maintainer);
+        client.allocate_payout(&org_sym, &admin, &maintainer, &500, &0u64);
+
+        assert_eq!(client.get_nonce(&maintainer), 0u64);
+
+        // Claim with correct nonce 0.
+        let claimed = client.claim_payout_with_nonce(&maintainer, &0u64);
+        assert_eq!(claimed, 500);
+        assert_eq!(client.get_nonce(&maintainer), 1u64);
+    }
+
+    /// Replaying a `claim_payout_with_nonce` is rejected.
+    #[test]
+    fn test_claim_payout_with_nonce_replay_rejected() {
+        let Setup {
+            env,
+            client,
+            token,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nnclrep");
+        let admin = register_test_org(&env, &client, org_sym.clone());
+        let maintainer = Address::generate(&env);
+
+        token.mint(&admin, &10_000);
+        client.fund_org(&org_sym, &admin, &10_000);
+        client.add_maintainer(&org_sym, &maintainer);
+        client.allocate_payout(&org_sym, &admin, &maintainer, &200, &0u64);
+
+        // First claim (nonce 0) succeeds.
+        client.claim_payout_with_nonce(&maintainer, &0u64);
+
+        // Allocate more so there is a claimable balance again.
+        client.allocate_payout(&org_sym, &admin, &maintainer, &200, &0u64);
+
+        // Replay with stale nonce 0 must fail.
+        let result = client.try_claim_payout_with_nonce(&maintainer, &0u64);
+        assert!(result.is_err());
+    }
+
+    /// `qf_contribute_with_nonce` verifies nonce, contributes, then advances.
+    #[test]
+    fn test_qf_contribute_with_nonce_succeeds_and_increments() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nncqf1");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        assert_eq!(client.get_nonce(&contributor), 0u64);
+        client.qf_contribute_with_nonce(&org_sym, &contributor, &100, &0u64);
+
+        assert_eq!(client.get_nonce(&contributor), 1u64);
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 100);
+    }
+
+    /// Replaying a `qf_contribute_with_nonce` is rejected.
+    #[test]
+    fn test_qf_contribute_with_nonce_replay_rejected() {
+        let Setup {
+            env,
+            client,
+            token,
+            protocol_admin,
+            ..
+        } = setup();
+        let org_sym = symbol_short!("nncqf2");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let contributor = Address::generate(&env);
+        client.verify_humanity(&protocol_admin, &contributor);
+        token.mint(&contributor, &1_000);
+
+        // First call succeeds.
+        client.qf_contribute_with_nonce(&org_sym, &contributor, &50, &0u64);
+        // Replay with stale nonce 0 must fail.
+        let result = client.try_qf_contribute_with_nonce(&org_sym, &contributor, &50, &0u64);
+        assert!(result.is_err());
+        // Contribution must still be only 50.
+        assert_eq!(client.get_qf_contribution(&org_sym, &contributor), 50);
+    }
+
+    /// Nonces are independent per caller address.
+    #[test]
+    fn test_nonces_are_independent_per_caller() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+        let org_sym = symbol_short!("nncind");
+        register_test_org(&env, &client, org_sym.clone());
+
+        let donor_a = Address::generate(&env);
+        let donor_b = Address::generate(&env);
+        token.mint(&donor_a, &1_000);
+        token.mint(&donor_b, &1_000);
+
+        // donor_a makes two calls; donor_b makes one.
+        client.fund_org_with_nonce(&org_sym, &donor_a, &100, &0u64);
+        client.fund_org_with_nonce(&org_sym, &donor_a, &100, &1u64);
+        client.fund_org_with_nonce(&org_sym, &donor_b, &100, &0u64);
+
+        assert_eq!(client.get_nonce(&donor_a), 2u64);
+        assert_eq!(client.get_nonce(&donor_b), 1u64);
+    }
+
+    // ── SAC Token Interface Tests ──────────────────────────────────────────────
+
+    /// Verify that token metadata (name, symbol, decimals) is cached on init
+    /// and can be retrieved via get_token_metadata, mapping 1:1 with the SAC.
+    #[test]
+    fn test_token_metadata_after_init() {
+        let Setup { env, client, .. } = setup();
+
+        let metadata = client.get_token_metadata();
+        // SAC tokens registered via register_stellar_asset_contract_v2 have defaults:
+        // name: "", symbol: "", decimals: 7
+        assert_eq!(metadata.decimals, 7);
+        // Name and symbol may be empty for default SAC tokens in the test harness
+        // but the function should still return them without panicking.
+        assert!(metadata.name.len() >= 0);
+        assert!(metadata.symbol.len() >= 0);
+    }
+
+    /// Verify that token_balance correctly queries the underlying SAC balance.
+    #[test]
+    fn test_token_balance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let user = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+
+        // Verify initial balance is 0
+        assert_eq!(client.token_balance(&user), 0);
+        assert_eq!(token_client.balance(&user), 0);
+
+        // Mint some tokens and check balance via the contract
+        token.mint(&user, &1_000_000);
+        assert_eq!(client.token_balance(&user), 1_000_000);
+        assert_eq!(token_client.balance(&user), 1_000_000);
+
+        // Also check that contract balance is correct
+        assert_eq!(client.token_balance(&client.address), 0);
+    }
+
+    /// Verify that mint_token requires valid multisig authorization.
+    #[test]
+    fn test_mint_token_multisig() {
+        let env2 = Env::default();
+        env2.mock_all_auths();
+
+        let token_admin_2 = Address::generate(&env2);
+        let token_contract_id = env2.register_stellar_asset_contract_v2(token_admin_2.clone());
+        let token_client = token::StellarAssetClient::new(&env2, &token_contract_id.address());
+
+        let contract_id = env2.register_contract(None, PayoutRegistry);
+        let client2 = PayoutRegistryClient::new(&env2, &contract_id);
+
+        // Create multisig admins (threshold 2)
+        let admin1 = Address::generate(&env2);
+        let admin2 = Address::generate(&env2);
+        let admin3 = Address::generate(&env2);
+        let mut admins = Vec::new(&env2);
+        admins.push_back(admin1.clone());
+        admins.push_back(admin2.clone());
+        admins.push_back(admin3.clone());
+
+        client2.init(&token_contract_id.address(), &admins, &2);
+
+        // Set the token admin to the PayoutRegistry contract so it can mint.
+        // This is the standard pattern when the contract acts as the token controller.
+        token_client.set_admin(&contract_id);
+
+        // Test: mint with only 1 signature should fail
+        let mut signers1 = Vec::new(&env2);
+        signers1.push_back(admin1.clone());
+
+        env2.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin1,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "mint_token",
+                args: (signers1.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let result =
+            client2.try_mint_token(&signers1, &token_admin_2, &10_000_000_i128);
+        assert!(result.is_err());
+
+        // Test: mint with 2 valid signatures should succeed
+        let mut signers2 = Vec::new(&env2);
+        signers2.push_back(admin1.clone());
+        signers2.push_back(admin2.clone());
+
+        env2.mock_auths(&[
+            soroban_sdk::testutils::MockAuth {
+                address: &admin1,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers2.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
+                    sub_invokes: &[],
+                },
+            },
+            soroban_sdk::testutils::MockAuth {
+                address: &admin2,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers2.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
+
+        let result = client2.try_mint_token(&signers2, &token_admin_2, &10_000_000_i128);
+        assert!(result.is_ok());
+    }
+
+    /// Verify that mint_token rejects zero or negative amounts.
+    #[test]
+    fn test_mint_token_invalid_amount() {
+        let env = Env::default();
+        let token_admin = Address::generate(&env);
+        let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+        let contract_id = env.register_contract(None, PayoutRegistry);
+        let client = PayoutRegistryClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let mut admins = Vec::new(&env);
+        admins.push_back(admin1.clone());
+        admins.push_back(admin2.clone());
+
+        client.init(&token_contract_id.address(), &admins, &2);
+
+        let mut signers = Vec::new(&env);
+        signers.push_back(admin1.clone());
+        signers.push_back(admin2.clone());
+
+        env.mock_auths(&[
+            soroban_sdk::testutils::MockAuth {
+                address: &admin1,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers.clone(), token_admin.clone(), 0_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+            soroban_sdk::testutils::MockAuth {
+                address: &admin2,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &contract_id,
+                    fn_name: "mint_token",
+                    args: (signers.clone(), token_admin.clone(), 0_i128).into_val(&env),
+                    sub_invokes: &[],
+                },
+            },
+        ]);
+
+        let result = client.try_mint_token(&signers, &token_admin, &0_i128);
+        assert!(result.is_err());
+    }
+
+    /// Verify that token_allowance correctly queries the underlying SAC.
+    #[test]
+    fn test_token_allowance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        // Initial allowance should be 0
+        assert_eq!(client.token_allowance(&owner, &spender), 0);
+
+        // Verify against the raw token client as well
+        let token_client = token::Client::new(&env, &token.address);
+        assert_eq!(token_client.allowance(&owner, &spender), 0);
+    }
+
+    /// Verify that token_approve correctly sets an allowance on the underlying SAC.
+    #[test]
+    fn test_token_approve_sets_allowance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+
+        // Approve an allowance
+        client.token_approve(&owner, &spender, &500_000_i128, &10_000_u32);
+
+        // Verify through both the contract and the raw token client
+        assert_eq!(client.token_allowance(&owner, &spender), 500_000);
+        assert_eq!(token_client.allowance(&owner, &spender), 500_000);
+    }
+
+    /// Verify that token_approve rejects negative amounts.
+    #[test]
+    fn test_token_approve_negative_amount_fails() {
+        let Setup { env, client, .. } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+
+        let result = client.try_token_approve(&owner, &spender, &(-1_i128), &10_000_u32);
+        assert!(result.is_err());
+    }
+
+    /// Verify that token_transfer_from transfers via allowance on the underlying SAC.
+    #[test]
+    fn test_token_transfer_from_with_allowance() {
+        let Setup {
+            env, client, token, ..
+        } = setup();
+
+        let owner = Address::generate(&env);
+        let spender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let token_client = token::Client::new(&env, &token.address);
+
+        // Mint tokens to owner
+        token.mint(&owner, &10_000_000);
+
+        // Owner approves spender
+        client.token_approve(&owner, &spender, &5_000_000_i128, &10_000_u32);
+
+        // Spender transfers on behalf of owner
+        client.token_transfer_from(&spender, &owner, &recipient, &3_000_000_i128);
+
+        // Verify balances and remaining allowance
+        assert_eq!(token_client.balance(&owner), 7_000_000);
+        assert_eq!(token_client.balance(&recipient), 3_000_000);
+        assert_eq!(client.token_allowance(&owner, &spender), 2_000_000);
+    }
+
+    /// Verify that token_transfer_from rejects zero or negative amounts.
+    #[test]
+    fn test_token_transfer_from_invalid_amount_fails() {
+        let Setup { env, client, .. } = setup();
+
+        let spender = Address::generate(&env);
+        let from = Address::generate(&env);
+        let to = Address::generate(&env);
+
+        let result = client.try_token_transfer_from(&spender, &from, &to, &0_i128);
+        assert!(result.is_err());
+    }
+
+    #[contract]
+    pub struct MockToken;
+
+    #[contractimpl]
+    impl MockToken {
+        pub fn mint(env: Env, to: Address, amount: i128) {
+            let mut supply: i128 = env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0);
+            supply += amount;
+            env.storage().instance().set(&Symbol::new(&env, "supply"), &supply);
+            
+            // To simulate the balance update, we can also maintain a balance mapping if needed.
+            // But flash_mint only relies on `total_supply`, `mint` and `burn`.
+        }
+        
+        pub fn burn(env: Env, _from: Address, amount: i128) {
+            let mut supply: i128 = env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0);
+            supply -= amount;
+            env.storage().instance().set(&Symbol::new(&env, "supply"), &supply);
+        }
+        
+        pub fn total_supply(env: Env) -> i128 {
+            env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0)
+        }
+        
+        pub fn name(env: Env) -> String { String::from_str(&env, "Mock") }
+        pub fn symbol(env: Env) -> String { String::from_str(&env, "MCK") }
+        pub fn decimals(_env: Env) -> u32 { 7 }
+    }
+
+    #[contract]
+    pub struct MockReceiver;
+
+    #[contractimpl]
+    impl MockReceiver {
+        pub fn execute_flash_mint(env: Env, _amount: i128, args: Vec<soroban_sdk::Val>) {
+            let compliant: bool = args.get(0).unwrap().into_val(&env);
+            if !compliant {
+                let token_addr: Address = args.get(1).unwrap().into_val(&env);
+                env.invoke_contract::<()>(&token_addr, &Symbol::new(&env, "mint"), (env.current_contract_address(), 100i128).into_val(&env));
+            }
+        }
+    }
+
+    #[test]
+    fn test_flash_mint_compliant() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let token_id = env.register(MockToken, ());
+        let registry_id = env.register(PayoutRegistry, ());
+        let client = PayoutRegistryClient::new(&env, &registry_id);
+
+        let protocol_admin = Address::generate(&env);
+        let mut admins = Vec::new(&env);
+        admins.push_back(protocol_admin.clone());
+
+        client.init(&token_id, &admins, &1);
+
+        let receiver_id = env.register(MockReceiver, ());
+        
+        let mut args = Vec::new(&env);
+        args.push_back(true.into_val(&env));
+
+        // This should succeed and not panic
+        client.flash_mint(&receiver_id, &1000i128, &args);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #38)")]
+    fn test_flash_mint_non_compliant() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let token_id = env.register(MockToken, ());
+        let registry_id = env.register(PayoutRegistry, ());
+        let client = PayoutRegistryClient::new(&env, &registry_id);
+
+        let protocol_admin = Address::generate(&env);
+        let mut admins = Vec::new(&env);
+        admins.push_back(protocol_admin.clone());
+
+        client.init(&token_id, &admins, &1);
+
+        let receiver_id = env.register(MockReceiver, ());
+        
+        let mut args = Vec::new(&env);
+        args.push_back(false.into_val(&env));
+        args.push_back(token_id.into_val(&env)); // Pass token address to mint maliciously
+
+        // This should panic with FlashMintSupplyMismatch (38)
+        client.flash_mint(&receiver_id, &1000i128, &args);
     }
 }

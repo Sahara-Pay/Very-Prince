@@ -12,11 +12,13 @@ use token_interface::TokenMetadata;
 // See src/zero_copy.rs for the architecture and instruction-count benchmarks.
 mod zero_copy;
 pub mod xdr_parser;
+pub mod twap_oracle;
 pub mod linked_list;
 
 // SDK compatibility tests to ensure safe version upgrades
 #[cfg(test)]
 mod sdk_compatibility_tests;
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data Types

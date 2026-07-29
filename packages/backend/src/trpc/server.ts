@@ -65,6 +65,9 @@ export async function configureTRPC(server: FastifyInstance) {
     // Extract the client's last known state hash from the custom header
     const clientStateHash = request.headers['x-state-hash'] as string | undefined;
     
+    const ctx: TRPCContext = clientStateHash !== undefined 
+      ? { stateHash: clientStateHash } 
+      : {};
     const ctx: TRPCContext = clientStateHash ? { stateHash: clientStateHash } : {};
     
     try {

@@ -108,6 +108,7 @@ export async function safeSetAdaptive(
     console.error(`Redis safeSetAdaptive failed for key ${key}:`, error);
   }
 }
+/**
  * Safely delete a single Redis key.
  */
 export async function safeDel(key: string): Promise<void> {

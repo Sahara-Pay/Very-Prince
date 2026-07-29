@@ -1,6 +1,5 @@
 "use client";
-
-import { useState, Suspense, useTransition } from "react";
+import { useState, Suspense, useEffect } from "react";
 import { WalletButton } from "@/components/WalletButton";
 import dynamic from "next/dynamic";
 import { useFreighter } from "@/hooks/useFreighter";
@@ -11,6 +10,7 @@ import { MaintainerBalancesWidget } from "@/components/MaintainerBalancesWidget"
 import { WebhookSettings } from "@/components/WebhookSettings";
 import { ApiKeySettings } from "@/components/ApiKeySettings";
 import { OrgDetailsSkeleton, FundingHistorySkeleton, MaintainerBalancesSkeleton } from "@/components/DashboardSkeletons";
+import { SuspenseOrchestratorProvider, OrchestratedBoundary } from "@/components/SuspenseOrchestrator";
 import { buildClaimPayoutTransaction, submitSignedTransaction } from "@/lib/sorobanClient";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -25,7 +25,7 @@ const AllocatePayoutModal = dynamic(
 );
 
 interface DashboardContentProps {
-  initialOrgId?: string;
+  initialOrgId?: string | undefined;
 }
 
 export function DashboardContent({ initialOrgId }: DashboardContentProps) {
@@ -36,10 +36,9 @@ export function DashboardContent({ initialOrgId }: DashboardContentProps) {
   const [showAllocateModal, setShowAllocateModal] = useState(false);
   const [claimingAddress, setClaimingAddress] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"overview" | "settings">("overview");
-  const [, startTransition] = useTransition();
 
   // Sync input state with URL param
-  React.useEffect(() => {
+  useEffect(() => {
     if (initialOrgId) {
       setOrgIdInput(initialOrgId);
     }
@@ -148,36 +147,60 @@ export function DashboardContent({ initialOrgId }: DashboardContentProps) {
           </div>
 
           {activeTab === "overview" ? (
-            <>
+            <SuspenseOrchestratorProvider fallback={
+              <div className="space-y-8 animate-pulse">
+                <div className="h-32 bg-white/5 rounded-xl w-full" />
+                <div className="h-64 bg-white/5 rounded-xl w-full" />
+                <div className="h-48 bg-white/5 rounded-xl w-full" />
+              </div>
+            }>
               <ErrorBoundary variant="inline">
-                <Suspense fallback={<OrgDetailsSkeleton />}>
-                  <OrgDetailsWidget 
-                    orgId={initialOrgId} 
-                    onShowFundModal={() => setShowFundModal(true)}
-                    onShowAllocateModal={() => setShowAllocateModal(true)}
-                  />
+                <Suspense fallback={
+                  <OrchestratedBoundary id="orgDetails" isReady={false}>
+                    <OrgDetailsSkeleton />
+                  </OrchestratedBoundary>
+                }>
+                  <OrchestratedBoundary id="orgDetails" isReady={true}>
+                    <OrgDetailsWidget 
+                      orgId={initialOrgId} 
+                      onShowFundModal={() => setShowFundModal(true)}
+                      onShowAllocateModal={() => setShowAllocateModal(true)}
+                    />
+                  </OrchestratedBoundary>
                 </Suspense>
               </ErrorBoundary>
 
               <div className="mb-8">
                 <ErrorBoundary variant="inline">
-                  <Suspense fallback={<FundingHistorySkeleton />}>
-                    <FundingHistoryChart orgId={initialOrgId} />
+                  <Suspense fallback={
+                    <OrchestratedBoundary id="fundingHistory" isReady={false}>
+                      <FundingHistorySkeleton />
+                    </OrchestratedBoundary>
+                  }>
+                    <OrchestratedBoundary id="fundingHistory" isReady={true}>
+                      <FundingHistoryChart orgId={initialOrgId} />
+                    </OrchestratedBoundary>
                   </Suspense>
                 </ErrorBoundary>
               </div>
 
               <ErrorBoundary variant="inline">
-                <Suspense fallback={<MaintainerBalancesSkeleton />}>
-                  <MaintainerBalancesWidget 
-                    orgId={initialOrgId} 
-                    onClaim={handleClaim}
-                    claimingAddress={claimingAddress}
-                    onAllocateClick={() => setShowAllocateModal(true)}
-                  />
+                <Suspense fallback={
+                  <OrchestratedBoundary id="maintainers" isReady={false}>
+                    <MaintainerBalancesSkeleton />
+                  </OrchestratedBoundary>
+                }>
+                  <OrchestratedBoundary id="maintainers" isReady={true}>
+                    <MaintainerBalancesWidget 
+                      orgId={initialOrgId} 
+                      onClaim={handleClaim}
+                      claimingAddress={claimingAddress}
+                      onAllocateClick={() => setShowAllocateModal(true)}
+                    />
+                  </OrchestratedBoundary>
                 </Suspense>
               </ErrorBoundary>
-            </>
+            </SuspenseOrchestratorProvider>
           ) : (
             <div className="space-y-8">
               <ApiKeySettings orgId={initialOrgId} publicKey={publicKey || ""} />

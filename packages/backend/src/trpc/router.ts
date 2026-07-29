@@ -64,9 +64,6 @@ export const appRouter = t.router({
           await safeSet(cacheKey, JSON.stringify(orgDetails), adaptiveTTL);
           
           return orgDetails;
-
-        try {
-          return await stellarService.readOrganizationDetails(id);
         } catch (error) {
           logger.error({ err: error, orgId: id }, "Failed to fetch organization details from contract");
 

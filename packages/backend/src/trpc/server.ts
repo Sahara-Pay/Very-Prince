@@ -18,6 +18,7 @@ import { streamAsyncEnvelope } from '../utils/streamingJson.js';
 
 const procedures = appRouter._def.procedures as Record<string, unknown>;
 
+// Configure tRPC HTTP handler for Fastify
 export async function configureTRPC(server: FastifyInstance) {
   await server.register(etagCachePlugin);
 
@@ -31,6 +32,34 @@ export async function configureTRPC(server: FastifyInstance) {
     },
   }, async (request: FastifyRequest, reply: FastifyReply) => {
     const { path } = request.params as { path: string };
+    const query = request.query as any;
+    const isBatch = query.batch === '1';
+
+    // ─── Batch Processing ───────────────────────────────────────────────────
+    if (isBatch) {
+      const paths = path.split(',');
+      const bodies = request.body as Record<string, any>; // tRPC passes batch payload as an object map
+
+      const results = await Promise.all(paths.map(async (p, index) => {
+        const input = bodies[String(index)];
+        // Skip diff sync for batched requests by not passing state hash
+        const ctx: TRPCContext = {};
+
+        try {
+          evictionEngine.recordAccess(`trpc:${p}`);
+          const { result } = await handleTRPCRequest(p, input, ctx);
+          // Standard tRPC batch response format
+          return { result: { data: result } };
+        } catch (error) {
+          logger.error({ err: error, path: p }, 'tRPC HTTP batched request failed');
+          return { error: { message: error instanceof Error ? error.message : 'Unknown error' } };
+        }
+      }));
+
+      return reply.send(results);
+    }
+
+    // ─── Single Processing with Diff Sync ───────────────────────────────────
     const body = request.body as any;
     
     // Extract the client's last known state hash from the custom header
@@ -39,6 +68,7 @@ export async function configureTRPC(server: FastifyInstance) {
     const ctx: TRPCContext = clientStateHash !== undefined 
       ? { stateHash: clientStateHash } 
       : {};
+    const ctx: TRPCContext = clientStateHash ? { stateHash: clientStateHash } : {};
     
     try {
       // Record the query path in the eviction engine so the sketch learns

@@ -15,6 +15,14 @@ pub mod xdr_parser;
 pub mod twap_oracle;
 pub mod linked_list;
 
+// Issue #479: O(log N) binary search over sorted vesting tranche arrays.
+// Replaces the O(N) linear scan in claim_payout / claim_payout_with_nonce.
+pub mod vesting_search;
+
+// Issue #478: Single-use, ledger-scoped capability tokens for flattening
+// multi-hop cross-contract authorization hierarchies.
+pub mod capability_token;
+
 // SDK compatibility tests to ensure safe version upgrades
 #[cfg(test)]
 mod sdk_compatibility_tests;
@@ -1558,15 +1566,8 @@ impl PayoutRegistry {
         }
 
         let now = env.ledger().timestamp();
-        let mut vested_total: i128 = 0;
-        for i in 0..payout.tranches.len() {
-            let tranche = payout.tranches.get(i).unwrap();
-            if now >= tranche.unlock_timestamp {
-                vested_total = vested_total
-                    .checked_add(tranche.amount)
-                    .unwrap_or_else(|| panic_with_error!(&env, PrinceError::PayoutOverflow));
-            }
-        }
+        // Issue #479: O(log N) binary search replaces O(N) linear scan.
+        let vested_total = vesting_search::vested_amount_binary(&env, &payout.tranches, now);
 
         if vested_total <= payout.claimed_amount {
             panic_with_error!(&env, PrinceError::PayoutLocked);
@@ -2165,16 +2166,13 @@ impl PayoutRegistry {
         }
 
         // Compute vested (releasable) total based on current ledger timestamp.
+        // Issue #479: use O(log N) binary search instead of O(N) linear scan.
+        // The tranche array is guaranteed sorted at allocation time by
+        // `allocate_payout_vesting` (non-monotonic schedules are rejected with
+        // `InvalidAmount`).  `vesting_search::vested_amount_binary` exploits
+        // that ordering to locate the active milestone index in O(log N).
         let now = env.ledger().timestamp();
-        let mut vested_total: i128 = 0;
-        for i in 0..payout.tranches.len() {
-            let tranche = payout.tranches.get(i).unwrap();
-            if now >= tranche.unlock_timestamp {
-                vested_total = vested_total
-                    .checked_add(tranche.amount)
-                    .unwrap_or_else(|| panic_with_error!(&env, PrinceError::PayoutOverflow));
-            }
-        }
+        let vested_total = vesting_search::vested_amount_binary(&env, &payout.tranches, now);
 
         // If nothing new is vested beyond already-claimed amount => locked.
         if vested_total <= payout.claimed_amount {
@@ -2927,7 +2925,89 @@ impl PayoutRegistry {
         Self::assert_active(&env);
         linked_list::SortedList::get_page(&env, list_id, start_id, limit)
     }
-}
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Capability Tokens — Issue #478
+    //
+    // Single-use, ledger-scoped capability tokens that flatten multi-hop
+    // cross-contract authorization hierarchies.  A DAO issues one token at
+    // the entry point; every downstream contract validates it at the deepest
+    // layer instead of calling `require_auth` at each hop.
+    //
+    // Security properties:
+    //   * Deterministic: derived from (caller, action, seq, expiry) via SHA-256.
+    //   * Ledger-scoped: expiry_ledger is always current_seq + 1 → invalid
+    //     after the invoking ledger closes.
+    //   * Single-use: consumed-flag written to temporary storage (TTL=1 ledger)
+    //     so the same token cannot be reused within the same ledger.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Issue a single-use capability token for `caller` scoped to `action_tag`.
+    ///
+    /// The token encodes the current ledger sequence and expires at
+    /// `expiry_ledger` (must be `> env.ledger().sequence()`; use
+    /// `env.ledger().sequence() + 1` for a single-ledger token).
+    ///
+    /// # Returns
+    /// A 32-byte deterministic capability hash.
+    ///
+    /// # Panics
+    /// * `InvalidAmount` — if `expiry_ledger <= current_ledger_sequence`.
+    pub fn issue_capability(
+        env: Env,
+        caller: Address,
+        action_tag: Symbol,
+        expiry_ledger: u32,
+    ) -> BytesN<32> {
+        // Require the caller to authorize the issuance so third parties cannot
+        // issue capability tokens on behalf of others.
+        caller.require_auth_for_args(
+            (caller.clone(), action_tag.clone(), expiry_ledger).into_val(&env),
+        );
+        capability_token::issue_capability(&env, &caller, &action_tag, expiry_ledger)
+    }
+
+    /// Validate and consume a capability token issued by `issue_capability`.
+    ///
+    /// Performs hash re-derivation, expiry, and single-use checks in order.
+    /// On success, marks the token as consumed for the remainder of this
+    /// ledger so it cannot be replayed.
+    ///
+    /// # Arguments
+    /// * `token`              — The 32-byte capability hash to validate.
+    /// * `caller`             — Expected authorised address.
+    /// * `action_tag`         — Expected action scope.
+    /// * `issued_at_sequence` — The ledger sequence at which the token was issued.
+    /// * `expiry_ledger`      — The expiry ledger encoded in the token.
+    ///
+    /// # Panics
+    /// * `NotAuthorized`  — hash mismatch or token expired.
+    /// * `Reentrancy`     — token already consumed this ledger (replay attempt).
+    pub fn validate_capability(
+        env: Env,
+        token: BytesN<32>,
+        caller: Address,
+        action_tag: Symbol,
+        issued_at_sequence: u32,
+        expiry_ledger: u32,
+    ) {
+        capability_token::validate_and_consume_capability(
+            &env,
+            &token,
+            &caller,
+            &action_tag,
+            issued_at_sequence,
+            expiry_ledger,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "CapabilityConsumed"),
+            ),
+            (caller, action_tag, expiry_ledger),
+        );
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Private helpers

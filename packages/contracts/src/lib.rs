@@ -1,13 +1,22 @@
 #![no_std]
 
+mod token_interface;
+mod fixed_point;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
     Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
+use token_interface::TokenMetadata;
 
 // Zero-copy deserialization helpers for hot-path reads.
 // See src/zero_copy.rs for the architecture and instruction-count benchmarks.
 mod zero_copy;
+pub mod xdr_parser;
+
+// SDK compatibility tests to ensure safe version upgrades
+#[cfg(test)]
+mod sdk_compatibility_tests;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data Types
@@ -180,6 +189,22 @@ pub enum PrinceError {
     EmptyQuadraticRound = 32,
     /// A project list cannot contain the same project more than once.
     DuplicateProject = 33,
+    /// The provided nonce does not match the expected next nonce for this caller.
+    /// This indicates a replayed or out-of-order payload — reject immediately.
+    InvalidNonce = 34,
+    /// The BLS signature provided for the DAO approval is mathematically invalid.
+    InvalidBlsSignature = 35,
+    /// The BLS Proof-of-Possession (PoP) provided during key registration is invalid.
+    InvalidPoP = 36,
+    /// Token metadata (name/symbol/decimals) could not be fetched during initialisation.
+    TokenMetadataUnavailable = 37,
+    /// A fixed-point vault conversion (mint/burn) overflowed i128 arithmetic.
+    RoundingOverflow = 38,
+    /// A vault deposit rounded down to zero shares and was rejected to
+    /// prevent dust/donation-style manipulation of the share price.
+    ZeroSharesMinted = 39,
+    /// Caller attempted to burn more vault shares than their recorded balance.
+    InsufficientShareBalance = 40,
 }
 
 #[contracttype]
@@ -210,6 +235,29 @@ pub enum DataKey {
     QfProjectStats(Symbol),
     /// Cumulative verified contribution from one human to one project.
     QfContribution(Symbol, Address),
+    /// Monotonically increasing nonce per caller address.
+    ///
+    /// Used to provide adversarial replay protection for external-origin calls
+    /// and cross-contract callback entry points. The nonce starts at 0 and is
+    /// atomically incremented to `expected + 1` on each accepted call. Replayed
+    /// payloads that present a stale nonce are rejected with `InvalidNonce`.
+    Nonce(Address),
+    /// Aggregated BLS12-381 public key for a DAO (G2 point, 96 bytes).
+    DaoAggregatedPublicKey(Symbol),
+    /// Number of registered signers in a DAO.
+    DaoSignerCount(Symbol),
+    /// Cached token name from the underlying SAC (populated during init).
+    TokenName,
+    /// Cached token symbol from the underlying SAC (populated during init).
+    TokenSymbol,
+    /// Cached token decimals from the underlying SAC (populated during init).
+    TokenDecimals,
+    /// Total fractional vault shares currently outstanding.
+    VaultTotalShares,
+    /// Total underlying asset amount currently held by the vault.
+    VaultTotalAssets,
+    /// Vault share balance held by a given address.
+    VaultShareBalance(Address),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -401,6 +449,35 @@ impl PayoutRegistry {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        // Fetch and cache token metadata from the SAC for 1:1 parameter mapping.
+        // This ensures external contracts can query token params without calling
+        // the token contract directly — a single source of truth.
+        let metadata = token_interface::fetch_token_metadata(&env, &token);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenName, &metadata.name);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenName,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenSymbol, &metadata.symbol);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenSymbol,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenDecimals, &metadata.decimals);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenDecimals,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
         env.events().publish(
             (
                 Symbol::new(&env, "VeryPrince"),
@@ -427,6 +504,107 @@ impl PayoutRegistry {
             .persistent()
             .get(&DataKey::Token)
             .unwrap_or_else(|| panic_with_error!(&env, PrinceError::ContractNotInitialized))
+    }
+
+    /// Retrieve the cached SAC token metadata (name, symbol, decimals).
+    ///
+    /// This returns the metadata that was fetched during contract initialisation.
+    /// It maps 1:1 with the SEP-41 token standard, ensuring AMM compatibility.
+    pub fn get_token_metadata(env: Env) -> TokenMetadata {
+        if !env.storage().persistent().has(&DataKey::TokenName) {
+            panic_with_error!(&env, PrinceError::ContractNotInitialized);
+        }
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenName,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenSymbol,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenDecimals,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let name: String = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenName)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::TokenMetadataUnavailable));
+        let symbol: String = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenSymbol)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::TokenMetadataUnavailable));
+        let decimals: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenDecimals)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::TokenMetadataUnavailable));
+        TokenMetadata {
+            name,
+            symbol,
+            decimals,
+        }
+    }
+
+    /// Query the token balance of any address via the SAC balance() function.
+    pub fn token_balance(env: Env, id: Address) -> i128 {
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_balance(&env, &token_addr, &id)
+    }
+
+    /// Query the allowance from -> spender via the SAC allowance() function.
+    pub fn token_allowance(env: Env, from: Address, spender: Address) -> i128 {
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_allowance(&env, &token_addr, &from, &spender)
+    }
+
+    /// Approve spender to transfer tokens via the SAC approve() function.
+    pub fn token_approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        expiration_ledger: u32,
+    ) {
+        from.require_auth_for_args(
+            (from.clone(), spender.clone(), amount, expiration_ledger).into_val(&env),
+        );
+        if amount < 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_approve(&env, &token_addr, &from, &spender, amount, expiration_ledger);
+        env.events().publish(
+            (symbol_short!("approve"), symbol_short!("token")),
+            (from, spender, amount),
+        );
+    }
+
+    /// Transfer tokens via allowance via the SAC transfer_from() function.
+    pub fn token_transfer_from(
+        env: Env,
+        spender: Address,
+        from: Address,
+        to: Address,
+        amount: i128,
+    ) {
+        spender.require_auth_for_args(
+            (spender.clone(), from.clone(), to.clone(), amount).into_val(&env),
+        );
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_transfer_from(&env, &token_addr, &spender, &from, &to, &amount);
+        env.events().publish(
+            (symbol_short!("xfer"), symbol_short!("from")),
+            (spender, from, to, amount),
+        );
     }
 
     /// Retrieve the native protocol admin configuration.
@@ -624,8 +802,7 @@ impl PayoutRegistry {
         );
 
         let token = Self::get_token(env.clone());
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&from, &env.current_contract_address(), &amount);
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &amount);
 
         env.events().publish(
             (
@@ -1065,8 +1242,7 @@ impl PayoutRegistry {
         // Interactions: Execute the token transfer as the absolute last step
         // This follows the Check-Effects-Interactions pattern.
         let token = Self::get_token(env.clone());
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&from, &env.current_contract_address(), &amount);
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &amount);
 
         env.events().publish(
             (
@@ -1198,6 +1374,349 @@ impl PayoutRegistry {
     /// reducing CPU instruction consumption by ~28 % versus the naive path.
     pub fn get_org_budget(env: Env, id: Symbol) -> i128 {
         zero_copy::read_org_budget(&env, &id)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Replay Protection — Per-Caller Nonces
+    //
+    // Every external-origin call that touches funds (fund_org, claim_payout,
+    // qf_contribute) has a nonce-gated variant. The caller must supply the
+    // nonce value they observed via `get_nonce`; the contract verifies it
+    // matches the stored value, then atomically increments it before any
+    // state-changing side effects. Because the nonce advances before the token
+    // transfer (CEI), a replayed payload always arrives with a stale nonce and
+    // is rejected with `InvalidNonce`, making double-spend via callback replay
+    // structurally unreachable.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Returns the current nonce for `caller`.
+    ///
+    /// The nonce starts at 0 and increments by 1 after each accepted
+    /// nonce-gated call. Clients should read this value just before
+    /// constructing a nonce-protected transaction to obtain the correct
+    /// expected nonce.
+    ///
+    /// # Arguments
+    /// * `env`    - The contract environment.
+    /// * `caller` - The address whose nonce to query.
+    pub fn get_nonce(env: Env, caller: Address) -> u64 {
+        let key = DataKey::Nonce(caller);
+        if !env.storage().persistent().has(&key) {
+            return 0u64;
+        }
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().get(&key).unwrap_or(0u64)
+    }
+
+    /// Verify that `expected_nonce` matches the stored nonce for `caller`,
+    /// then atomically increment the stored nonce to `expected_nonce + 1`.
+    ///
+    /// Must be called **before** any state mutation in a nonce-gated entry
+    /// point. Panics with `InvalidNonce` if the nonces do not match, ensuring
+    /// replayed payloads are rejected without committing any state change.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `caller`         - The address whose nonce is being consumed.
+    /// * `expected_nonce` - The nonce value the caller believes is current.
+    fn verify_and_consume_nonce(env: &Env, caller: &Address, expected_nonce: u64) {
+        let key = DataKey::Nonce(caller.clone());
+        let current: u64 = env.storage().persistent().get(&key).unwrap_or(0u64);
+        if current != expected_nonce {
+            panic_with_error!(env, PrinceError::InvalidNonce);
+        }
+        // Atomically advance: increment before any downstream side effects.
+        let next = expected_nonce.checked_add(1).unwrap_or_else(|| {
+            // u64 overflow is cryptographically implausible; treat as invalid.
+            panic_with_error!(env, PrinceError::InvalidNonce)
+        });
+        env.storage().persistent().set(&key, &next);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Nonce-protected variant of `fund_org`.
+    ///
+    /// Behaves identically to `fund_org` but additionally verifies and consumes
+    /// a per-caller nonce, preventing adversarial replay of a captured funding
+    /// payload across different ledger states.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `org_id`         - Symbol ID of the organization to fund.
+    /// * `from`           - Donor address.
+    /// * `amount`         - Amount of tokens to transfer (in stroops).
+    /// * `expected_nonce` - Caller's expected nonce (must equal `get_nonce(from)`).
+    ///
+    /// # Panics
+    /// All panics from `fund_org` apply, plus:
+    /// * `InvalidNonce` - If `expected_nonce` does not match the stored nonce for `from`.
+    pub fn fund_org_with_nonce(
+        env: Env,
+        org_id: Symbol,
+        from: Address,
+        amount: i128,
+        expected_nonce: u64,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        // Bind auth to all parameters including the nonce so a replay with a
+        // different nonce cannot reuse a captured auth envelope.
+        from.require_auth_for_args(
+            (org_id.clone(), from.clone(), amount, expected_nonce).into_val(&env),
+        );
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Organization(org_id.clone()))
+        {
+            panic_with_error!(&env, PrinceError::OrgNotFound);
+        }
+
+        // Effects — nonce must be consumed before any storage mutation or
+        // external call so that a re-entrant replay sees the already-advanced
+        // nonce and is rejected.
+        Self::verify_and_consume_nonce(&env, &from, expected_nonce);
+        zero_copy::add_org_budget(&env, &org_id, amount);
+
+        // Interactions
+        let token = Self::get_token(env.clone());
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &amount);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "OrgFunded"),
+            ),
+            (org_id, from, amount),
+        );
+    }
+
+    /// Nonce-protected variant of `claim_payout`.
+    ///
+    /// Behaves identically to `claim_payout` but additionally verifies and
+    /// consumes a per-maintainer nonce, preventing adversarial replay of a
+    /// captured claim payload.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `maintainer`     - Address of the maintainer claiming their payout.
+    /// * `expected_nonce` - Caller's expected nonce (must equal `get_nonce(maintainer)`).
+    ///
+    /// # Returns
+    /// The amount of tokens transferred.
+    ///
+    /// # Panics
+    /// All panics from `claim_payout` apply, plus:
+    /// * `InvalidNonce` - If `expected_nonce` does not match the stored nonce.
+    pub fn claim_payout_with_nonce(env: Env, maintainer: Address, expected_nonce: u64) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        maintainer.require_auth_for_args(
+            (maintainer.clone(), expected_nonce).into_val(&env),
+        );
+
+        let balance_key = DataKey::MaintainerBalance(maintainer.clone());
+        let mut payout: MaintainerPayout =
+            env.storage()
+                .persistent()
+                .get(&balance_key)
+                .unwrap_or(MaintainerPayout {
+                    amount: 0,
+                    claimed_amount: 0,
+                    tranches: Vec::new(&env),
+                });
+
+        if payout.amount == 0 {
+            panic_with_error!(&env, PrinceError::NoClaimableBalance);
+        }
+
+        let now = env.ledger().timestamp();
+        let mut vested_total: i128 = 0;
+        for i in 0..payout.tranches.len() {
+            let tranche = payout.tranches.get(i).unwrap();
+            if now >= tranche.unlock_timestamp {
+                vested_total = vested_total
+                    .checked_add(tranche.amount)
+                    .unwrap_or_else(|| panic_with_error!(&env, PrinceError::PayoutOverflow));
+            }
+        }
+
+        if vested_total <= payout.claimed_amount {
+            panic_with_error!(&env, PrinceError::PayoutLocked);
+        }
+
+        let amount_to_claim = vested_total - payout.claimed_amount;
+
+        // Effects: consume nonce and update payout accounting before transfer.
+        Self::verify_and_consume_nonce(&env, &maintainer, expected_nonce);
+        payout.claimed_amount = vested_total;
+        payout.amount = payout.amount - amount_to_claim;
+        env.storage().persistent().set(&balance_key, &payout);
+        env.storage().persistent().extend_ttl(
+            &balance_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Interactions
+        let token = Self::get_token(env.clone());
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &maintainer,
+            &amount_to_claim,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "PayoutClaimed"),
+            ),
+            (maintainer, amount_to_claim),
+        );
+
+        amount_to_claim
+    }
+
+    /// Nonce-protected variant of `qf_contribute`.
+    ///
+    /// Behaves identically to `qf_contribute` but additionally verifies and
+    /// consumes a per-contributor nonce, preventing adversarial replay of a
+    /// captured QF contribution payload.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `project_id`     - Symbol ID of the project receiving the contribution.
+    /// * `contributor`    - Contributor address.
+    /// * `amount`         - Amount of tokens to contribute (in stroops).
+    /// * `expected_nonce` - Caller's expected nonce (must equal `get_nonce(contributor)`).
+    ///
+    /// # Panics
+    /// All panics from `qf_contribute` apply, plus:
+    /// * `InvalidNonce` - If `expected_nonce` does not match the stored nonce.
+    pub fn qf_contribute_with_nonce(
+        env: Env,
+        project_id: Symbol,
+        contributor: Address,
+        amount: i128,
+        expected_nonce: u64,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        contributor.require_auth_for_args(
+            (
+                project_id.clone(),
+                contributor.clone(),
+                amount,
+                expected_nonce,
+            )
+                .into_val(&env),
+        );
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+        if !Self::has_humanity(env.clone(), contributor.clone()) {
+            panic_with_error!(&env, PrinceError::HumanityVerificationRequired);
+        }
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Organization(project_id.clone()))
+        {
+            panic_with_error!(&env, PrinceError::OrgNotFound);
+        }
+
+        let contribution_key = DataKey::QfContribution(project_id.clone(), contributor.clone());
+        let previous_contribution: i128 = env
+            .storage()
+            .persistent()
+            .get(&contribution_key)
+            .unwrap_or(0);
+        let new_contribution = previous_contribution
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+
+        let previous_root = checked_isqrt_i128(&env, previous_contribution);
+        let new_root = checked_isqrt_i128(&env, new_contribution);
+        let root_delta = new_root
+            .checked_sub(previous_root)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow));
+
+        // Effects: consume nonce first, then apply all storage mutations.
+        Self::verify_and_consume_nonce(&env, &contributor, expected_nonce);
+
+        env.storage()
+            .persistent()
+            .set(&contribution_key, &new_contribution);
+        env.storage().persistent().extend_ttl(
+            &contribution_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let stats_key = DataKey::QfProjectStats(project_id.clone());
+        let mut stats: QfProjectStats = env
+            .storage()
+            .persistent()
+            .get(&stats_key)
+            .unwrap_or_else(Self::empty_qf_stats);
+        stats.direct_contributions = stats
+            .direct_contributions
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+        stats.sqrt_sum = stats
+            .sqrt_sum
+            .checked_add(root_delta)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow));
+        if previous_contribution == 0 {
+            stats.contributor_count = stats
+                .contributor_count
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow));
+        }
+        stats.weight = checked_square_i128(&env, stats.sqrt_sum);
+        env.storage().persistent().set(&stats_key, &stats);
+        env.storage().persistent().extend_ttl(
+            &stats_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        zero_copy::add_org_budget(&env, &project_id, amount);
+
+        // Interactions
+        let token = Self::get_token(env.clone());
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&contributor, &env.current_contract_address(), &amount);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "QfContributed"),
+            ),
+            (project_id, contributor, amount, stats.weight),
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1667,8 +2186,9 @@ impl PayoutRegistry {
         // Interactions: Execute the token transfer as the absolute last step
         // This follows the Check-Effects-Interactions pattern.
         let token = Self::get_token(env.clone());
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(
+        token_interface::sac_transfer(
+            &env,
+            &token,
             &env.current_contract_address(),
             &maintainer,
             &amount_to_claim,
@@ -1851,6 +2371,209 @@ impl PayoutRegistry {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fractional Vault: Share Minting & Burning (GrantFox issue #474)
+//
+// Wraps the fixed-point conversion math in `fixed_point.rs` with the same
+// reentrancy guard / auth / TTL-extension conventions used by the QF
+// deposit and contribute functions above. Minting always rounds down,
+// burning always rounds up, so the collateral pool can never be drained
+// by repeated micro-transactions (see fixed_point.rs for the math and
+// fuzz-tested invariants).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contractimpl]
+impl PayoutRegistry {
+    /// Deposit `assets` of the underlying SAC token and mint fractional
+    /// vault shares in return, rounding down in favor of the collateral pool.
+    ///
+    /// Returns the number of shares minted.
+    pub fn vault_deposit(env: Env, from: Address, assets: i128) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        from.require_auth_for_args((from.clone(), assets).into_val(&env));
+
+        if assets <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if assets > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+
+        let total_shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalShares)
+            .unwrap_or(0);
+        let total_assets: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalAssets)
+            .unwrap_or(0);
+
+        let shares_minted =
+            fixed_point::convert_to_shares_round_down(&env, assets, total_shares, total_assets);
+        if shares_minted == 0 {
+            panic_with_error!(&env, PrinceError::ZeroSharesMinted);
+        }
+
+        let new_total_shares = total_shares
+            .checked_add(shares_minted)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+        let new_total_assets = total_assets
+            .checked_add(assets)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+
+        let balance_key = DataKey::VaultShareBalance(from.clone());
+        let previous_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+        let new_balance = previous_balance
+            .checked_add(shares_minted)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalShares, &new_total_shares);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalAssets, &new_total_assets);
+        env.storage().persistent().set(&balance_key, &new_balance);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalShares,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalAssets,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &balance_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let token = Self::get_token(env.clone());
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &assets);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "VaultDeposit"),
+            ),
+            (from, assets, shares_minted, new_total_shares, new_total_assets),
+        );
+
+        shares_minted
+    }
+
+    /// Burn `shares` of fractional vault shares and withdraw the
+    /// corresponding underlying assets, rounding up in favor of the
+    /// collateral pool.
+    ///
+    /// Returns the number of assets returned to the caller.
+    pub fn vault_withdraw(env: Env, from: Address, shares: i128) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        from.require_auth_for_args((from.clone(), shares).into_val(&env));
+
+        if shares <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let balance_key = DataKey::VaultShareBalance(from.clone());
+        let previous_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+        if shares > previous_balance {
+            panic_with_error!(&env, PrinceError::InsufficientShareBalance);
+        }
+
+        let total_shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalShares)
+            .unwrap_or(0);
+        let total_assets: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalAssets)
+            .unwrap_or(0);
+
+        let assets_returned =
+            fixed_point::convert_to_assets_round_up(&env, shares, total_shares, total_assets);
+
+        let new_total_shares = total_shares
+            .checked_sub(shares)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+        let new_total_assets = total_assets
+            .checked_sub(assets_returned)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+        let new_balance = previous_balance
+            .checked_sub(shares)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalShares, &new_total_shares);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalAssets, &new_total_assets);
+        env.storage().persistent().set(&balance_key, &new_balance);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalShares,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalAssets,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &balance_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let token = Self::get_token(env.clone());
+        token_interface::sac_transfer(&env, &token, &env.current_contract_address(), &from, &assets_returned);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "VaultWithdraw"),
+            ),
+            (from, shares, assets_returned, new_total_shares, new_total_assets),
+        );
+
+        assets_returned
+    }
+
+    /// Return the total fractional vault shares currently outstanding.
+    pub fn get_vault_total_shares(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultTotalShares)
+            .unwrap_or(0)
+    }
+
+    /// Return the total underlying assets currently held by the vault.
+    pub fn get_vault_total_assets(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultTotalAssets)
+            .unwrap_or(0)
+    }
+
+    /// Return the vault share balance held by `holder`.
+    pub fn get_vault_share_balance(env: Env, holder: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultShareBalance(holder))
+            .unwrap_or(0)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cross-chain state proof verifier modules
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1859,6 +2582,7 @@ pub mod rlp;
 pub mod keccak;
 pub mod mpt;
 pub mod cross_chain_verifier;
+pub mod bls_verifier;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cross-chain contract entrypoints (added to the existing PayoutRegistry)
@@ -2123,6 +2847,102 @@ impl PayoutRegistry {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // BLS DAO Signature Aggregation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Register a new signer for a DAO by providing their BLS public key and a PoP.
+    ///
+    /// Verifies the Proof-of-Possession (PoP) to prevent rogue-key attacks. If
+    /// successful, updates the DAO's aggregated public key.
+    pub fn register_bls_signer(
+        env: Env,
+        dao_id: Symbol,
+        public_key: soroban_sdk::Bytes,
+        pop: soroban_sdk::Bytes,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        // Only DAO admins (org admins) can register signers
+        Self::get_org_admin_requirement(&env, &dao_id);
+
+        let mut pk_arr = [0u8; 96];
+        public_key.copy_into_slice(&mut pk_arr);
+        let mut pop_arr = [0u8; 48];
+        pop.copy_into_slice(&mut pop_arr);
+
+        if !bls_verifier::verify_pop(&pk_arr, &pop_arr) {
+            panic_with_error!(&env, PrinceError::InvalidPoP);
+        }
+
+        let agg_key = DataKey::DaoAggregatedPublicKey(dao_id.clone());
+        let current_agg: [u8; 96] = env
+            .storage()
+            .persistent()
+            .get(&agg_key)
+            .unwrap_or([0u8; 96]);
+
+        let updated_agg = bls_verifier::aggregate_pk(&current_agg, &pk_arr)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::InvalidPoP));
+
+        env.storage().persistent().set(&agg_key, &updated_agg);
+
+        // Update signer count
+        let count_key = DataKey::DaoSignerCount(dao_id.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        env.storage().persistent().set(&count_key, &(count + 1));
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "BlsSignerRegistered"),
+            ),
+            (dao_id, public_key),
+        );
+    }
+
+    /// Verify a DAO approval for a payout batch using an aggregated BLS signature.
+    ///
+    /// This allows a single 48-byte signature to represent approvals from all
+    /// registered DAO signers, drastically reducing gas costs for large DAOs.
+    pub fn verify_dao_payout_approval(
+        env: Env,
+        dao_id: Symbol,
+        payout_id: u64,
+        aggregated_signature: soroban_sdk::Bytes,
+    ) -> bool {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        let agg_key = DataKey::DaoAggregatedPublicKey(dao_id.clone());
+        let agg_pk: [u8; 96] = env
+            .storage()
+            .persistent()
+            .get(&agg_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NotAuthorized));
+
+        let mut sig_arr = [0u8; 48];
+        aggregated_signature.copy_into_slice(&mut sig_arr);
+
+        // The message is the payout_id (converted to bytes)
+        let msg_buf = payout_id.to_be_bytes();
+
+        let verified = bls_verifier::verify_aggregated(&sig_arr, &agg_pk, &msg_buf);
+
+        if verified {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "VeryPrince"),
+                    Symbol::new(&env, "BlsApprovalVerified"),
+                ),
+                (dao_id, payout_id),
+            );
+        }
+
+        verified
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -2133,3 +2953,5 @@ impl PayoutRegistry {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod bls_tests;

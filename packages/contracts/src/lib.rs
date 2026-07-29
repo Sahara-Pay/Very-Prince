@@ -1,6 +1,7 @@
 #![no_std]
 
 mod token_interface;
+mod fixed_point;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
@@ -215,6 +216,15 @@ pub enum PrinceError {
     InvalidListInsertionPoint = 39,
     /// The requested node was not found in the linked list.
     ListNodeNotFound = 40,
+    /// The linked list traversal depth limit was reached.
+    ListTraversalLimitExceeded = 41,
+    /// A fixed-point vault conversion (mint/burn) overflowed i128 arithmetic.
+    RoundingOverflow = 42,
+    /// A vault deposit rounded down to zero shares and was rejected to
+    /// prevent dust/donation-style manipulation of the share price.
+    ZeroSharesMinted = 43,
+    /// Caller attempted to burn more vault shares than their recorded balance.
+    InsufficientShareBalance = 44,
     /// The flash loan callback failed to return the borrowed amount plus fee.
     /// `balance_after < balance_before + fee` — the invariant was violated and
     /// the entire transaction is atomically reverted.
@@ -275,12 +285,23 @@ pub enum DataKey {
     TokenSymbol,
     /// Cached token decimals from the underlying SAC (populated during init).
     TokenDecimals,
+    /// Total fractional vault shares currently outstanding.
+    VaultTotalShares,
+    /// Total underlying asset amount currently held by the vault.
+    VaultTotalAssets,
+    /// Vault share balance held by a given address.
+    VaultShareBalance(Address),
     /// Metadata for a specific doubly linked list (head, tail, size).
     ListMetadata(Symbol),
     /// A single node in a doubly linked list.
     ListNode(Symbol, u64),
     /// The next available node ID for a specific list.
     ListNextId(Symbol),
+    /// A time-locked vault entry for a given owner and maturity date.
+    /// NOTE: declared here because upstream's TimeLockVault feature
+    /// (create_vault/claim_vault) references this key but never declared
+    /// it — pre-existing upstream bug, unrelated to this PR.
+    Vault(Address, u64),
     /// A non-custodial time-lock vault keyed by (owner, maturity_timestamp).
     Vault(Address, u64),
     /// The flash loan fee in basis points (e.g. 30 = 0.30%). Set by protocol admin.
@@ -2386,6 +2407,209 @@ impl PayoutRegistry {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fractional Vault: Share Minting & Burning (GrantFox issue #474)
+//
+// Wraps the fixed-point conversion math in `fixed_point.rs` with the same
+// reentrancy guard / auth / TTL-extension conventions used by the QF
+// deposit and contribute functions above. Minting always rounds down,
+// burning always rounds up, so the collateral pool can never be drained
+// by repeated micro-transactions (see fixed_point.rs for the math and
+// fuzz-tested invariants).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contractimpl]
+impl PayoutRegistry {
+    /// Deposit `assets` of the underlying SAC token and mint fractional
+    /// vault shares in return, rounding down in favor of the collateral pool.
+    ///
+    /// Returns the number of shares minted.
+    pub fn vault_deposit(env: Env, from: Address, assets: i128) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        from.require_auth_for_args((from.clone(), assets).into_val(&env));
+
+        if assets <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if assets > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+
+        let total_shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalShares)
+            .unwrap_or(0);
+        let total_assets: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalAssets)
+            .unwrap_or(0);
+
+        let shares_minted =
+            fixed_point::convert_to_shares_round_down(&env, assets, total_shares, total_assets);
+        if shares_minted == 0 {
+            panic_with_error!(&env, PrinceError::ZeroSharesMinted);
+        }
+
+        let new_total_shares = total_shares
+            .checked_add(shares_minted)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+        let new_total_assets = total_assets
+            .checked_add(assets)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+
+        let balance_key = DataKey::VaultShareBalance(from.clone());
+        let previous_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+        let new_balance = previous_balance
+            .checked_add(shares_minted)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalShares, &new_total_shares);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalAssets, &new_total_assets);
+        env.storage().persistent().set(&balance_key, &new_balance);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalShares,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalAssets,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &balance_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let token = Self::get_token(env.clone());
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &assets);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "VaultDeposit"),
+            ),
+            (from, assets, shares_minted, new_total_shares, new_total_assets),
+        );
+
+        shares_minted
+    }
+
+    /// Burn `shares` of fractional vault shares and withdraw the
+    /// corresponding underlying assets, rounding up in favor of the
+    /// collateral pool.
+    ///
+    /// Returns the number of assets returned to the caller.
+    pub fn vault_withdraw(env: Env, from: Address, shares: i128) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        from.require_auth_for_args((from.clone(), shares).into_val(&env));
+
+        if shares <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let balance_key = DataKey::VaultShareBalance(from.clone());
+        let previous_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+        if shares > previous_balance {
+            panic_with_error!(&env, PrinceError::InsufficientShareBalance);
+        }
+
+        let total_shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalShares)
+            .unwrap_or(0);
+        let total_assets: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalAssets)
+            .unwrap_or(0);
+
+        let assets_returned =
+            fixed_point::convert_to_assets_round_up(&env, shares, total_shares, total_assets);
+
+        let new_total_shares = total_shares
+            .checked_sub(shares)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+        let new_total_assets = total_assets
+            .checked_sub(assets_returned)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+        let new_balance = previous_balance
+            .checked_sub(shares)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalShares, &new_total_shares);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalAssets, &new_total_assets);
+        env.storage().persistent().set(&balance_key, &new_balance);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalShares,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalAssets,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &balance_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let token = Self::get_token(env.clone());
+        token_interface::sac_transfer(&env, &token, &env.current_contract_address(), &from, &assets_returned);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "VaultWithdraw"),
+            ),
+            (from, shares, assets_returned, new_total_shares, new_total_assets),
+        );
+
+        assets_returned
+    }
+
+    /// Return the total fractional vault shares currently outstanding.
+    pub fn get_vault_total_shares(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultTotalShares)
+            .unwrap_or(0)
+    }
+
+    /// Return the total underlying assets currently held by the vault.
+    pub fn get_vault_total_assets(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultTotalAssets)
+            .unwrap_or(0)
+    }
+
+    /// Return the vault share balance held by `holder`.
+    pub fn get_vault_share_balance(env: Env, holder: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultShareBalance(holder))
+            .unwrap_or(0)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cross-chain state proof verifier modules
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3215,6 +3439,7 @@ mod bls_tests;
 #[cfg(test)]
 mod vault_tests;
 #[cfg(test)]
+mod list_tests;
 mod list_tests;
 #[cfg(test)]
 mod flash_loan_tests;

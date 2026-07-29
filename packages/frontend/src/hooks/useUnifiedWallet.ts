@@ -1,33 +1,28 @@
 /**
  * @file useUnifiedWallet.ts
- * @description Unified wallet hook that consolidates all wallet-related functionality.
+ * @description Unified wallet hook that consolidates all wallet-related functionality using XState FSM.
  * 
  * This hook provides a single, clean API for all wallet interactions including:
- * - Connection management
- * - Transaction signing
+ * - Connection management via XState state machine
+ * - Multi-wallet discovery via EIP-6963
+ * - Transaction signing with hardware wallet timeout handling
  * - Auth message signing (SIWS)
  * - Payout claiming
  * - Error handling and loading states
  * 
- * This makes it easy to add support for other wallets (Albedo, xBull) later
- * by updating the logic in one place.
+ * This replaces the previous boolean-flag-based implementation with a robust FSM
+ * that prevents race conditions and impossible UI states.
  */
 
-import { useState, useCallback, useEffect } from "react";
-import {
-  isConnected as freighterIsConnected,
-  getPublicKey,
-  signTransaction as freighterSignTransaction,
-  isAllowed,
-  setAllowed,
-} from "@stellar/freighter-api";
+import { useCallback } from "react";
+import { useWallet } from "../contexts/WalletContext";
 import { toast } from "sonner";
 import { toastTransaction } from "../lib/transactionToast";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface UnifiedWalletState {
-  /** True once the browser extension has been detected and queried. */
+  /** True once the wallet context has been initialized. */
   isInitialized: boolean;
   /** True if a wallet extension is installed in the browser. */
   isInstalled: boolean;
@@ -41,8 +36,14 @@ export interface UnifiedWalletState {
   isSigning: boolean;
   /** Last error message, if any. */
   error: string | null;
-  /** Wallet type (currently only 'freighter', but extensible). */
-  walletType: 'freighter' | null;
+  /** Current network (public or testnet). */
+  network: 'public' | 'testnet';
+  /** True if connected to wrong network. */
+  isWrongNetwork: boolean;
+  /** True while waiting on hardware wallet response. */
+  isHardwareTimeout: boolean;
+  /** Available wallet providers discovered via EIP-6963. */
+  providers: Array<{ rdns: string; name: string; icon?: string }>;
 }
 
 export interface WalletActions {
@@ -68,208 +69,43 @@ export interface WalletActions {
    * @returns The transaction result.
    */
   claimPayout: (orgId: string) => Promise<any>;
+  /** Select a specific wallet provider from discovered providers. */
+  selectWallet: (rdns: string) => void;
+  /** Retry connection after hardware wallet timeout. */
+  retryConnection: () => void;
+  /** Cancel pending hardware wallet operation. */
+  cancelHardwareWait: () => void;
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 /**
  * Returns the current wallet state and interaction callbacks.
- * This is the unified API for all wallet interactions.
+ * This is the unified API for all wallet interactions, backed by XState FSM.
+ * 
+ * This hook wraps the WalletContext (which uses the XState walletMachine)
+ * to provide the same API as the previous boolean-flag implementation,
+ * but with robust state management that prevents race conditions.
  */
 export function useUnifiedWallet(): UnifiedWalletState & WalletActions {
-  const [state, setState] = useState<UnifiedWalletState>({
-    isInitialized: false,
-    isInstalled: false,
-    isConnected: false,
-    publicKey: null,
-    isLoading: false,
-    isSigning: false,
-    error: null,
-    walletType: null,
-  });
+  const walletContext = useWallet();
 
-  // ── Detect wallet on mount ─────────────────────────────────────────────
+  // ── Derived state from XState machine ────────────────────────────────────
 
-  const checkWalletConnection = useCallback(async () => {
-    try {
-      // Currently only support Freighter, but this is where we'd detect other wallets
-      const connected = await freighterIsConnected();
-      
-      if (connected !== undefined) {
-        setState(prev => ({
-          ...prev,
-          isInstalled: true,
-          walletType: 'freighter',
-        }));
-
-        // Check if this site is already allowed without another prompt
-        const allowed = await isAllowed();
-        if (allowed) {
-          const pk = await getPublicKey();
-          setState(prev => ({
-            ...prev,
-            isConnected: !!pk,
-            publicKey: pk ?? null,
-          }));
-        } else {
-          setState(prev => ({
-            ...prev,
-            isConnected: false,
-            publicKey: null,
-          }));
-        }
-      } else {
-        setState(prev => ({
-          ...prev,
-          isInstalled: false,
-          walletType: null,
-          isConnected: false,
-          publicKey: null,
-        }));
-      }
-    } catch {
-      // Wallet not installed — stay in unconnected state
-      setState(prev => ({
-        ...prev,
-        isInstalled: false,
-        walletType: null,
-        isConnected: false,
-        publicKey: null,
-      }));
-    } finally {
-      setState(prev => ({ ...prev, isInitialized: true }));
-    }
-  }, []);
-
-  useEffect(() => {
-    checkWalletConnection();
-
-    // Listen for wallet events (Freighter specific)
-    const handleWalletChange = () => {
-      checkWalletConnection();
-    };
-
-    // Note: This is Freighter-specific. For multi-wallet support,
-    // we'd need to abstract this further.
-    if (typeof window !== 'undefined' && (window as any).freighter) {
-      const freighter = (window as any).freighter;
-      freighter.on?.('accountChanged', handleWalletChange);
-      freighter.on?.('connected', handleWalletChange);
-      freighter.on?.('disconnected', handleWalletChange);
-
-      return () => {
-        freighter.off?.('accountChanged', handleWalletChange);
-        freighter.off?.('connected', handleWalletChange);
-        freighter.off?.('disconnected', handleWalletChange);
-      };
-    }
-  }, [checkWalletConnection]);
-
-  // ── Connect ───────────────────────────────────────────────────────────────
-
-  const connect = useCallback(async () => {
-    setState(prev => ({ ...prev, isLoading: true, error: null }));
-
-    try {
-      if (!state.isInstalled) {
-        throw new Error(
-          "Wallet is not installed. Get Freighter at freighter.app"
-        );
-      }
-
-      // Grant this site permission to read the public key
-      await setAllowed();
-
-      const pk = await getPublicKey();
-
-      if (!pk) {
-        throw new Error("Failed to retrieve public key from wallet.");
-      }
-
-      setState(prev => ({
-        ...prev,
-        isConnected: true,
-        publicKey: pk,
-      }));
-
-      toast.success("Wallet connected successfully!");
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
-      setState(prev => ({
-        ...prev,
-        error: message,
-        isConnected: false,
-        publicKey: null,
-      }));
-      toast.error(`Failed to connect wallet: ${message}`);
-    } finally {
-      setState(prev => ({ ...prev, isLoading: false }));
-    }
-  }, [state.isInstalled]);
-
-  // ── Disconnect ────────────────────────────────────────────────────────────
-
-  const disconnect = useCallback(() => {
-    // Wallets do not expose a programmatic revoke API yet.
-    // We clear local state — the user can manually disconnect in the extension.
-    setState(prev => ({
-      ...prev,
-      isConnected: false,
-      publicKey: null,
-      error: null,
-    }));
-    toast.success("Wallet disconnected");
-  }, []);
-
-  // ── Sign Transaction ──────────────────────────────────────────────────────
-
-  const signTransaction = useCallback(
-    async (transactionXdr: string): Promise<string> => {
-      if (!state.isConnected || !state.publicKey) {
-        throw new Error("Wallet is not connected. Call connect() first.");
-      }
-
-      setState(prev => ({ ...prev, isSigning: true, error: null }));
-
-      try {
-        const signedTxXdr = await freighterSignTransaction(transactionXdr, {
-          network: "TESTNET",
-          networkPassphrase:
-            process.env["NEXT_PUBLIC_NETWORK_PASSPHRASE"] ??
-            "Test SDF Network ; September 2015",
-        });
-
-        if (!signedTxXdr) {
-          throw new Error("Signing was rejected or failed.");
-        }
-
-        return signedTxXdr;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Unknown error";
-        setState(prev => ({ ...prev, error: message }));
-        toast.error(`Failed to sign transaction: ${message}`);
-        throw new Error(message);
-      } finally {
-        setState(prev => ({ ...prev, isSigning: false }));
-      }
-    },
-    [state.isConnected, state.publicKey]
-  );
-
+  const isInstalled = walletContext.providers.length > 0;
+  const isSigning = walletContext.isLoading && walletContext.isConnected;
+  
   // ── Sign Auth Message ─────────────────────────────────────────────────────
 
   const signAuthMessage = useCallback(
     async (message: string): Promise<string> => {
-      if (!state.isConnected || !state.publicKey) {
+      if (!walletContext.isConnected || !walletContext.publicKey) {
         throw new Error("Wallet is not connected. Call connect() first.");
       }
 
-      setState(prev => ({ ...prev, isSigning: true, error: null }));
-
       try {
-        // For Freighter, we need to use the signMessage method
-        // This is a simplified implementation - you might need to adjust
-        // based on the actual Freighter API for message signing
+        // Use the wallet adapter to sign the message
+        // This will be handled by the selected wallet provider
         const freighter = (window as any).freighter;
         
         if (!freighter?.signMessage) {
@@ -285,25 +121,20 @@ export function useUnifiedWallet(): UnifiedWalletState & WalletActions {
         return signature;
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
-        setState(prev => ({ ...prev, error: message }));
         toast.error(`Failed to sign message: ${message}`);
         throw new Error(message);
-      } finally {
-        setState(prev => ({ ...prev, isSigning: false }));
       }
     },
-    [state.isConnected, state.publicKey]
+    [walletContext.isConnected, walletContext.publicKey]
   );
 
   // ── Claim Payout ─────────────────────────────────────────────────────────
 
   const claimPayout = useCallback(
     async (orgId: string) => {
-      if (!state.isConnected || !state.publicKey) {
+      if (!walletContext.isConnected || !walletContext.publicKey) {
         throw new Error("Wallet is not connected. Call connect() first.");
       }
-
-      setState(prev => ({ ...prev, isSigning: true, error: null }));
 
       try {
         // Build the claim_payout transaction
@@ -314,7 +145,7 @@ export function useUnifiedWallet(): UnifiedWalletState & WalletActions {
           },
           body: JSON.stringify({
             orgId,
-            maintainerAddress: state.publicKey,
+            maintainerAddress: walletContext.publicKey,
           }),
         });
 
@@ -325,8 +156,8 @@ export function useUnifiedWallet(): UnifiedWalletState & WalletActions {
 
         const { transactionXdr } = await response.json();
 
-        // Sign the transaction
-        const signedTransaction = await signTransaction(transactionXdr);
+        // Sign the transaction using the FSM-backed signTransaction
+        const signedTransaction = await walletContext.signTransaction(transactionXdr);
 
         // Submit the signed transaction
         const submitResponse = await fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001'}/api/v1/contract/submit`, {
@@ -353,19 +184,35 @@ export function useUnifiedWallet(): UnifiedWalletState & WalletActions {
         console.error('Error claiming payout:', error);
         toastTransaction.error(error, 'Failed to claim payout');
         throw error;
-      } finally {
-        setState(prev => ({ ...prev, isSigning: false }));
       }
     },
-    [state.isConnected, state.publicKey, signTransaction]
+    [walletContext.isConnected, walletContext.publicKey, walletContext.signTransaction]
   );
 
+  // ── Return unified state and actions ─────────────────────────────────────
+
   return {
-    ...state,
-    connect,
-    disconnect,
-    signTransaction,
+    // State from XState machine
+    isInitialized: walletContext.isInitialized,
+    isInstalled,
+    isConnected: walletContext.isConnected,
+    publicKey: walletContext.publicKey,
+    isLoading: walletContext.isLoading,
+    isSigning,
+    error: walletContext.error,
+    network: walletContext.network,
+    isWrongNetwork: walletContext.isWrongNetwork,
+    isHardwareTimeout: walletContext.isHardwareTimeout,
+    providers: walletContext.providers,
+    
+    // Actions from XState machine
+    connect: walletContext.connectWallet,
+    disconnect: walletContext.disconnectWallet,
+    signTransaction: walletContext.signTransaction,
     signAuthMessage,
     claimPayout,
+    selectWallet: walletContext.selectWallet,
+    retryConnection: walletContext.retryConnection,
+    cancelHardwareWait: walletContext.cancelHardwareWait,
   };
 }

@@ -72,7 +72,11 @@ dependencies = [
  "ark-serialize",
  "ark-std",
  "derivative",
+<<<<<<< HEAD
  "digest 0.10.7",
+=======
+ "digest",
+>>>>>>> upstream/main
  "itertools",
  "num-bigint",
  "num-traits",
@@ -125,7 +129,11 @@ checksum = "adb7b85a02b83d2f22f89bd5cac66c9c89474240cb6207cb1efc16d098e822a5"
 dependencies = [
  "ark-serialize-derive",
  "ark-std",
+<<<<<<< HEAD
  "digest 0.10.7",
+=======
+ "digest",
+>>>>>>> upstream/main
  "num-bigint",
 ]
 
@@ -217,6 +225,7 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "block-buffer"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -226,6 +235,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> upstream/main
 name = "bls12_381_plus"
 version = "0.8.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1074,6 +1085,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pairing"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81fec4625e73cf41ef4bb6846cafa6d44736525f442ba45e407c4a000a13996f"
+dependencies = [
+ "group",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1572,7 +1592,11 @@ dependencies = [
  "ark-ec",
  "ark-ff",
  "ark-serialize",
+<<<<<<< HEAD
  "curve25519-dalek 5.0.0",
+=======
+ "curve25519-dalek",
+>>>>>>> upstream/main
  "ecdsa",
  "ed25519-dalek 3.0.0",
  "elliptic-curve",
@@ -1915,7 +1939,11 @@ dependencies = [
  "rand 0.8.7",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+<<<<<<< HEAD
  "sha2 0.10.9",
+=======
+ "sha2",
+>>>>>>> upstream/main
  "soroban-sdk",
 ]
 

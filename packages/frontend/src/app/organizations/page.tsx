@@ -83,6 +83,7 @@ export default function OrganizationsPage() {
 
   // Trajectory prefetch — fires ~100–300ms before click when the cursor
   // is aiming at an org card. Hover/focus handlers remain as a fallback.
+  // On mobile (coarse pointer) falls back to IntersectionObserver prefetching.
   const predictiveTargets: PrefetchTarget[] = useMemo(
     () =>
       orgs.map((org: Org) => ({
@@ -99,6 +100,7 @@ export default function OrganizationsPage() {
             bottom: r.bottom,
           };
         },
+        getElement: () => cardEls.current.get(org.id) ?? null,
         prefetch: (signal: AbortSignal) =>
           prefetchOrganizationIntent(org.id, { queryClient, router, signal }),
       })),

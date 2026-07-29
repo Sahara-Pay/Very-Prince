@@ -75,6 +75,7 @@ export function usePredictivePrefetch({
 
 /**
  * Build a target from an element ref + prefetch callback.
+ * Captures the element for IntersectionObserver fallback on mobile.
  */
 export function targetFromElement(
   id: string,
@@ -85,6 +86,7 @@ export function targetFromElement(
   return {
     id,
     getRect: () => {
+      if (!el.isConnected) return null;
       const r = el.getBoundingClientRect();
       if (r.width <= 0 || r.height <= 0) return null;
       return {
@@ -94,6 +96,7 @@ export function targetFromElement(
         bottom: r.bottom,
       };
     },
+    getElement: () => (el.isConnected ? el : null),
     prefetch,
   };
 }

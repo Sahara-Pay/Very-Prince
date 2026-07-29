@@ -23,6 +23,11 @@ export type PrefetchTarget = {
    * cancel in-flight work when the trajectory invalidates.
    */
   prefetch: (signal: AbortSignal) => void | Promise<void>;
+  /**
+   * Live element reference for IntersectionObserver fallback on mobile.
+   * Called lazily so it captures the element after refs are committed.
+   */
+  getElement?: () => Element | null;
 };
 
 export type PredictivePrefetchOptions = {
@@ -44,6 +49,11 @@ export type PredictivePrefetchOptions = {
   paddingPx?: number;
   /** Disable on coarse pointers / when matchMedia says so. Default true. */
   requireFinePointer?: boolean;
+  /**
+   * rootMargin for IntersectionObserver fallback. Ignored on fine-pointer
+   * devices. Default "200px".
+   */
+  intersectionMargin?: string;
   /** Optional debug sink (tests / telemetry). */
   onDebug?: (event: PredictivePrefetchDebugEvent) => void;
 };
@@ -51,7 +61,9 @@ export type PredictivePrefetchOptions = {
 export type PredictivePrefetchDebugEvent =
   | { type: "prefetch"; targetId: string; confidence: number; etaMs: number }
   | { type: "cancel"; targetId: string; reason: string }
-  | { type: "skip"; targetId: string; reason: string };
+  | { type: "skip"; targetId: string; reason: string }
+  | { type: "io-prefetch"; targetId: string }
+  | { type: "io-skip"; targetId: string; reason: string };
 
 type InFlight = {
   controller: AbortController;
@@ -68,6 +80,7 @@ const DEFAULTS = {
   globalCooldownMs: 80,
   paddingPx: 12,
   requireFinePointer: true,
+  intersectionMargin: "200px",
 } as const;
 
 /**
@@ -90,6 +103,7 @@ export class PredictivePrefetchEngine {
   private readonly lastFireAt = new Map<string, number>();
   private readonly inFlight = new Map<string, InFlight>();
   private readonly prefetchedOnce = new Set<string>();
+  private io: IntersectionObserver | null = null;
 
   constructor(options: PredictivePrefetchOptions = {}) {
     this.opts = { ...DEFAULTS, ...options };
@@ -97,14 +111,22 @@ export class PredictivePrefetchEngine {
 
   setTargets(targets: PrefetchTarget[]): void {
     this.targets = targets;
+    if (this.io && this.running) {
+      this.connectIntersectionObserver();
+    }
   }
 
   /** Begin listening. No-ops on server or coarse pointers when configured. */
   start(): void {
     if (typeof window === "undefined" || this.running) return;
-    if (this.opts.requireFinePointer && !this.hasFinePointer()) return;
 
     this.running = true;
+
+    if (this.opts.requireFinePointer && !this.hasFinePointer()) {
+      this.startIntersectionObserver();
+      return;
+    }
+
     window.addEventListener("pointermove", this.onPointerMove, {
       passive: true,
     });
@@ -117,6 +139,7 @@ export class PredictivePrefetchEngine {
   stop(): void {
     if (typeof window === "undefined") return;
     this.running = false;
+    this.stopIntersectionObserver();
     window.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("pointerdown", this.onPointerDown);
     if (this.rafId != null) {
@@ -152,6 +175,110 @@ export class PredictivePrefetchEngine {
       targetCount: this.targets.length,
     };
   }
+
+  private startIntersectionObserver(): void {
+    if (typeof window === "undefined") return;
+    this.io = new IntersectionObserver(this.handleIntersection, {
+      rootMargin: this.opts.intersectionMargin,
+      threshold: 0,
+    });
+    this.connectIntersectionObserver();
+  }
+
+  private stopIntersectionObserver(): void {
+    if (!this.io) return;
+    this.io.disconnect();
+    this.io = null;
+  }
+
+  private connectIntersectionObserver(): void {
+    if (!this.io) return;
+    this.io.disconnect();
+    for (const target of this.targets) {
+      const el = target.getElement?.();
+      if (!el) {
+        this.opts.onDebug?.({
+          type: "io-skip",
+          targetId: target.id,
+          reason: "no-element",
+        });
+        continue;
+      }
+      this.io.observe(el);
+    }
+  }
+
+  private readonly handleIntersection = (
+    entries: IntersectionObserverEntry[],
+  ): void => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const target = this.targets.find((t) => {
+        const el = t.getElement?.();
+        return el === entry.target;
+      });
+      if (!target) continue;
+
+      if (this.inFlight.has(target.id)) {
+        this.opts.onDebug?.({
+          type: "io-skip",
+          targetId: target.id,
+          reason: "in-flight",
+        });
+        continue;
+      }
+
+      const now = performance.now();
+      const last = this.lastFireAt.get(target.id);
+      if (last != null && now - last < this.opts.cooldownMs) {
+        this.opts.onDebug?.({
+          type: "io-skip",
+          targetId: target.id,
+          reason: "target-cooldown",
+        });
+        continue;
+      }
+
+      if (
+        this.lastGlobalFireAt > 0 &&
+        now - this.lastGlobalFireAt < this.opts.globalCooldownMs
+      ) {
+        this.opts.onDebug?.({
+          type: "io-skip",
+          targetId: target.id,
+          reason: "global-cooldown",
+        });
+        continue;
+      }
+
+      if (this.prefetchedOnce.has(target.id)) {
+        this.opts.onDebug?.({
+          type: "io-skip",
+          targetId: target.id,
+          reason: "already-prefetched",
+        });
+        continue;
+      }
+
+      this.opts.onDebug?.({ type: "io-prefetch", targetId: target.id });
+
+      const controller = new AbortController();
+      this.inFlight.set(target.id, { controller, targetId: target.id });
+      this.lastFireAt.set(target.id, now);
+      this.lastGlobalFireAt = now;
+      this.prefetchedOnce.add(target.id);
+
+      try {
+        Promise.resolve(target.prefetch(controller.signal))
+          .catch(() => {})
+          .finally(() => {
+            this.inFlight.delete(target.id);
+          });
+      } catch {
+        this.inFlight.delete(target.id);
+      }
+    }
+  };
 
   private hasFinePointer(): boolean {
     try {

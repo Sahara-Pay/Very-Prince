@@ -15,6 +15,10 @@ pub mod xdr_parser;
 pub mod twap_oracle;
 pub mod linked_list;
 
+// Issue #479: O(log N) binary search over sorted vesting tranche arrays.
+// Replaces the O(N) linear scan in claim_payout / claim_payout_with_nonce.
+pub mod vesting_search;
+
 // SDK compatibility tests to ensure safe version upgrades
 #[cfg(test)]
 mod sdk_compatibility_tests;
@@ -1557,16 +1561,9 @@ impl PayoutRegistry {
             panic_with_error!(&env, PrinceError::NoClaimableBalance);
         }
 
+        // Issue #479: O(log N) binary search replaces O(N) linear scan.
         let now = env.ledger().timestamp();
-        let mut vested_total: i128 = 0;
-        for i in 0..payout.tranches.len() {
-            let tranche = payout.tranches.get(i).unwrap();
-            if now >= tranche.unlock_timestamp {
-                vested_total = vested_total
-                    .checked_add(tranche.amount)
-                    .unwrap_or_else(|| panic_with_error!(&env, PrinceError::PayoutOverflow));
-            }
-        }
+        let vested_total = vesting_search::vested_amount_binary(&env, &payout.tranches, now);
 
         if vested_total <= payout.claimed_amount {
             panic_with_error!(&env, PrinceError::PayoutLocked);
@@ -2165,16 +2162,11 @@ impl PayoutRegistry {
         }
 
         // Compute vested (releasable) total based on current ledger timestamp.
+        // Issue #479: O(log N) binary search replaces O(N) linear scan.
+        // Tranche arrays are guaranteed sorted at allocation time by
+        // allocate_payout_vesting (non-monotonic schedules are rejected).
         let now = env.ledger().timestamp();
-        let mut vested_total: i128 = 0;
-        for i in 0..payout.tranches.len() {
-            let tranche = payout.tranches.get(i).unwrap();
-            if now >= tranche.unlock_timestamp {
-                vested_total = vested_total
-                    .checked_add(tranche.amount)
-                    .unwrap_or_else(|| panic_with_error!(&env, PrinceError::PayoutOverflow));
-            }
-        }
+        let vested_total = vesting_search::vested_amount_binary(&env, &payout.tranches, now);
 
         // If nothing new is vested beyond already-claimed amount => locked.
         if vested_total <= payout.claimed_amount {
@@ -2927,7 +2919,6 @@ impl PayoutRegistry {
         Self::assert_active(&env);
         linked_list::SortedList::get_page(&env, list_id, start_id, limit)
     }
-}
 
     // ─────────────────────────────────────────────────────────────────────────
     // Private helpers

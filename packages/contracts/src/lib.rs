@@ -200,6 +200,13 @@ pub enum PrinceError {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeLockVault {
+    pub amount: i128,
+    pub maturity_date: u64,
+}
+
+#[contracttype]
 pub enum DataKey {
     /// The global Stellar Asset Contract address configured during initialization.
     Token,
@@ -2726,6 +2733,97 @@ impl PayoutRegistry {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Time-Lock Vault (Non-Custodial)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Create a non-custodial time-lock vault for a specific address.
+    ///
+    /// The funds are transferred from the caller to the contract and locked
+    /// until the `maturity_date` (Unix timestamp in seconds).
+    pub fn create_vault(
+        env: Env,
+        from: Address,
+        owner: Address,
+        amount: i128,
+        maturity_date: u64,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        from.require_auth();
+
+        if amount <= 0 || amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        // Ensure maturity date is in the future
+        if maturity_date <= env.ledger().timestamp() {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let token_addr = Self::get_token(&env);
+        let token_client = token::Client::new(&env, &token_addr);
+
+        // Transfer funds to the contract
+        token_client.transfer(&from, &env.current_contract_address(), &amount);
+
+        let vault_key = DataKey::Vault(owner.clone(), maturity_date);
+        
+        // If a vault already exists for this owner and date, add to it.
+        let mut vault: TimeLockVault = env.storage().persistent().get(&vault_key).unwrap_or(TimeLockVault {
+            amount: 0,
+            maturity_date,
+        });
+
+        vault.amount = vault.amount.checked_add(amount).unwrap();
+        
+        env.storage().persistent().set(&vault_key, &vault);
+        env.storage().persistent().extend_ttl(&vault_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "VaultCreated")),
+            (owner, amount, maturity_date),
+        );
+    }
+
+    /// Claim funds from a matured time-lock vault.
+    ///
+    /// Panics with `PrinceError::PayoutLocked` if the current ledger timestamp
+    /// is strictly less than the maturity date.
+    pub fn claim_vault(env: Env, owner: Address, maturity_date: u64) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        owner.require_auth();
+
+        let vault_key = DataKey::Vault(owner.clone(), maturity_date);
+        let vault: TimeLockVault = env
+            .storage()
+            .persistent()
+            .get(&vault_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NotAuthorized));
+
+        // Strict temporal enforcement: reject if now < maturity_date
+        if env.ledger().timestamp() < vault.maturity_date {
+            panic_with_error!(&env, PrinceError::PayoutLocked);
+        }
+
+        let amount = vault.amount;
+        
+        // Effects: Delete the vault before interaction (Check-Effects-Interactions)
+        env.storage().persistent().remove(&vault_key);
+
+        // Interaction: Transfer funds to the owner
+        let token_addr = Self::get_token(&env);
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(&env.current_contract_address(), &owner, &amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "VaultClaimed")),
+            (owner, amount, maturity_date),
+        );
+    }
+}
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -2738,3 +2836,5 @@ impl PayoutRegistry {
 mod tests;
 #[cfg(test)]
 mod bls_tests;
+#[cfg(test)]
+mod vault_tests;

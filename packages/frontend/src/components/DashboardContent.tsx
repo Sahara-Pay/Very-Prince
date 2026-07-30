@@ -1,4 +1,5 @@
 "use client";
+
 import { useState, Suspense, useEffect } from "react";
 import { WalletButton } from "@/components/WalletButton";
 import dynamic from "next/dynamic";
@@ -7,10 +8,20 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { OrgDetailsWidget } from "@/components/OrgDetailsWidget";
 import { FundingHistoryChart } from "@/components/FundingHistoryChart";
 import { MaintainerBalancesWidget } from "@/components/MaintainerBalancesWidget";
+import { RelatedTokensWidget } from "@/components/RelatedTokensWidget";
 import { WebhookSettings } from "@/components/WebhookSettings";
 import { ApiKeySettings } from "@/components/ApiKeySettings";
-import { OrgDetailsSkeleton, FundingHistorySkeleton, MaintainerBalancesSkeleton } from "@/components/DashboardSkeletons";
-import { SuspenseOrchestratorProvider, OrchestratedBoundary } from "@/components/SuspenseOrchestrator";
+import {
+  OrgDetailsSkeleton,
+  FundingHistorySkeleton,
+  MaintainerBalancesSkeleton,
+  RelatedTokensSkeleton,
+  DashboardFallbackSkeleton,
+} from "@/components/DashboardSkeletons";
+import {
+  SuspenseOrchestratorProvider,
+  OrchestratedBoundary,
+} from "@/components/SuspenseOrchestrator";
 import { buildClaimPayoutTransaction, submitSignedTransaction } from "@/lib/sorobanClient";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -57,7 +68,6 @@ export function DashboardContent({ initialOrgId }: DashboardContentProps) {
       const unsignedXdr = await buildClaimPayoutTransaction(address);
       const signedXdr = await signTransaction(unsignedXdr);
       await submitSignedTransaction(signedXdr);
-      // Refresh the page data
       router.refresh();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Claim failed");
@@ -147,20 +157,16 @@ export function DashboardContent({ initialOrgId }: DashboardContentProps) {
           </div>
 
           {activeTab === "overview" ? (
-            <SuspenseOrchestratorProvider fallback={
-              <div className="space-y-8 animate-pulse">
-                <div className="h-32 bg-white/5 rounded-xl w-full" />
-                <div className="h-64 bg-white/5 rounded-xl w-full" />
-                <div className="h-48 bg-white/5 rounded-xl w-full" />
-              </div>
-            }>
+            <SuspenseOrchestratorProvider fallback={<DashboardFallbackSkeleton />}>
               <ErrorBoundary variant="inline">
-                <Suspense fallback={
-                  <OrchestratedBoundary id="orgDetails" isReady={false}>
-                    <OrgDetailsSkeleton />
-                  </OrchestratedBoundary>
-                }>
-                  <OrchestratedBoundary id="orgDetails" isReady={true}>
+                <Suspense
+                  fallback={
+                    <OrchestratedBoundary id="orgDetails" isCritical={true} isReady={false}>
+                      <OrgDetailsSkeleton />
+                    </OrchestratedBoundary>
+                  }
+                >
+                  <OrchestratedBoundary id="orgDetails" isCritical={true} isReady={true}>
                     <OrgDetailsWidget 
                       orgId={initialOrgId} 
                       onShowFundModal={() => setShowFundModal(true)}
@@ -172,12 +178,14 @@ export function DashboardContent({ initialOrgId }: DashboardContentProps) {
 
               <div className="mb-8">
                 <ErrorBoundary variant="inline">
-                  <Suspense fallback={
-                    <OrchestratedBoundary id="fundingHistory" isReady={false}>
-                      <FundingHistorySkeleton />
-                    </OrchestratedBoundary>
-                  }>
-                    <OrchestratedBoundary id="fundingHistory" isReady={true}>
+                  <Suspense
+                    fallback={
+                      <OrchestratedBoundary id="fundingHistory" isCritical={true} isReady={false}>
+                        <FundingHistorySkeleton />
+                      </OrchestratedBoundary>
+                    }
+                  >
+                    <OrchestratedBoundary id="fundingHistory" isCritical={true} isReady={true}>
                       <FundingHistoryChart orgId={initialOrgId} />
                     </OrchestratedBoundary>
                   </Suspense>
@@ -185,18 +193,35 @@ export function DashboardContent({ initialOrgId }: DashboardContentProps) {
               </div>
 
               <ErrorBoundary variant="inline">
-                <Suspense fallback={
-                  <OrchestratedBoundary id="maintainers" isReady={false}>
-                    <MaintainerBalancesSkeleton />
-                  </OrchestratedBoundary>
-                }>
-                  <OrchestratedBoundary id="maintainers" isReady={true}>
+                <Suspense
+                  fallback={
+                    <OrchestratedBoundary id="maintainers" isCritical={true} isReady={false}>
+                      <MaintainerBalancesSkeleton />
+                    </OrchestratedBoundary>
+                  }
+                >
+                  <OrchestratedBoundary id="maintainers" isCritical={true} isReady={true}>
                     <MaintainerBalancesWidget 
                       orgId={initialOrgId} 
                       onClaim={handleClaim}
                       claimingAddress={claimingAddress}
                       onAllocateClick={() => setShowAllocateModal(true)}
                     />
+                  </OrchestratedBoundary>
+                </Suspense>
+              </ErrorBoundary>
+
+              {/* Non-critical data (related tokens) defers gracefully without blocking main render */}
+              <ErrorBoundary variant="inline">
+                <Suspense
+                  fallback={
+                    <OrchestratedBoundary id="relatedTokens" isCritical={false} isReady={false}>
+                      <RelatedTokensSkeleton />
+                    </OrchestratedBoundary>
+                  }
+                >
+                  <OrchestratedBoundary id="relatedTokens" isCritical={false} isReady={true}>
+                    <RelatedTokensWidget orgId={initialOrgId} />
                   </OrchestratedBoundary>
                 </Suspense>
               </ErrorBoundary>

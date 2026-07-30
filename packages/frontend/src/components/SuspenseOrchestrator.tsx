@@ -1,12 +1,28 @@
 "use client";
 
-import React, { createContext, useContext, useState, useCallback, useMemo, ReactNode } from "react";
-import React, { createContext, useContext, useState, useCallback, useMemo, useTransition } from "react";
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useMemo,
+  useTransition,
+  useEffect,
+  ReactNode,
+} from "react";
 
-interface SuspenseOrchestratorContextType {
-  registerBoundary: (id: string) => void;
+export interface BoundaryState {
+  id: string;
+  isCritical: boolean;
+  isResolved: boolean;
+}
+
+export interface SuspenseOrchestratorContextType {
+  registerBoundary: (id: string, isCritical?: boolean) => void;
   resolveBoundary: (id: string) => void;
   isFullyResolved: boolean;
+  isPending: boolean;
+  registeredBoundaries: Record<string, BoundaryState>;
 }
 
 const SuspenseOrchestratorContext = createContext<SuspenseOrchestratorContextType | null>(null);
@@ -19,99 +35,90 @@ export function useSuspenseOrchestrator() {
   return context;
 }
 
-export function SuspenseOrchestratorProvider({ 
-  children, 
-  fallback 
-}: { 
-  children: ReactNode; 
+export function SuspenseOrchestratorProvider({
+  children,
+  fallback,
+}: {
+  children: ReactNode;
   fallback: ReactNode;
 }) {
-  const [registered, setRegistered] = useState<Set<string>>(new Set());
-  const [resolved, setResolved] = useState<Set<string>>(new Set());
-
-  const registerBoundary = useCallback((id: string) => {
-    setRegistered((prev) => {
-      if (prev.has(id)) return prev;
-export function SuspenseOrchestratorProvider({ children, fallback }: { children: React.ReactNode, fallback: React.ReactNode }) {
-  const [registeredBoundaries, setRegisteredBoundaries] = useState<Set<string>>(new Set());
-  const [resolvedBoundaries, setResolvedBoundaries] = useState<Set<string>>(new Set());
+  const [boundaries, setBoundaries] = useState<Record<string, BoundaryState>>({});
+  const [isFullyResolved, setIsFullyResolved] = useState(false);
   const [isPending, startTransition] = useTransition();
 
-  const registerBoundary = useCallback((id: string) => {
-    setRegisteredBoundaries((prev) => {
-      const next = new Set(prev);
-      next.add(id);
-      return next;
+  const registerBoundary = useCallback((id: string, isCritical = true) => {
+    setBoundaries((prev) => {
+      if (prev[id] && prev[id].isCritical === isCritical) return prev;
+      return {
+        ...prev,
+        [id]: {
+          id,
+          isCritical,
+          isResolved: prev[id]?.isResolved ?? false,
+        },
+      };
     });
   }, []);
 
   const resolveBoundary = useCallback((id: string) => {
-    setResolved((prev) => {
-      if (prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.add(id);
-      return next;
-    // Wrap the resolution in a transition so React coordinates the final render
-    // and eliminates Cumulative Layout Shift.
-    startTransition(() => {
-      setResolvedBoundaries((prev) => {
-        const next = new Set(prev);
-        next.add(id);
-        return next;
-      });
+    setBoundaries((prev) => {
+      if (prev[id]?.isResolved) return prev;
+      return {
+        ...prev,
+        [id]: {
+          id,
+          isCritical: prev[id]?.isCritical ?? true,
+          isResolved: true,
+        },
+      };
     });
   }, []);
 
-  const isFullyResolved = useMemo(() => {
-    if (registered.size === 0) return false;
-    for (const id of Array.from(registered)) {
-      if (!resolved.has(id)) return false;
+  // Determine whether all critical registered boundaries are resolved
+  const checkCriticalResolved = useCallback((bMap: Record<string, BoundaryState>) => {
+    const keys = Object.keys(bMap);
+    if (keys.length === 0) return false;
+    const criticalKeys = keys.filter((k) => bMap[k].isCritical);
+    if (criticalKeys.length === 0) return true;
+    return criticalKeys.every((k) => bMap[k].isResolved);
+  }, []);
+
+  useEffect(() => {
+    const criticalResolved = checkCriticalResolved(boundaries);
+    if (criticalResolved && !isFullyResolved) {
+      startTransition(() => {
+        setIsFullyResolved(true);
+      });
     }
-    return true;
-  }, [registered, resolved]);
+  }, [boundaries, checkCriticalResolved, isFullyResolved]);
+
+  const contextValue = useMemo(
+    () => ({
+      registerBoundary,
+      resolveBoundary,
+      isFullyResolved,
+      isPending,
+      registeredBoundaries: boundaries,
+    }),
+    [registerBoundary, resolveBoundary, isFullyResolved, isPending, boundaries]
+  );
 
   return (
-    <SuspenseOrchestratorContext.Provider value={{ registerBoundary, resolveBoundary, isFullyResolved }}>
-      {/* Show the generic unified fallback until everything is fully resolved */}
-      {!isFullyResolved && (
-        <div className="absolute inset-0 z-10 w-full" aria-hidden="true">
-          {fallback}
-        </div>
-      )}
-      
-      {/* Render the actual children but keep them invisible until resolved to prevent CLS */}
-      <div 
-        className="w-full transition-opacity duration-300 ease-in-out" 
-        style={{ 
-          opacity: isFullyResolved ? 1 : 0,
-          pointerEvents: isFullyResolved ? "auto" : "none",
-          position: isFullyResolved ? "relative" : "absolute",
-          visibility: isFullyResolved ? "visible" : "hidden"
-        }}
-      >
-        {children}
-    if (registeredBoundaries.size === 0) return false;
-    for (const id of registeredBoundaries) {
-      if (!resolvedBoundaries.has(id)) return false;
-    }
-    return true;
-  }, [registeredBoundaries, resolvedBoundaries]);
-
-  // If not all registered boundaries are resolved, we show the orchestrator fallback.
-  // The actual children will render invisibly or behind the fallback if we want to fetch data,
-  // but since we want to coordinate Suspense, we usually render children but hide them, or just rely on CSS.
-  // A cleaner approach: render children but absolute position a loading overlay over it until fully resolved.
-  return (
-    <SuspenseOrchestratorContext.Provider value={{ registerBoundary, resolveBoundary, isFullyResolved }}>
-      <div className="relative w-full h-full min-h-[50vh]">
-        {/* The children render immediately so they can trigger data fetches and register themselves */}
-        <div className={`transition-opacity duration-300 ${isFullyResolved && !isPending ? "opacity-100" : "opacity-0"}`}>
+    <SuspenseOrchestratorContext.Provider value={contextValue}>
+      <div className="relative w-full min-h-[50vh]">
+        {/* Render children inside container; keep invisible & non-interactive until critical data resolves */}
+        <div
+          className={`w-full transition-opacity duration-300 ease-in-out ${
+            isFullyResolved && !isPending ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
+          aria-hidden={!isFullyResolved || isPending}
+        >
           {children}
         </div>
-        
-        {/* The coordinated fallback loader */}
+
+        {/* Coordinated unified loader overlay matching layout until critical paint is ready */}
         {(!isFullyResolved || isPending) && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-transparent">
+          <div className="absolute inset-0 z-10 w-full bg-transparent" aria-busy="true">
             {fallback}
           </div>
         )}
@@ -120,45 +127,26 @@ export function SuspenseOrchestratorProvider({ children, fallback }: { children:
   );
 }
 
-/**
- * A wrapper component that registers with the orchestrator.
- * Render this component twice per boundary:
- * 1. Inside the Suspense fallback (with isReady={false})
- * 2. Inside the actual resolved component (with isReady={true})
- */
-export function OrchestratedBoundary({ 
-  id, 
-  isReady, 
-  children 
-}: { 
-  id: string; 
-  isReady: boolean; 
+export interface OrchestratedBoundaryProps {
+  id: string;
+  isCritical?: boolean;
+  isReady: boolean;
   children?: ReactNode;
-}) {
+}
+
+export function OrchestratedBoundary({
+  id,
+  isCritical = true,
+  isReady,
+  children,
+}: OrchestratedBoundaryProps) {
   const { registerBoundary, resolveBoundary } = useSuspenseOrchestrator();
 
-  React.useEffect(() => {
-    if (!isReady) {
-      registerBoundary(id);
-    } else {
-      // It's ready, but we also register it just in case it mounted ready immediately
-      registerBoundary(id);
-      resolveBoundary(id);
-    }
-  }, [id, isReady, registerBoundary, resolveBoundary]);
- * A wrapper for components that need to register with the orchestrator.
- * It simulates a Suspense boundary but registers with the Orchestrator instead of showing its own fallback.
- */
-export function OrchestratedBoundary({ id, children, isReady }: { id: string, children: React.ReactNode, isReady: boolean }) {
-  const { registerBoundary, resolveBoundary } = useSuspenseOrchestrator();
+  useEffect(() => {
+    registerBoundary(id, isCritical);
+  }, [id, isCritical, registerBoundary]);
 
-  // Register on mount
-  React.useEffect(() => {
-    registerBoundary(id);
-  }, [id, registerBoundary]);
-
-  // Resolve when ready
-  React.useEffect(() => {
+  useEffect(() => {
     if (isReady) {
       resolveBoundary(id);
     }

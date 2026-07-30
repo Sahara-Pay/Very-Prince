@@ -77,3 +77,42 @@ export interface AllocatePayoutResult {
   maintainer: string;
   amountStroops: string;
 }
+
+// ── Token Swap Types ──────────────────────────────────────────────────────────
+
+/** Token metadata for AMM swap computations. */
+export interface TokenSwapInfo {
+  /** Ticker symbol (e.g. "XLM", "USDC"). */
+  symbol: string;
+  /** Number of decimal places (e.g. 7 for XLM). */
+  decimals: number;
+  /** Current on-chain pool reserve in atomic units. */
+  reserve: bigint;
+}
+
+/** Payload for executing a token swap via the Soroban contract. */
+export interface TokenSwapPayload {
+  /** Stellar address of the user initiating the swap. */
+  userAddress: string;
+  /** Symbol of the token being sold. */
+  tokenIn: string;
+  /** Symbol of the token being bought. */
+  tokenOut: string;
+  /** Amount of input token to sell (atomic units). */
+  amountIn: bigint;
+  /** Minimum acceptable output (atomic units). Protects against slippage. */
+  minAmountOut: bigint;
+  /** The signed transaction XDR from Freighter. */
+  signedXdr: string;
+}
+
+/** Result of a token swap — returned after Soroban confirmation. */
+export interface TokenSwapResult {
+  success: boolean;
+  /** Soroban transaction hash for on-chain verification. */
+  transactionHash?: string;
+  /** Actual output amount received (atomic units). */
+  amountOut: bigint;
+  /** The effective exchange rate (output / input). */
+  exchangeRate: string;
+}

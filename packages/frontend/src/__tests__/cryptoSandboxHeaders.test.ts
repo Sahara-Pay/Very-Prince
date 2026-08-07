@@ -38,8 +38,7 @@ describe('next.config.mjs', () => {
   it('uses Cross-Origin-Opener-Policy: same-origin', () => {
     const src = readNextConfig();
     // Matches the `key: 'Cross-Origin-Opener-Policy', value: 'same-origin'`
-    // entry shape used by next.config.mjs (and the CROSS_ORIGIN_ISOLATION_HEADERS
-    // array on main).
+    // entry shape used by next.config.mjs.
     expect(src).toMatch(/key:\s*['"]Cross-Origin-Opener-Policy['"]\s*,\s*value:\s*['"]same-origin['"]/);
   });
 

@@ -48,7 +48,7 @@ describe('walletMachine', () => {
   // 1. No wallet extension installed
   it('surfaces a clear error when Freighter is not installed', async () => {
     mockIsConnected.mockResolvedValue(false);
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
 
     actor.send({ type: 'CONNECT' });
     const snapshot = await waitFor(actor, (s) => s.matches('disconnected') && s.context.error !== null);
@@ -59,7 +59,7 @@ describe('walletMachine', () => {
 
   // 2. Multiple extensions installed at once, discovered without conflict
   it('discovers multiple wallet providers without duplicating entries', () => {
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
 
     actor.send({
       type: 'PROVIDER_DISCOVERED',
@@ -75,7 +75,7 @@ describe('walletMachine', () => {
 
   // 3. User explicitly selects a specific discovered wallet
   it('connects to the wallet the user explicitly selected', async () => {
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
     actor.send({ type: 'PROVIDER_DISCOVERED', detail: metamaskDetail() });
 
     actor.send({ type: 'SELECT_WALLET', rdns: 'io.metamask' });
@@ -89,7 +89,7 @@ describe('walletMachine', () => {
   it('treats a rejected connection request as a distinct, non-hardware error', async () => {
     mockIsConnected.mockResolvedValue(true);
     mockGetPublicKey.mockRejectedValue(new Error('User declined access'));
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
 
     actor.send({ type: 'CONNECT' });
     const snapshot = await waitFor(actor, (s) => s.matches('disconnected') && s.context.error !== null);
@@ -101,7 +101,7 @@ describe('walletMachine', () => {
   // 5. Wrong network detected at connect time
   it('rejects the connection attempt when Freighter is on the wrong network', async () => {
     mockSuccessfulFreighter('GABC123', 'PUBLIC');
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
 
     actor.send({ type: 'CONNECT' });
     const snapshot = await waitFor(actor, (s) => s.matches('disconnected') && s.context.error !== null);
@@ -113,7 +113,7 @@ describe('walletMachine', () => {
   // 6. Network changed while already connected
   it('flags the connected session as wrongNetwork when the wallet switches network externally', async () => {
     mockSuccessfulFreighter();
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
     actor.send({ type: 'CONNECT' });
     await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
 
@@ -126,7 +126,7 @@ describe('walletMachine', () => {
   // 7. Account switched while connected
   it('updates the public key in place when the account changes while connected', async () => {
     mockSuccessfulFreighter('GABC123');
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
     actor.send({ type: 'CONNECT' });
     await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
 
@@ -140,7 +140,7 @@ describe('walletMachine', () => {
   // 8. Wallet disconnected/revoked externally while connected
   it('drops back to disconnected when the extension reports an external disconnect', async () => {
     mockSuccessfulFreighter();
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
     actor.send({ type: 'CONNECT' });
     await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
 
@@ -196,7 +196,7 @@ describe('walletMachine', () => {
     window.localStorage.setItem(SESSION_KEY, JSON.stringify({ rdns: 'app.freighter', publicKey: 'GABC123' }));
     mockSuccessfulFreighter('GABC123');
 
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
     const snapshot = await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
 
     expect(snapshot.context.publicKey).toBe('GABC123');
@@ -208,7 +208,7 @@ describe('walletMachine', () => {
     window.localStorage.setItem(SESSION_KEY, JSON.stringify({ rdns: 'app.freighter', publicKey: 'GABC123' }));
     mockIsConnected.mockResolvedValue(false);
 
-    const actor = createActor(walletMachine).start();
+    const actor = createActor(walletMachine, { input: {} }).start();
     const snapshot = await waitFor(actor, (s) => s.matches('disconnected') && s.context.restoreAttempted);
 
     expect(snapshot.context.error).toBeNull();

@@ -30,8 +30,6 @@ import {
   SLOT_STATE,
   SLOT_LENGTH,
   STATE_SIGN_REQUEST,
-  STATE_SIGN_DONE,
-  uint8ArrayToHex,
 } from './signerProtocol';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -259,13 +257,18 @@ export class SigningWorkerManager {
 
       // Verify the worker signalled SIGN_DONE via Atomics (belt + braces).
       if (this.controlView) {
-        Atomics.waitAsync(this.controlView, SLOT_STATE, STATE_SIGN_REQUEST).value
-          .then(() => {
-            // Already resolved via postMessage — nothing to do.
-          })
-          .catch(() => {
-            // Ignore; we're just ensuring the state was flipped.
-          });
+        // `waitAsync().value` is either a string (already resolved) or a
+        // Promise — only the promise form needs (and supports) `.then`.
+        const waitResult = Atomics.waitAsync(this.controlView, SLOT_STATE, STATE_SIGN_REQUEST).value;
+        if (waitResult instanceof Promise) {
+          waitResult
+            .then(() => {
+              // Already resolved via postMessage — nothing to do.
+            })
+            .catch(() => {
+              // Ignore; we're just ensuring the state was flipped.
+            });
+        }
       }
 
       pending.resolve(signatureBytes);

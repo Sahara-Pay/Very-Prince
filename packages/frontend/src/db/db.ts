@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie';
-import type { CRDTDocument, SyncState, CRDTUpdate } from '@/lib/crdtTypes';
+import type { CRDTDocument, SyncState } from '@/lib/crdtTypes';
 
 export class AppDB extends Dexie {
   documents!: EntityTable<CRDTDocument, 'id'>;

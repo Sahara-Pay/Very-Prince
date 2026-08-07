@@ -1,5 +1,5 @@
 import { db } from './db';
-import { getPendingUpdates, markUpdateSynced, mergeRemoteUpdate, syncWithRemote } from './crdtManager';
+import { getPendingUpdates, markUpdateSynced, mergeRemoteUpdate } from './crdtManager';
 import { trpcClient } from '@/trpc/client';
 
 type SyncStatusListener = (status: { online: boolean; syncing: boolean; pendingChanges: number }) => void;

@@ -2,11 +2,10 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { db } from '@/db/db';
-import { persistDocument, getDocument, queryDocuments, deleteDocument, initDocument } from '@/db/crdtManager';
+import { persistDocument, getDocument, queryDocuments, initDocument } from '@/db/crdtManager';
 import { startSyncEngine, stopSyncEngine, onSyncStatusChange, syncNow, getSyncStatus } from '@/db/syncEngine';
 import { trpcClient } from '@/trpc/client';
-import type { OrganizationCRDT, MaintainerCRDT, PendingTransactionCRDT, SyncState } from '@/lib/crdtTypes';
+import type { OrganizationCRDT, MaintainerCRDT, PendingTransactionCRDT } from '@/lib/crdtTypes';
 
 export function useSyncEngine() {
   const [status, setStatus] = useState(getSyncStatus());
@@ -120,7 +119,7 @@ export function useOfflineMutation<TInput extends Record<string, unknown>, TOutp
         }
       }
     },
-    onSuccess: async (result, input) => {
+    onSuccess: async (_result, input) => {
       const docId = String(input[opts.docIdKey]);
       if (opts.offlineTransform) {
         await persistDocument(opts.docType, docId, opts.offlineTransform(input));

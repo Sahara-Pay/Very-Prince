@@ -1,5 +1,5 @@
 import { db } from './db';
-import type { CRDTDocument, CRDTUpdate } from '@/lib/crdtTypes';
+import type { CRDTDocument } from '@/lib/crdtTypes';
 
 type WorkerMessageHandler = (data: unknown) => void;
 
@@ -146,7 +146,7 @@ export async function markUpdateSynced(updateId: string): Promise<void> {
   await db.crdtUpdates.update(updateId, { synced: true });
 }
 
-async function persistUpdate(docId: string, update: Uint8Array): Promise<void> {
+async function persistUpdate(docId: string, _update: Uint8Array): Promise<void> {
   const existing = await db.documents.get(docId);
   if (existing) {
     existing.version += 1;

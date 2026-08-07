@@ -184,7 +184,9 @@ export type WorkerOutboundMessage =
  */
 export function assertSABShape(sab: SharedArrayBuffer): void {
   if (!(sab instanceof SharedArrayBuffer)) {
-    throw new TypeError(`expected SharedArrayBuffer, got ${sab?.constructor?.name}`);
+    // `sab` is narrowed to `never` here; describe it via toString instead of
+    // touching `.constructor` on the narrowed type.
+    throw new TypeError(`expected SharedArrayBuffer, got ${Object.prototype.toString.call(sab)}`);
   }
   if (sab.byteLength !== SAB_SIZE) {
     throw new RangeError(`bad SAB size: got ${sab.byteLength}, want ${SAB_SIZE}`);
@@ -198,6 +200,7 @@ export function assertSABShape(sab: SharedArrayBuffer): void {
 export function assertSandboxEnvironment(self: {
   SharedArrayBuffer?: unknown;
   Atomics?: unknown;
+  WebAssembly?: unknown;
   crossOriginIsolated?: boolean;
 }): void {
   if (typeof self.SharedArrayBuffer === 'undefined') {

@@ -70,7 +70,9 @@ describe('instantiateCryptoWasm', () => {
     // = 0x12^0x87 0x34^0x65 0x56^0x43 0x78^0x21
     // = 0x95       0x51       0x15       0x59
     // = 0x95511559 (positive signed i32)
-    expect(xorI32(0x12345678, 0x87654321)).toBe(0x95511559);
+    // The WASM i32 result is a *signed* 32-bit value; convert to unsigned
+    // before comparing against the unsigned XOR of the two inputs.
+    expect(xorI32(0x12345678, 0x87654321) >>> 0).toBe(0x95511559);
   });
 
   it('xorI32(a, a) === 0 for any a', async () => {

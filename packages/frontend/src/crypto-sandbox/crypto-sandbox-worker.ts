@@ -30,7 +30,6 @@ import {
   STATUS_DONE,
   STATUS_ERROR,
   STATUS_PROCESSING,
-  STATUS_REQUEST,
   MESSAGE_MAX_BYTES,
   PRIVATE_KEY_BYTES,
   PUBLIC_KEY_BYTES,
@@ -57,11 +56,16 @@ function keypairFromRawSeed(rawSeed: Uint8Array): Keypair {
   if (rawSeed.byteLength !== PRIVATE_KEY_BYTES) {
     throw new RangeError(`Seed must be ${PRIVATE_KEY_BYTES} bytes, got ${rawSeed.byteLength}`);
   }
+  // Copy into an exact-size Buffer so the typed-array generic
+  // (`Uint8Array<ArrayBufferLike>`) in newer TS libs does not trip the
+  // `Buffer.from`/`StrKey.encodeEd25519SecretSeed` overload resolution.
+  const seedBuf = Buffer.alloc(rawSeed.byteLength);
+  seedBuf.set(rawSeed);
   const fromRaw = (Keypair as unknown as { fromRawEd25519Seed?: (b: Buffer) => Keypair }).fromRawEd25519Seed;
   if (typeof fromRaw === 'function') {
-    return fromRaw(Buffer.from(rawSeed));
+    return fromRaw(seedBuf);
   }
-  const secret = StrKey.encodeEd25519SecretSeed(rawSeed);
+  const secret = StrKey.encodeEd25519SecretSeed(seedBuf);
   return Keypair.fromSecret(secret);
 }
 
@@ -302,13 +306,20 @@ export function createWorkerModule(self: SandboxWorkerSelf): {
 
 declare const self: SandboxWorkerSelf | undefined;
 
+/** Structural stand-in for `DedicatedWorkerGlobalScope` (no webworker lib needed). */
+type DedicatedWorkerGlobalScopeLike = SandboxWorkerSelf;
+
+const globalWorkerScope = (globalThis as {
+  WorkerGlobalScope?: { prototype: DedicatedWorkerGlobalScopeLike };
+}).WorkerGlobalScope;
+
 if (
   typeof self !== 'undefined' &&
   self.WorkerGlobalScope !== undefined &&
-  typeof (globalThis as { WorkerGlobalScope?: { prototype: DedicatedWorkerGlobalScope } }).WorkerGlobalScope === 'object'
+  typeof globalWorkerScope === 'object' &&
+  globalWorkerScope !== null &&
+  globalWorkerScope.prototype !== undefined &&
+  self instanceof (globalWorkerScope.prototype as unknown as Function)
 ) {
-  const W = (globalThis as { WorkerGlobalScope: { prototype: DedicatedWorkerGlobalScope } }).WorkerGlobalScope;
-  if (self instanceof W.prototype) {
-    createWorkerModule(self);
-  }
+  createWorkerModule(self);
 }

@@ -131,7 +131,7 @@ export async function instantiateCryptoWasm(
     throw new Error('Crypto sandbox requires the WebAssembly API.');
   }
   const W = provided.WebAssembly as typeof WebAssembly;
-  const module = await W.compile(CRYPTO_WASM_BYTES);
+  const module = await W.compile(CRYPTO_WASM_BYTES as BufferSource);
   const instance = await W.instantiate(module);
   const exports = instance.exports as unknown as Partial<CryptoWasmExports>;
   if (typeof exports.xorI32 !== 'function') {

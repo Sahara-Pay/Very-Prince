@@ -22,7 +22,6 @@ import {
   createSigningSAB,
   createSigningViews,
   ERROR_UNKNOWN_HANDLE,
-  ERROR_INVALID_MSG_LEN,
   ERROR_WASM_INIT_FAILED,
 } from '../crypto-sandbox/protocol';
 import { createWorkerModule } from '../crypto-sandbox/crypto-sandbox-worker';

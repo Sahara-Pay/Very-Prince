@@ -27,7 +27,6 @@ import {
   STATUS_REQUEST,
   DEFAULT_SIGN_TIMEOUT_MS,
   MESSAGE_MAX_BYTES,
-  PUBLIC_KEY_BYTES,
   SIGNATURE_BYTES,
   assertSandboxEnvironment,
   createSigningSAB,
@@ -95,7 +94,6 @@ export class CryptoSandboxClient {
   private views: SigningViews | null = null;
   private initPromise: Promise<void> | null = null;
   private readonly inflight: Map<string, { resolve: (v: WorkerOutboundMessage) => void; reject: (e: Error) => void }> = new Map();
-  private ready = false;
   private disposed = false;
   // Stored handler so it can route messages while initPromise waits to resolve.
   private pendingInit: { resolve: () => void; reject: (err: Error) => void } | null = null;
@@ -167,7 +165,6 @@ export class CryptoSandboxClient {
         this.pendingInit.resolve();
         this.pendingInit = null;
       }
-      this.ready = true;
       return;
     }
     if (this.pendingInit && msg.type === 'error') {
@@ -176,10 +173,12 @@ export class CryptoSandboxClient {
       return;
     }
 
-    if (msg.type === 'key-created' && this.inflight.has('create-key')) {
-      const pending = this.inflight.get('create-key')!;
-      this.inflight.delete('create-key');
-      pending.resolve(msg);
+    if (msg.type === 'key-created') {
+      const pending = this.inflight.get('create-key');
+      if (pending) {
+        this.inflight.delete('create-key');
+        pending.resolve(msg);
+      }
       return;
     }
     if (msg.type === 'error') {
@@ -244,8 +243,10 @@ export class CryptoSandboxClient {
     this.worker.postMessage({ type: 'sign-from-sab' });
 
     // Block the main thread until the worker notifies us — yields via
-    // `Atomics.wait`, so the browser holds no JS frames.
-    const waitResult = Atomics.wait(views.int32, SLOT_INT32.STATUS, STATUS_REQUEST, this.signTimeoutMs);
+    // `Atomics.wait`, so the browser holds no JS frames. The result is
+    // awaited so the synchronous `Atomics.wait` string contract and any
+    // thenable polyfill (used by tests) are both handled.
+    const waitResult = await Atomics.wait(views.int32, SLOT_INT32.STATUS, STATUS_REQUEST, this.signTimeoutMs);
     if (waitResult === 'timed-out') {
       Atomics.store(views.int32, SLOT_INT32.STATUS, STATUS_IDLE);
       throw new Error(`Signing timed out after ${this.signTimeoutMs} ms`);

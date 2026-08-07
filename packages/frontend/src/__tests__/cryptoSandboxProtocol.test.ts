@@ -127,7 +127,8 @@ describe('createSigningViews', () => {
   it('returns Int32 + Uint8 views over the same memory', () => {
     const sab = createSigningSAB();
     const { int32, bytes } = createSigningViews(sab);
-    expect(int32.byteLength).toBe(SAB_SIZE / 4);
+    expect(int32.byteLength).toBe(SAB_SIZE);
+    expect(int32.length).toBe(SAB_SIZE / 4);
     expect(bytes.byteLength).toBe(SAB_SIZE);
     // Writing through bytes shows up in int32 and vice-versa.
     const int32Bytes = new Uint8Array(int32.buffer);

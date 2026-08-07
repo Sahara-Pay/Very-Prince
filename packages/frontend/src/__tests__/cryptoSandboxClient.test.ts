@@ -37,6 +37,8 @@ interface FakeWorker {
   postMessage: ReturnType<typeof vi.fn>;
   terminate: ReturnType<typeof vi.fn>;
   posted: any[];
+  /** Test-only: synchronously drives the worker's `onmessage` handler. */
+  emit: (msg: any) => void;
 }
 
 function makeFakeWorkerClass(capturedRef: { current: FakeWorker | null }): typeof Worker {
@@ -53,7 +55,7 @@ function makeFakeWorkerClass(capturedRef: { current: FakeWorker | null }): typeo
       this.onmessage?.({ data: msg } as MessageEvent<any>);
     };
     constructor(_url: any, _options?: any) {
-      capturedRef.current = this;
+      capturedRef.current = this as unknown as FakeWorker;
     }
   }
   return FakeWorkerClass as unknown as typeof Worker;
@@ -67,16 +69,26 @@ function makeFakeWorkerClass(capturedRef: { current: FakeWorker | null }): typeo
  * test-driven status mutation is observed. `notify()` becomes a no-op
  * (the poll detects the change), but is kept for API parity.
  */
+/**
+ * Let `client.createKey()`/`client.sign()` bodies (which suspend on
+ * `await this.initialize()`) make progress before the test asserts on the
+ * worker's posted messages or the SAB contents.
+ */
+function flushAsync(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function installPollingAtomics(): { restore: () => void } {
   const realAtomics = globalThis.Atomics;
+  // NB: `{ ...realAtomics }` would be an EMPTY object — the ECMAScript spec
+  // defines `Atomics` methods as non-enumerable. Delegate explicitly.
   const fake: any = {
-    ...realAtomics,
     wait: (view: Int32Array, idx: number, value: number, timeout?: number) => {
       return new Promise<'ok' | 'timed-out' | 'not-equal'>((resolve) => {
         const start = Date.now();
         const deadline = typeof timeout === 'number' && timeout >= 0 ? start + timeout : Number.POSITIVE_INFINITY;
         const tick = () => {
-          const cur = Atomics.load(view, idx);
+          const cur = realAtomics.load(view, idx);
           if (cur !== value) return resolve('not-equal');
           if (Date.now() >= deadline) return resolve('timed-out');
           setTimeout(tick, 0);
@@ -85,8 +97,8 @@ function installPollingAtomics(): { restore: () => void } {
       }) as any;
     },
     notify: (_view: Int32Array, _idx: number, _count?: number) => 0,
-    store: (view: Int32Array, idx: number, value: number) => Atomics.store(view, idx, value),
-    load: (view: Int32Array, idx: number) => Atomics.load(view, idx),
+    store: (view: Int32Array, idx: number, value: number) => realAtomics.store(view, idx, value),
+    load: (view: Int32Array, idx: number) => realAtomics.load(view, idx),
   };
   (globalThis as any).Atomics = fake;
   return {
@@ -191,6 +203,8 @@ describe('CryptoSandboxClient (browser stubs)', () => {
       await initPromise;
 
       const keyPromise = client.createKey();
+      // Let the async body of createKey() (which awaits initialize()) run.
+      await flushAsync();
       const createKeyCall = worker.posted.find((m: any) => m.type === 'create-key');
       expect(createKeyCall).toBeDefined();
 
@@ -240,11 +254,17 @@ describe('CryptoSandboxClient (browser stubs)', () => {
         await initPromise;
 
         const keyPromise = client.createKey();
+        // Let createKey's body register the inflight entry before the fake
+        // worker replies, otherwise the 'key-created' message is dropped.
+        await flushAsync();
         worker.emit({ type: 'key-created', handle: 7, publicKey: new Uint8Array(32) });
         const { handle } = await keyPromise;
 
         const message = Uint8Array.from([0xaa, 0xbb, 0xcc, 0xdd]);
         const signPromise = client.sign(handle, message);
+        // Let the async body of sign() (which awaits initialize()) write the
+        // request into the SAB and start the (polling) Atomics.wait.
+        await flushAsync();
 
         // Verify the SAB now contains the message bytes + STATUS_REQUEST.
         const sab = worker.posted.find((m: any) => m.type === 'init').sab as SharedArrayBuffer;
@@ -276,13 +296,16 @@ describe('CryptoSandboxClient (browser stubs)', () => {
     });
 
     it('sign reports a timeout when the worker never notifies', async () => {
+      const realAtomics = globalThis.Atomics;
       try {
         // Force a polling-wait that immediately resolves as 'timed-out'.
-        const realAtomics = globalThis.Atomics;
+        // Delegate store/load explicitly — `...realAtomics` is empty because
+        // Atomics methods are non-enumerable.
         (globalThis as any).Atomics = {
-          ...realAtomics,
           wait: () => 'timed-out' as const,
           notify: () => 0,
+          store: (v: Int32Array, i: number, x: number) => realAtomics.store(v, i, x),
+          load: (v: Int32Array, i: number) => realAtomics.load(v, i),
         };
 
         const { client, captured } = makeClient({ signTimeoutMs: 50 });
@@ -292,13 +315,18 @@ describe('CryptoSandboxClient (browser stubs)', () => {
         await initPromise;
 
         const keyPromise = client.createKey();
+        // Let createKey's body register the inflight entry before the fake
+        // worker replies, otherwise the 'key-created' message is dropped.
+        await flushAsync();
         worker.emit({ type: 'key-created', handle: 9, publicKey: new Uint8Array(32) });
         const { handle } = await keyPromise;
 
         await expect(client.sign(handle, new Uint8Array([1, 2, 3]))).rejects.toThrow(/timed out/i);
       } finally {
-        // Restore happens via the test-level afterEach block (vi.restoreAllMocks).
-        // The Atomics override above is global; subsequent tests re-install.
+        // Always restore the global so subsequent tests (and vitest's own
+        // tinypool workers, which use Atomics for task signalling) see the
+        // real Atomics object.
+        (globalThis as any).Atomics = realAtomics;
       }
     });
   });

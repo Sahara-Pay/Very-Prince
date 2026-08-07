@@ -53,7 +53,7 @@ export function AllocatePayoutModal({ orgId, onClose, onSuccess, onError }: Allo
       toastTransaction.success("Allocation confirmed on-chain!");
     } catch (err) {
       console.error(err);
-      toast.error(err instanceof Error ? err.message : "Allocation failed");
+      toastTransaction.error(err, "Allocation failed");
       setIsSubmitting(false);
       // The optimistic update may have already fired (step 3, above) before
       // this submission failed — reconcile immediately instead of leaving

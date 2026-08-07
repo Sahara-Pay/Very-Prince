@@ -31,9 +31,10 @@ import {
   buildClaimPayoutTransaction,
   submitSignedTransaction,
 } from "@/lib/sorobanClient";
-import type { Organization, MaintainerBalance } from "@/lib/contractTypes";
+import type { MaintainerBalance } from "@/lib/contractTypes";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useOrganizationData } from "@/hooks/useOrganizationData";
+import DashboardLoading from "./loading";
 
 // ── Inner Component (uses useSearchParams) ────────────────────────────────────
 

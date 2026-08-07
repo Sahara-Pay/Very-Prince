@@ -14,7 +14,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const REPO_ROOT = resolve(__dirname, '../../../');
+const REPO_ROOT = resolve(__dirname, '../../../../');
 
 const NEXT_CONFIG_PATH = resolve(REPO_ROOT, 'packages/frontend/next.config.mjs');
 const VERCEL_CONFIG_PATH = resolve(REPO_ROOT, 'vercel.json');
@@ -37,12 +37,15 @@ describe('next.config.mjs', () => {
 
   it('uses Cross-Origin-Opener-Policy: same-origin', () => {
     const src = readNextConfig();
-    expect(src).toMatch(/Cross-Origin-Opener-Policy['"]?\s*[,:]\s*['"]same-origin['"]/);
+    // Matches the `key: 'Cross-Origin-Opener-Policy', value: 'same-origin'`
+    // entry shape used by next.config.mjs (and the CROSS_ORIGIN_ISOLATION_HEADERS
+    // array on main).
+    expect(src).toMatch(/key:\s*['"]Cross-Origin-Opener-Policy['"]\s*,\s*value:\s*['"]same-origin['"]/);
   });
 
   it('uses Cross-Origin-Embedder-Policy: require-corp', () => {
     const src = readNextConfig();
-    expect(src).toMatch(/Cross-Origin-Embedder-Policy['"]?\s*[,:]\s*['"]require-corp['"]/);
+    expect(src).toMatch(/key:\s*['"]Cross-Origin-Embedder-Policy['"]\s*,\s*value:\s*['"]require-corp['"]/);
   });
 
   it('exposes the headers via `async headers()` so next dev and next start both apply them', () => {

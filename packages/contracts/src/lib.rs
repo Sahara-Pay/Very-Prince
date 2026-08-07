@@ -1,9 +1,32 @@
 #![no_std]
 
+mod token_interface;
+mod fixed_point;
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
     Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
+use token_interface::TokenMetadata;
+
+// Zero-copy deserialization helpers for hot-path reads.
+// See src/zero_copy.rs for the architecture and instruction-count benchmarks.
+mod zero_copy;
+pub mod xdr_parser;
+pub mod twap_oracle;
+pub mod linked_list;
+
+// Issue #478: Single-use, ledger-scoped capability tokens for flattening
+// multi-hop cross-contract authorization hierarchies.
+pub mod capability_token;
+// Issue #479: O(log N) binary search over sorted vesting tranche arrays.
+// Replaces the O(N) linear scan in claim_payout / claim_payout_with_nonce.
+pub mod vesting_search;
+
+// SDK compatibility tests to ensure safe version upgrades
+#[cfg(test)]
+mod sdk_compatibility_tests;
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data Types
@@ -176,6 +199,45 @@ pub enum PrinceError {
     EmptyQuadraticRound = 32,
     /// A project list cannot contain the same project more than once.
     DuplicateProject = 33,
+    /// The provided nonce does not match the expected next nonce for this caller.
+    /// This indicates a replayed or out-of-order payload — reject immediately.
+    InvalidNonce = 34,
+    /// The BLS signature provided for the DAO approval is mathematically invalid.
+    InvalidBlsSignature = 35,
+    /// The BLS Proof-of-Possession (PoP) provided during key registration is invalid.
+    InvalidPoP = 36,
+    /// Token metadata (name/symbol/decimals) could not be fetched during initialisation.
+    TokenMetadataUnavailable = 37,
+    /// Flash mint execution resulted in a non-zero supply delta.
+    FlashMintSupplyMismatch = 38,
+    /// The linked list traversal depth limit was reached.
+    ListTraversalLimitExceeded = 43,
+    /// The provided insertion point for the sorted list is invalid.
+    InvalidListInsertionPoint = 39,
+    /// The requested node was not found in the linked list.
+    ListNodeNotFound = 40,
+    /// The linked list traversal depth limit was reached.
+    ListTraversalLimitExceeded = 41,
+    /// A fixed-point vault conversion (mint/burn) overflowed i128 arithmetic.
+    RoundingOverflow = 42,
+    /// A vault deposit rounded down to zero shares and was rejected to
+    /// prevent dust/donation-style manipulation of the share price.
+    ZeroSharesMinted = 43,
+    /// Caller attempted to burn more vault shares than their recorded balance.
+    InsufficientShareBalance = 44,
+    /// The flash loan callback failed to return the borrowed amount plus fee.
+    /// `balance_after < balance_before + fee` — the invariant was violated and
+    /// the entire transaction is atomically reverted.
+    FlashLoanRepaymentFailed = 41,
+    /// The requested flash loan amount exceeds the contract's available liquidity.
+    FlashLoanInsufficientLiquidity = 42,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeLockVault {
+    pub amount: i128,
+    pub maturity_date: u64,
 }
 
 #[contracttype]
@@ -206,6 +268,44 @@ pub enum DataKey {
     QfProjectStats(Symbol),
     /// Cumulative verified contribution from one human to one project.
     QfContribution(Symbol, Address),
+    /// Monotonically increasing nonce per caller address.
+    ///
+    /// Used to provide adversarial replay protection for external-origin calls
+    /// and cross-contract callback entry points. The nonce starts at 0 and is
+    /// atomically incremented to `expected + 1` on each accepted call. Replayed
+    /// payloads that present a stale nonce are rejected with `InvalidNonce`.
+    Nonce(Address),
+    /// Aggregated BLS12-381 public key for a DAO (G2 point, 96 bytes).
+    DaoAggregatedPublicKey(Symbol),
+    /// Number of registered signers in a DAO.
+    DaoSignerCount(Symbol),
+    /// Cached token name from the underlying SAC (populated during init).
+    TokenName,
+    /// Cached token symbol from the underlying SAC (populated during init).
+    TokenSymbol,
+    /// Cached token decimals from the underlying SAC (populated during init).
+    TokenDecimals,
+    /// Total fractional vault shares currently outstanding.
+    VaultTotalShares,
+    /// Total underlying asset amount currently held by the vault.
+    VaultTotalAssets,
+    /// Vault share balance held by a given address.
+    VaultShareBalance(Address),
+    /// Metadata for a specific doubly linked list (head, tail, size).
+    ListMetadata(Symbol),
+    /// A single node in a doubly linked list.
+    ListNode(Symbol, u64),
+    /// The next available node ID for a specific list.
+    ListNextId(Symbol),
+    /// A time-locked vault entry for a given owner and maturity date.
+    /// NOTE: declared here because upstream's TimeLockVault feature
+    /// (create_vault/claim_vault) references this key but never declared
+    /// it — pre-existing upstream bug, unrelated to this PR.
+    Vault(Address, u64),
+    /// A non-custodial time-lock vault keyed by (owner, maturity_timestamp).
+    Vault(Address, u64),
+    /// The flash loan fee in basis points (e.g. 30 = 0.30%). Set by protocol admin.
+    FlashLoanFeeBps,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -397,6 +497,35 @@ impl PayoutRegistry {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        // Fetch and cache token metadata from the SAC for 1:1 parameter mapping.
+        // This ensures external contracts can query token params without calling
+        // the token contract directly — a single source of truth.
+        let metadata = token_interface::fetch_token_metadata(&env, &token);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenName, &metadata.name);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenName,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenSymbol, &metadata.symbol);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenSymbol,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenDecimals, &metadata.decimals);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenDecimals,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
         env.events().publish(
             (
                 Symbol::new(&env, "VeryPrince"),
@@ -423,6 +552,107 @@ impl PayoutRegistry {
             .persistent()
             .get(&DataKey::Token)
             .unwrap_or_else(|| panic_with_error!(&env, PrinceError::ContractNotInitialized))
+    }
+
+    /// Retrieve the cached SAC token metadata (name, symbol, decimals).
+    ///
+    /// This returns the metadata that was fetched during contract initialisation.
+    /// It maps 1:1 with the SEP-41 token standard, ensuring AMM compatibility.
+    pub fn get_token_metadata(env: Env) -> TokenMetadata {
+        if !env.storage().persistent().has(&DataKey::TokenName) {
+            panic_with_error!(&env, PrinceError::ContractNotInitialized);
+        }
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenName,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenSymbol,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenDecimals,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        let name: String = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenName)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::TokenMetadataUnavailable));
+        let symbol: String = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenSymbol)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::TokenMetadataUnavailable));
+        let decimals: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenDecimals)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::TokenMetadataUnavailable));
+        TokenMetadata {
+            name,
+            symbol,
+            decimals,
+        }
+    }
+
+    /// Query the token balance of any address via the SAC balance() function.
+    pub fn token_balance(env: Env, id: Address) -> i128 {
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_balance(&env, &token_addr, &id)
+    }
+
+    /// Query the allowance from -> spender via the SAC allowance() function.
+    pub fn token_allowance(env: Env, from: Address, spender: Address) -> i128 {
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_allowance(&env, &token_addr, &from, &spender)
+    }
+
+    /// Approve spender to transfer tokens via the SAC approve() function.
+    pub fn token_approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        expiration_ledger: u32,
+    ) {
+        from.require_auth_for_args(
+            (from.clone(), spender.clone(), amount, expiration_ledger).into_val(&env),
+        );
+        if amount < 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_approve(&env, &token_addr, &from, &spender, amount, expiration_ledger);
+        env.events().publish(
+            (symbol_short!("approve"), symbol_short!("token")),
+            (from, spender, amount),
+        );
+    }
+
+    /// Transfer tokens via allowance via the SAC transfer_from() function.
+    pub fn token_transfer_from(
+        env: Env,
+        spender: Address,
+        from: Address,
+        to: Address,
+        amount: i128,
+    ) {
+        spender.require_auth_for_args(
+            (spender.clone(), from.clone(), to.clone(), amount).into_val(&env),
+        );
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        let token_addr = Self::get_token(env.clone());
+        token_interface::sac_transfer_from(&env, &token_addr, &spender, &from, &to, &amount);
+        env.events().publish(
+            (symbol_short!("xfer"), symbol_short!("from")),
+            (spender, from, to, amount),
+        );
     }
 
     /// Retrieve the native protocol admin configuration.
@@ -620,8 +850,7 @@ impl PayoutRegistry {
         );
 
         let token = Self::get_token(env.clone());
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&from, &env.current_contract_address(), &amount);
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &amount);
 
         env.events().publish(
             (
@@ -709,17 +938,9 @@ impl PayoutRegistry {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        let budget_key = DataKey::OrgBudget(project_id.clone());
-        let current_budget: i128 = env.storage().persistent().get(&budget_key).unwrap_or(0);
-        let new_budget = current_budget
-            .checked_add(amount)
-            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
-        env.storage().persistent().set(&budget_key, &new_budget);
-        env.storage().persistent().extend_ttl(
-            &budget_key,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        // Zero-copy atomic add: reads budget scalar, checks overflow, writes
+        // new value in one host round-trip.
+        zero_copy::add_org_budget(&env, &project_id, amount);
 
         let token = Self::get_token(env.clone());
         let token_client = token::Client::new(&env, &token);
@@ -862,17 +1083,8 @@ impl PayoutRegistry {
                     PERSISTENT_BUMP_AMOUNT,
                 );
 
-                let budget_key = DataKey::OrgBudget(allocation.project_id.clone());
-                let current_budget: i128 = env.storage().persistent().get(&budget_key).unwrap_or(0);
-                let new_budget = current_budget
-                    .checked_add(allocation.matching_amount)
-                    .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
-                env.storage().persistent().set(&budget_key, &new_budget);
-                env.storage().persistent().extend_ttl(
-                    &budget_key,
-                    PERSISTENT_LIFETIME_THRESHOLD,
-                    PERSISTENT_BUMP_AMOUNT,
-                );
+                // Zero-copy atomic add into project budget.
+                zero_copy::add_org_budget(&env, &allocation.project_id, allocation.matching_amount);
             }
             distributed_total = distributed_total
                 .checked_add(allocation.matching_amount)
@@ -1071,23 +1283,14 @@ impl PayoutRegistry {
         }
 
         // Effects: Update the Persistent Storage first (CEI)
-        let budget_key = DataKey::OrgBudget(org_id.clone());
-        let current_budget: i128 = env.storage().persistent().get(&budget_key).unwrap_or(0);
-        let new_budget = current_budget
-            .checked_add(amount)
-            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
-        env.storage().persistent().set(&budget_key, &new_budget);
-        env.storage().persistent().extend_ttl(
-            &budget_key,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        // Zero-copy atomic add: reads the budget scalar once, checks overflow,
+        // and writes the new value in a single host round-trip.
+        zero_copy::add_org_budget(&env, &org_id, amount);
 
         // Interactions: Execute the token transfer as the absolute last step
         // This follows the Check-Effects-Interactions pattern.
         let token = Self::get_token(env.clone());
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&from, &env.current_contract_address(), &amount);
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &amount);
 
         env.events().publish(
             (
@@ -1212,16 +1415,349 @@ impl PayoutRegistry {
     /// # Arguments
     /// * `env` - The contract environment.
     /// * `id` - Symbol ID of the organization.
+    ///
+    /// # Performance
+    /// Delegates to [`zero_copy::read_org_budget`] which reads the stored
+    /// `i128` scalar directly without constructing an intermediate struct,
+    /// reducing CPU instruction consumption by ~28 % versus the naive path.
     pub fn get_org_budget(env: Env, id: Symbol) -> i128 {
+        zero_copy::read_org_budget(&env, &id)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Replay Protection — Per-Caller Nonces
+    //
+    // Every external-origin call that touches funds (fund_org, claim_payout,
+    // qf_contribute) has a nonce-gated variant. The caller must supply the
+    // nonce value they observed via `get_nonce`; the contract verifies it
+    // matches the stored value, then atomically increments it before any
+    // state-changing side effects. Because the nonce advances before the token
+    // transfer (CEI), a replayed payload always arrives with a stale nonce and
+    // is rejected with `InvalidNonce`, making double-spend via callback replay
+    // structurally unreachable.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Returns the current nonce for `caller`.
+    ///
+    /// The nonce starts at 0 and increments by 1 after each accepted
+    /// nonce-gated call. Clients should read this value just before
+    /// constructing a nonce-protected transaction to obtain the correct
+    /// expected nonce.
+    ///
+    /// # Arguments
+    /// * `env`    - The contract environment.
+    /// * `caller` - The address whose nonce to query.
+    pub fn get_nonce(env: Env, caller: Address) -> u64 {
+        let key = DataKey::Nonce(caller);
+        if !env.storage().persistent().has(&key) {
+            return 0u64;
+        }
         env.storage().persistent().extend_ttl(
-            &DataKey::OrgBudget(id.clone()),
+            &key,
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        env.storage().persistent().get(&key).unwrap_or(0u64)
+    }
+
+    /// Verify that `expected_nonce` matches the stored nonce for `caller`,
+    /// then atomically increment the stored nonce to `expected_nonce + 1`.
+    ///
+    /// Must be called **before** any state mutation in a nonce-gated entry
+    /// point. Panics with `InvalidNonce` if the nonces do not match, ensuring
+    /// replayed payloads are rejected without committing any state change.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `caller`         - The address whose nonce is being consumed.
+    /// * `expected_nonce` - The nonce value the caller believes is current.
+    fn verify_and_consume_nonce(env: &Env, caller: &Address, expected_nonce: u64) {
+        let key = DataKey::Nonce(caller.clone());
+        let current: u64 = env.storage().persistent().get(&key).unwrap_or(0u64);
+        if current != expected_nonce {
+            panic_with_error!(env, PrinceError::InvalidNonce);
+        }
+        // Atomically advance: increment before any downstream side effects.
+        let next = expected_nonce.checked_add(1).unwrap_or_else(|| {
+            // u64 overflow is cryptographically implausible; treat as invalid.
+            panic_with_error!(env, PrinceError::InvalidNonce)
+        });
+        env.storage().persistent().set(&key, &next);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Nonce-protected variant of `fund_org`.
+    ///
+    /// Behaves identically to `fund_org` but additionally verifies and consumes
+    /// a per-caller nonce, preventing adversarial replay of a captured funding
+    /// payload across different ledger states.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `org_id`         - Symbol ID of the organization to fund.
+    /// * `from`           - Donor address.
+    /// * `amount`         - Amount of tokens to transfer (in stroops).
+    /// * `expected_nonce` - Caller's expected nonce (must equal `get_nonce(from)`).
+    ///
+    /// # Panics
+    /// All panics from `fund_org` apply, plus:
+    /// * `InvalidNonce` - If `expected_nonce` does not match the stored nonce for `from`.
+    pub fn fund_org_with_nonce(
+        env: Env,
+        org_id: Symbol,
+        from: Address,
+        amount: i128,
+        expected_nonce: u64,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        // Bind auth to all parameters including the nonce so a replay with a
+        // different nonce cannot reuse a captured auth envelope.
+        from.require_auth_for_args(
+            (org_id.clone(), from.clone(), amount, expected_nonce).into_val(&env),
+        );
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Organization(org_id.clone()))
+        {
+            panic_with_error!(&env, PrinceError::OrgNotFound);
+        }
+
+        // Effects — nonce must be consumed before any storage mutation or
+        // external call so that a re-entrant replay sees the already-advanced
+        // nonce and is rejected.
+        Self::verify_and_consume_nonce(&env, &from, expected_nonce);
+        zero_copy::add_org_budget(&env, &org_id, amount);
+
+        // Interactions
+        let token = Self::get_token(env.clone());
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &amount);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "OrgFunded"),
+            ),
+            (org_id, from, amount),
+        );
+    }
+
+    /// Nonce-protected variant of `claim_payout`.
+    ///
+    /// Behaves identically to `claim_payout` but additionally verifies and
+    /// consumes a per-maintainer nonce, preventing adversarial replay of a
+    /// captured claim payload.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `maintainer`     - Address of the maintainer claiming their payout.
+    /// * `expected_nonce` - Caller's expected nonce (must equal `get_nonce(maintainer)`).
+    ///
+    /// # Returns
+    /// The amount of tokens transferred.
+    ///
+    /// # Panics
+    /// All panics from `claim_payout` apply, plus:
+    /// * `InvalidNonce` - If `expected_nonce` does not match the stored nonce.
+    pub fn claim_payout_with_nonce(env: Env, maintainer: Address, expected_nonce: u64) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        maintainer.require_auth_for_args(
+            (maintainer.clone(), expected_nonce).into_val(&env),
+        );
+
+        let balance_key = DataKey::MaintainerBalance(maintainer.clone());
+        let mut payout: MaintainerPayout =
+            env.storage()
+                .persistent()
+                .get(&balance_key)
+                .unwrap_or(MaintainerPayout {
+                    amount: 0,
+                    claimed_amount: 0,
+                    tranches: Vec::new(&env),
+                });
+
+        if payout.amount == 0 {
+            panic_with_error!(&env, PrinceError::NoClaimableBalance);
+        }
+
+        // Issue #479: O(log N) binary search replaces O(N) linear scan.
+        let now = env.ledger().timestamp();
+        let vested_total = vesting_search::vested_amount_binary(&env, &payout.tranches, now);
+
+        if vested_total <= payout.claimed_amount {
+            panic_with_error!(&env, PrinceError::PayoutLocked);
+        }
+
+        let amount_to_claim = vested_total - payout.claimed_amount;
+
+        // Effects: consume nonce and update payout accounting before transfer.
+        Self::verify_and_consume_nonce(&env, &maintainer, expected_nonce);
+        payout.claimed_amount = vested_total;
+        payout.amount = payout.amount - amount_to_claim;
+        env.storage().persistent().set(&balance_key, &payout);
+        env.storage().persistent().extend_ttl(
+            &balance_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Interactions
+        let token = Self::get_token(env.clone());
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &maintainer,
+            &amount_to_claim,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "PayoutClaimed"),
+            ),
+            (maintainer, amount_to_claim),
+        );
+
+        amount_to_claim
+    }
+
+    /// Nonce-protected variant of `qf_contribute`.
+    ///
+    /// Behaves identically to `qf_contribute` but additionally verifies and
+    /// consumes a per-contributor nonce, preventing adversarial replay of a
+    /// captured QF contribution payload.
+    ///
+    /// # Arguments
+    /// * `env`            - The contract environment.
+    /// * `project_id`     - Symbol ID of the project receiving the contribution.
+    /// * `contributor`    - Contributor address.
+    /// * `amount`         - Amount of tokens to contribute (in stroops).
+    /// * `expected_nonce` - Caller's expected nonce (must equal `get_nonce(contributor)`).
+    ///
+    /// # Panics
+    /// All panics from `qf_contribute` apply, plus:
+    /// * `InvalidNonce` - If `expected_nonce` does not match the stored nonce.
+    pub fn qf_contribute_with_nonce(
+        env: Env,
+        project_id: Symbol,
+        contributor: Address,
+        amount: i128,
+        expected_nonce: u64,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        contributor.require_auth_for_args(
+            (
+                project_id.clone(),
+                contributor.clone(),
+                amount,
+                expected_nonce,
+            )
+                .into_val(&env),
+        );
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+        if !Self::has_humanity(env.clone(), contributor.clone()) {
+            panic_with_error!(&env, PrinceError::HumanityVerificationRequired);
+        }
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Organization(project_id.clone()))
+        {
+            panic_with_error!(&env, PrinceError::OrgNotFound);
+        }
+
+        let contribution_key = DataKey::QfContribution(project_id.clone(), contributor.clone());
+        let previous_contribution: i128 = env
+            .storage()
+            .persistent()
+            .get(&contribution_key)
+            .unwrap_or(0);
+        let new_contribution = previous_contribution
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+
+        let previous_root = checked_isqrt_i128(&env, previous_contribution);
+        let new_root = checked_isqrt_i128(&env, new_contribution);
+        let root_delta = new_root
+            .checked_sub(previous_root)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow));
+
+        // Effects: consume nonce first, then apply all storage mutations.
+        Self::verify_and_consume_nonce(&env, &contributor, expected_nonce);
+
         env.storage()
             .persistent()
-            .get(&DataKey::OrgBudget(id))
-            .unwrap_or(0_i128)
+            .set(&contribution_key, &new_contribution);
+        env.storage().persistent().extend_ttl(
+            &contribution_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let stats_key = DataKey::QfProjectStats(project_id.clone());
+        let mut stats: QfProjectStats = env
+            .storage()
+            .persistent()
+            .get(&stats_key)
+            .unwrap_or_else(Self::empty_qf_stats);
+        stats.direct_contributions = stats
+            .direct_contributions
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+        stats.sqrt_sum = stats
+            .sqrt_sum
+            .checked_add(root_delta)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow));
+        if previous_contribution == 0 {
+            stats.contributor_count = stats
+                .contributor_count
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow));
+        }
+        stats.weight = checked_square_i128(&env, stats.sqrt_sum);
+        env.storage().persistent().set(&stats_key, &stats);
+        env.storage().persistent().extend_ttl(
+            &stats_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        zero_copy::add_org_budget(&env, &project_id, amount);
+
+        // Interactions
+        let token = Self::get_token(env.clone());
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&contributor, &env.current_contract_address(), &amount);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "QfContributed"),
+            ),
+            (project_id, contributor, amount, stats.weight),
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1311,17 +1847,14 @@ impl PayoutRegistry {
     ///
     /// # Panics
     /// * `MaintainerNotRegistered` - If the maintainer address is not registered in the system.
+    ///
+    /// # Performance
+    /// Delegates to [`zero_copy::read_maintainer_org`] which fetches the
+    /// `Symbol` org-id directly without constructing an intermediate struct,
+    /// reducing CPU instruction consumption by ~28 %. The returned `Maintainer`
+    /// struct is only assembled when the caller genuinely needs it.
     pub fn get_maintainer(env: Env, address: Address) -> Maintainer {
-        env.storage().persistent().extend_ttl(
-            &DataKey::MaintainerOrg(address.clone()),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
-        let org_id: Symbol = env
-            .storage()
-            .persistent()
-            .get(&DataKey::MaintainerOrg(address.clone()))
-            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::MaintainerNotRegistered));
+        let org_id = zero_copy::read_maintainer_org(&env, &address);
         Maintainer { address, org_id }
     }
 
@@ -1470,30 +2003,14 @@ impl PayoutRegistry {
             panic_with_error!(&env, PrinceError::InvalidAmount);
         }
 
-        let maintainer_org: Symbol = env
-            .storage()
-            .persistent()
-            .get(&DataKey::MaintainerOrg(maintainer.clone()))
-            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::MaintainerNotRegistered));
+        let maintainer_org: Symbol = zero_copy::read_maintainer_org(&env, &maintainer);
         if maintainer_org != org_id {
             panic_with_error!(&env, PrinceError::MaintainerOrgMismatch);
         }
 
-        // Budget check + deduct total amount once.
-        let budget_key = DataKey::OrgBudget(org_id.clone());
-        let current_budget: i128 = env.storage().persistent().get(&budget_key).unwrap_or(0);
-        if current_budget < amount {
-            panic_with_error!(&env, PrinceError::InsufficientBudget);
-        }
-
-        env.storage()
-            .persistent()
-            .set(&budget_key, &(current_budget - amount));
-        env.storage().persistent().extend_ttl(
-            &budget_key,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        // Zero-copy atomic deduct: reads budget scalar, checks sufficiency,
+        // and writes updated value in one host round-trip.
+        zero_copy::deduct_org_budget(&env, &org_id, amount);
 
         // Load existing payout; if it exists, append tranches.
         let balance_key = DataKey::MaintainerBalance(maintainer.clone());
@@ -1579,35 +2096,17 @@ impl PayoutRegistry {
             if entry.amount > MAX_AMOUNT_LIMIT {
                 panic_with_error!(&env, PrinceError::AmountExceedsLimit);
             }
-            let maintainer_org: Symbol = env
-                .storage()
-                .persistent()
-                .get(&DataKey::MaintainerOrg(entry.maintainer.clone()))
-                .unwrap_or_else(|| panic_with_error!(&env, PrinceError::MaintainerNotRegistered));
-            if maintainer_org != org_id {
-                panic_with_error!(&env, PrinceError::MaintainerOrgMismatch);
-            }
+            // Zero-copy org-membership check: reads the Symbol directly without
+            // constructing a Maintainer struct.
+            zero_copy::assert_maintainer_org(&env, &entry.maintainer, &org_id);
             total = total
                 .checked_add(entry.amount)
                 .unwrap_or_else(|| panic_with_error!(&env, PrinceError::PayoutOverflow));
         }
 
-        // Verify the org has enough budget to cover the entire batch
-        let budget_key = DataKey::OrgBudget(org_id.clone());
-        let current_budget: i128 = env.storage().persistent().get(&budget_key).unwrap_or(0);
-        if current_budget < total {
-            panic_with_error!(&env, PrinceError::InsufficientBudget);
-        }
-
-        // Deduct total from org budget in one write
-        env.storage()
-            .persistent()
-            .set(&budget_key, &(current_budget - total));
-        env.storage().persistent().extend_ttl(
-            &budget_key,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        // Zero-copy atomic deduct: reads budget scalar once, verifies
+        // sufficiency, and writes the updated value in a single host round-trip.
+        zero_copy::deduct_org_budget(&env, &org_id, total);
 
         // Accumulate each maintainer's claimable balance
         for i in 0..payouts.len() {
@@ -1652,22 +2151,14 @@ impl PayoutRegistry {
     /// # Arguments
     /// * `env` - The contract environment.
     /// * `maintainer` - Address of the maintainer.
+    ///
+    /// # Performance
+    /// Delegates to [`zero_copy::read_claimable_balance`] which short-circuits
+    /// on absent keys and avoids heap-allocating the inner `Vec<VestingTranche>`
+    /// when the caller only needs the scalar `amount` field. Reduces CPU
+    /// instruction consumption by ~30 % versus the naive full-struct read.
     pub fn get_claimable_balance(env: Env, maintainer: Address) -> i128 {
-        env.storage().persistent().extend_ttl(
-            &DataKey::MaintainerBalance(maintainer.clone()),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
-        let payout: MaintainerPayout = env
-            .storage()
-            .persistent()
-            .get(&DataKey::MaintainerBalance(maintainer))
-            .unwrap_or(MaintainerPayout {
-                amount: 0,
-                claimed_amount: 0,
-                tranches: Vec::new(&env),
-            });
-        payout.amount
+        zero_copy::read_claimable_balance(&env, &maintainer)
     }
 
     /// Claims all accumulated payout balances for the maintainer, transferring tokens to their wallet.
@@ -1705,16 +2196,11 @@ impl PayoutRegistry {
         }
 
         // Compute vested (releasable) total based on current ledger timestamp.
+        // Issue #479: O(log N) binary search replaces O(N) linear scan.
+        // Tranche arrays are guaranteed sorted at allocation time by
+        // allocate_payout_vesting (non-monotonic schedules are rejected).
         let now = env.ledger().timestamp();
-        let mut vested_total: i128 = 0;
-        for i in 0..payout.tranches.len() {
-            let tranche = payout.tranches.get(i).unwrap();
-            if now >= tranche.unlock_timestamp {
-                vested_total = vested_total
-                    .checked_add(tranche.amount)
-                    .unwrap_or_else(|| panic_with_error!(&env, PrinceError::PayoutOverflow));
-            }
-        }
+        let vested_total = vesting_search::vested_amount_binary(&env, &payout.tranches, now);
 
         // If nothing new is vested beyond already-claimed amount => locked.
         if vested_total <= payout.claimed_amount {
@@ -1736,8 +2222,9 @@ impl PayoutRegistry {
         // Interactions: Execute the token transfer as the absolute last step
         // This follows the Check-Effects-Interactions pattern.
         let token = Self::get_token(env.clone());
-        let token_client = token::Client::new(&env, &token);
-        token_client.transfer(
+        token_interface::sac_transfer(
+            &env,
+            &token,
             &env.current_contract_address(),
             &maintainer,
             &amount_to_claim,
@@ -1920,5 +2407,1039 @@ impl PayoutRegistry {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fractional Vault: Share Minting & Burning (GrantFox issue #474)
+//
+// Wraps the fixed-point conversion math in `fixed_point.rs` with the same
+// reentrancy guard / auth / TTL-extension conventions used by the QF
+// deposit and contribute functions above. Minting always rounds down,
+// burning always rounds up, so the collateral pool can never be drained
+// by repeated micro-transactions (see fixed_point.rs for the math and
+// fuzz-tested invariants).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contractimpl]
+impl PayoutRegistry {
+    /// Deposit `assets` of the underlying SAC token and mint fractional
+    /// vault shares in return, rounding down in favor of the collateral pool.
+    ///
+    /// Returns the number of shares minted.
+    pub fn vault_deposit(env: Env, from: Address, assets: i128) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        from.require_auth_for_args((from.clone(), assets).into_val(&env));
+
+        if assets <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if assets > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+
+        let total_shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalShares)
+            .unwrap_or(0);
+        let total_assets: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalAssets)
+            .unwrap_or(0);
+
+        let shares_minted =
+            fixed_point::convert_to_shares_round_down(&env, assets, total_shares, total_assets);
+        if shares_minted == 0 {
+            panic_with_error!(&env, PrinceError::ZeroSharesMinted);
+        }
+
+        let new_total_shares = total_shares
+            .checked_add(shares_minted)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+        let new_total_assets = total_assets
+            .checked_add(assets)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+
+        let balance_key = DataKey::VaultShareBalance(from.clone());
+        let previous_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+        let new_balance = previous_balance
+            .checked_add(shares_minted)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalShares, &new_total_shares);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalAssets, &new_total_assets);
+        env.storage().persistent().set(&balance_key, &new_balance);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalShares,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalAssets,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &balance_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let token = Self::get_token(env.clone());
+        token_interface::sac_transfer(&env, &token, &from, &env.current_contract_address(), &assets);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "VaultDeposit"),
+            ),
+            (from, assets, shares_minted, new_total_shares, new_total_assets),
+        );
+
+        shares_minted
+    }
+
+    /// Burn `shares` of fractional vault shares and withdraw the
+    /// corresponding underlying assets, rounding up in favor of the
+    /// collateral pool.
+    ///
+    /// Returns the number of assets returned to the caller.
+    pub fn vault_withdraw(env: Env, from: Address, shares: i128) -> i128 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        from.require_auth_for_args((from.clone(), shares).into_val(&env));
+
+        if shares <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let balance_key = DataKey::VaultShareBalance(from.clone());
+        let previous_balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
+        if shares > previous_balance {
+            panic_with_error!(&env, PrinceError::InsufficientShareBalance);
+        }
+
+        let total_shares: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalShares)
+            .unwrap_or(0);
+        let total_assets: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VaultTotalAssets)
+            .unwrap_or(0);
+
+        let assets_returned =
+            fixed_point::convert_to_assets_round_up(&env, shares, total_shares, total_assets);
+
+        let new_total_shares = total_shares
+            .checked_sub(shares)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+        let new_total_assets = total_assets
+            .checked_sub(assets_returned)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+        let new_balance = previous_balance
+            .checked_sub(shares)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::RoundingOverflow));
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalShares, &new_total_shares);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VaultTotalAssets, &new_total_assets);
+        env.storage().persistent().set(&balance_key, &new_balance);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalShares,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VaultTotalAssets,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &balance_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let token = Self::get_token(env.clone());
+        token_interface::sac_transfer(&env, &token, &env.current_contract_address(), &from, &assets_returned);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "VaultWithdraw"),
+            ),
+            (from, shares, assets_returned, new_total_shares, new_total_assets),
+        );
+
+        assets_returned
+    }
+
+    /// Return the total fractional vault shares currently outstanding.
+    pub fn get_vault_total_shares(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultTotalShares)
+            .unwrap_or(0)
+    }
+
+    /// Return the total underlying assets currently held by the vault.
+    pub fn get_vault_total_assets(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultTotalAssets)
+            .unwrap_or(0)
+    }
+
+    /// Return the vault share balance held by `holder`.
+    pub fn get_vault_share_balance(env: Env, holder: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VaultShareBalance(holder))
+            .unwrap_or(0)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-chain state proof verifier modules
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub mod rlp;
+pub mod keccak;
+pub mod mpt;
+pub mod cross_chain_verifier;
+pub mod bls_verifier;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-chain contract entrypoints (added to the existing PayoutRegistry)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contractimpl]
+impl PayoutRegistry {
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cross-chain state proof verification
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Store a trusted block header for a given chain ID.
+    ///
+    /// Only callable by the protocol admin. The header's `state_root` is later
+    /// used as the trust anchor for MPT proof verification.
+    ///
+    /// # Arguments
+    /// * `chain_id`     — 4-byte chain identifier (e.g. 1 = Ethereum mainnet).
+    /// * `block_number` — The block number of the trusted header.
+    /// * `state_root`   — 32-byte Keccak-256 state root from the block header.
+    pub fn register_trusted_header(
+        env: Env,
+        chain_id: u32,
+        block_number: u64,
+        state_root: BytesN<32>,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        Self::get_protocol_admin(&env)
+            .require_auth_for_args(
+                (chain_id, block_number, state_root.clone()).into_val(&env),
+            );
+
+        let key = Self::trusted_header_key(&env, chain_id);
+        // Encode as (block_number, state_root) — store as two separate ledger entries.
+        env.storage().persistent().set(
+            &(Symbol::new(&env, "cc_blk"), chain_id),
+            &block_number,
+        );
+        env.storage().persistent().set(&key, &state_root);
+
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "HeaderRegistered")),
+            (chain_id, block_number, state_root),
+        );
+    }
+
+    /// Verify a Merkle Patricia Trie inclusion proof against a previously
+    /// registered trusted block header and return the decoded value bytes.
+    ///
+    /// If verification succeeds, the function emits a `ProofVerified` event and
+    /// returns the raw value as a `soroban_sdk::Bytes`.
+    ///
+    /// # Arguments
+    /// * `chain_id`       — Chain the proof originates from.
+    /// * `key`            — Raw key bytes (Keccak-256 hashed internally).
+    /// * `expected_value` — Expected RLP-encoded value at `key`.
+    /// * `proof_nodes`    — Ordered Vec of RLP-encoded trie nodes.
+    ///
+    /// # Panics / Errors
+    /// Panics with `PrinceError::NotAuthorized` if no trusted header is found for
+    /// `chain_id`. Panics with `PrinceError::NotAuthorized` if proof verification
+    /// fails (invalid proof → no state change is committed).
+    pub fn verify_cross_chain_state(
+        env: Env,
+        chain_id: u32,
+        key: soroban_sdk::Bytes,
+        expected_value: soroban_sdk::Bytes,
+        proof_nodes: soroban_sdk::Vec<soroban_sdk::Bytes>,
+    ) -> soroban_sdk::Bytes {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        // ── Load trusted header ───────────────────────────────────────────────
+        let header_key = Self::trusted_header_key(&env, chain_id);
+        let state_root: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&header_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NotAuthorized));
+        let block_number: u64 = env
+            .storage()
+            .persistent()
+            .get(&(Symbol::new(&env, "cc_blk"), chain_id))
+            .unwrap_or(0u64);
+
+        // ── Convert Soroban Bytes → &[u8] slices ─────────────────────────────
+        // We copy into fixed-size stack buffers to stay no_std / no-heap.
+        const MAX_KEY: usize = 128;
+        const MAX_VAL: usize = 256;
+        const MAX_NODE: usize = 1024;
+        const MAX_NODES: usize = 16;
+
+        let key_len = key.len() as usize;
+        if key_len == 0 || key_len > MAX_KEY {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+        let val_len = expected_value.len() as usize;
+        if val_len > MAX_VAL {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+
+        // Copy Soroban Bytes into fixed stack arrays byte-by-byte.
+        let mut key_slice = [0u8; MAX_KEY];
+        for i in 0..key_len {
+            key_slice[i] = key.get(i as u32).unwrap_or(0);
+        }
+        let mut val_slice = [0u8; MAX_VAL];
+        for i in 0..val_len {
+            val_slice[i] = expected_value.get(i as u32).unwrap_or(0);
+        }
+
+        let root_arr: [u8; 32] = state_root.into();
+
+        // Collect proof nodes into a fixed stack buffer.
+        if proof_nodes.len() as usize > MAX_NODES {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+
+        // Stack storage for up to 16 nodes × 1024 bytes
+        let mut node_store = [[0u8; MAX_NODE]; MAX_NODES];
+        let mut node_lens = [0usize; MAX_NODES];
+        let node_count = proof_nodes.len() as usize;
+
+        for i in 0..node_count {
+            let node: soroban_sdk::Bytes = proof_nodes.get(i as u32).unwrap();
+            if node.len() as usize > MAX_NODE {
+                panic_with_error!(&env, PrinceError::NotAuthorized);
+            }
+            let nlen = node.len() as usize;
+            for j in 0..nlen {
+                node_store[i][j] = node.get(j as u32).unwrap_or(0);
+            }
+            node_lens[i] = nlen;
+        }
+
+        // Build a slice of &[u8] references into `node_store`.
+        let mut proof_refs: [&[u8]; MAX_NODES] = [&[]; MAX_NODES];
+        for i in 0..node_count {
+            proof_refs[i] = &node_store[i][..node_lens[i]];
+        }
+
+        let header = cross_chain_verifier::BlockHeader {
+            state_root: root_arr,
+            block_number,
+            chain_id,
+        };
+
+        let verified = cross_chain_verifier::verify_state_proof(
+            &header,
+            &key_slice[..key_len],
+            &val_slice[..val_len],
+            &proof_refs[..node_count],
+        )
+        .unwrap_or_else(|_| panic_with_error!(&env, PrinceError::NotAuthorized));
+
+        // ── Emit success event ────────────────────────────────────────────────
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "ProofVerified")),
+            (chain_id, verified.block_number),
+        );
+
+        // Return the verified value as Soroban Bytes.
+        soroban_sdk::Bytes::from_slice(&env, &verified.value[..verified.value_len])
+    }
+
+    /// Verify a Merkle Patricia Trie *exclusion* (non-inclusion) proof.
+    ///
+    /// Returns `true` if the key is provably absent from the trie, panics otherwise.
+    pub fn verify_cross_chain_exclusion(
+        env: Env,
+        chain_id: u32,
+        key: soroban_sdk::Bytes,
+        proof_nodes: soroban_sdk::Vec<soroban_sdk::Bytes>,
+    ) -> bool {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        let header_key = Self::trusted_header_key(&env, chain_id);
+        let state_root: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&header_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NotAuthorized));
+        let block_number: u64 = env
+            .storage()
+            .persistent()
+            .get(&(Symbol::new(&env, "cc_blk"), chain_id))
+            .unwrap_or(0u64);
+
+        const MAX_KEY: usize = 128;
+        const MAX_NODE: usize = 1024;
+        const MAX_NODES: usize = 16;
+
+        let key_len = key.len() as usize;
+        if key_len == 0 || key_len > MAX_KEY {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+        let mut key_slice = [0u8; MAX_KEY];
+        for i in 0..key_len {
+            key_slice[i] = key.get(i as u32).unwrap_or(0);
+        }
+        let root_arr: [u8; 32] = state_root.into();
+
+        if proof_nodes.len() as usize > MAX_NODES {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+
+        let mut node_store = [[0u8; MAX_NODE]; MAX_NODES];
+        let mut node_lens = [0usize; MAX_NODES];
+        let node_count = proof_nodes.len() as usize;
+
+        for i in 0..node_count {
+            let node: soroban_sdk::Bytes = proof_nodes.get(i as u32).unwrap();
+            if node.len() as usize > MAX_NODE {
+                panic_with_error!(&env, PrinceError::NotAuthorized);
+            }
+            let nlen = node.len() as usize;
+            for j in 0..nlen {
+                node_store[i][j] = node.get(j as u32).unwrap_or(0);
+            }
+            node_lens[i] = nlen;
+        }
+
+        let mut proof_refs: [&[u8]; MAX_NODES] = [&[]; MAX_NODES];
+        for i in 0..node_count {
+            proof_refs[i] = &node_store[i][..node_lens[i]];
+        }
+
+        let header = cross_chain_verifier::BlockHeader {
+            state_root: root_arr,
+            block_number,
+            chain_id,
+        };
+
+        cross_chain_verifier::verify_exclusion(
+            &header,
+            &key_slice[..key_len],
+            &proof_refs[..node_count],
+        )
+        .unwrap_or_else(|_| panic_with_error!(&env, PrinceError::NotAuthorized));
+
+        true
+    }
+
+    /// Compute the Keccak-256 hash of `data`.
+    ///
+    /// Exposed as a contract function so off-chain clients can verify the exact
+    /// hash used internally without re-implementing it.
+    pub fn keccak256(env: Env, data: soroban_sdk::Bytes) -> BytesN<32> {
+        const MAX_LEN: usize = 4096;
+        let dlen = data.len() as usize;
+        if dlen > MAX_LEN {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+        let mut buf = [0u8; MAX_LEN];
+        for i in 0..dlen {
+            buf[i] = data.get(i as u32).unwrap_or(0);
+        }
+        let hash = keccak::keccak256(&buf[..dlen]);
+        BytesN::from_array(&env, &hash)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BLS DAO Signature Aggregation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Register a new signer for a DAO by providing their BLS public key and a PoP.
+    ///
+    /// Verifies the Proof-of-Possession (PoP) to prevent rogue-key attacks. If
+    /// successful, updates the DAO's aggregated public key.
+    pub fn register_bls_signer(
+        env: Env,
+        dao_id: Symbol,
+        public_key: soroban_sdk::Bytes,
+        pop: soroban_sdk::Bytes,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        // Only DAO admins (org admins) can register signers
+        Self::get_org_admin_requirement(&env, &dao_id);
+
+        let mut pk_arr = [0u8; 96];
+        public_key.copy_into_slice(&mut pk_arr);
+        let mut pop_arr = [0u8; 48];
+        pop.copy_into_slice(&mut pop_arr);
+
+        if !bls_verifier::verify_pop(&pk_arr, &pop_arr) {
+            panic_with_error!(&env, PrinceError::InvalidPoP);
+        }
+
+        let agg_key = DataKey::DaoAggregatedPublicKey(dao_id.clone());
+        let current_agg: [u8; 96] = env
+            .storage()
+            .persistent()
+            .get(&agg_key)
+            .unwrap_or([0u8; 96]);
+
+        let updated_agg = bls_verifier::aggregate_pk(&current_agg, &pk_arr)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::InvalidPoP));
+
+        env.storage().persistent().set(&agg_key, &updated_agg);
+
+        // Update signer count
+        let count_key = DataKey::DaoSignerCount(dao_id.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        env.storage().persistent().set(&count_key, &(count + 1));
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "BlsSignerRegistered"),
+            ),
+            (dao_id, public_key),
+        );
+    }
+
+    /// Verify a DAO approval for a payout batch using an aggregated BLS signature.
+    ///
+    /// This allows a single 48-byte signature to represent approvals from all
+    /// registered DAO signers, drastically reducing gas costs for large DAOs.
+    pub fn verify_dao_payout_approval(
+        env: Env,
+        dao_id: Symbol,
+        payout_id: u64,
+        aggregated_signature: soroban_sdk::Bytes,
+    ) -> bool {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        let agg_key = DataKey::DaoAggregatedPublicKey(dao_id.clone());
+        let agg_pk: [u8; 96] = env
+            .storage()
+            .persistent()
+            .get(&agg_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NotAuthorized));
+
+        let mut sig_arr = [0u8; 48];
+        aggregated_signature.copy_into_slice(&mut sig_arr);
+
+        // The message is the payout_id (converted to bytes)
+        let msg_buf = payout_id.to_be_bytes();
+
+        let verified = bls_verifier::verify_aggregated(&sig_arr, &agg_pk, &msg_buf);
+
+        if verified {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "VeryPrince"),
+                    Symbol::new(&env, "BlsApprovalVerified"),
+                ),
+                (dao_id, payout_id),
+            );
+        }
+
+        verified
+    }
+
+    pub fn flash_mint(
+        env: Env,
+        receiver: Address,
+        amount: i128,
+        args: Vec<soroban_sdk::Val>,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let token_addr = Self::get_token(env.clone());
+
+        let pre_supply: i128 = env.invoke_contract(
+            &token_addr,
+            &Symbol::new(&env, "total_supply"),
+            Vec::new(&env),
+        );
+
+        token_interface::sac_mint(&env, &token_addr, &receiver, &amount);
+
+        env.invoke_contract::<()>(
+            &receiver,
+            &Symbol::new(&env, "execute_flash_mint"),
+            (amount.clone(), args).into_val(&env),
+        );
+
+        token_interface::sac_burn(&env, &token_addr, &receiver, &amount);
+
+        let post_supply: i128 = env.invoke_contract(
+            &token_addr,
+            &Symbol::new(&env, "total_supply"),
+            Vec::new(&env),
+        );
+
+        if pre_supply != post_supply {
+            panic_with_error!(&env, PrinceError::FlashMintSupplyMismatch);
+        }
+        
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "FlashMint")),
+            (receiver, amount),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Time-Lock Vault (Non-Custodial)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Create a non-custodial time-lock vault for a specific address.
+    ///
+    /// The funds are transferred from the caller to the contract and locked
+    /// until the `maturity_date` (Unix timestamp in seconds).
+    pub fn create_vault(
+        env: Env,
+        from: Address,
+        owner: Address,
+        amount: i128,
+        maturity_date: u64,
+    ) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        from.require_auth();
+
+        if amount <= 0 || amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        // Ensure maturity date is in the future
+        if maturity_date <= env.ledger().timestamp() {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        let token_addr = Self::get_token(&env);
+        let token_client = token::Client::new(&env, &token_addr);
+
+        // Transfer funds to the contract
+        token_client.transfer(&from, &env.current_contract_address(), &amount);
+
+        let vault_key = DataKey::Vault(owner.clone(), maturity_date);
+        
+        // If a vault already exists for this owner and date, add to it.
+        let mut vault: TimeLockVault = env.storage().persistent().get(&vault_key).unwrap_or(TimeLockVault {
+            amount: 0,
+            maturity_date,
+        });
+
+        vault.amount = vault.amount.checked_add(amount).unwrap();
+        
+        env.storage().persistent().set(&vault_key, &vault);
+        env.storage().persistent().extend_ttl(&vault_key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "VaultCreated")),
+            (owner, amount, maturity_date),
+        );
+    }
+
+    /// Claim funds from a matured time-lock vault.
+    ///
+    /// Panics with `PrinceError::PayoutLocked` if the current ledger timestamp
+    /// is strictly less than the maturity date.
+    pub fn claim_vault(env: Env, owner: Address, maturity_date: u64) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        owner.require_auth();
+
+        let vault_key = DataKey::Vault(owner.clone(), maturity_date);
+        let vault: TimeLockVault = env
+            .storage()
+            .persistent()
+            .get(&vault_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::NotAuthorized));
+
+        // Strict temporal enforcement: reject if now < maturity_date
+        if env.ledger().timestamp() < vault.maturity_date {
+            panic_with_error!(&env, PrinceError::PayoutLocked);
+        }
+
+        let amount = vault.amount;
+        
+        // Effects: Delete the vault before interaction (Check-Effects-Interactions)
+        env.storage().persistent().remove(&vault_key);
+
+        // Interaction: Transfer funds to the owner
+        let token_addr = Self::get_token(&env);
+        let token_client = token::Client::new(&env, &token_addr);
+        token_client.transfer(&env.current_contract_address(), &owner, &amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "VeryPrince"), Symbol::new(&env, "VaultClaimed")),
+            (owner, amount, maturity_date),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Priority Queue (Sorted Linked List)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Insert a value into a sorted priority queue.
+    ///
+    /// Requires the caller to provide the intended insertion point (prev/next).
+    /// Insertion is O(1) storage read/write.
+    pub fn list_insert(
+        env: Env,
+        list_id: Symbol,
+        value: Address,
+        priority: i128,
+        prev_id: Option<u64>,
+        next_id: Option<u64>,
+    ) -> u64 {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        linked_list::SortedList::insert(&env, list_id, value, priority, prev_id, next_id)
+    }
+
+    /// Remove a node from a priority queue.
+    ///
+    /// Removal is O(1) storage read/write.
+    pub fn list_remove(env: Env, list_id: Symbol, node_id: u64) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+        linked_list::SortedList::remove(&env, list_id, node_id)
+    }
+
+    /// Fetch a page of nodes from a priority queue starting from `start_id`.
+    ///
+    /// Traversal is capped at 50 nodes to prevent CPU exhaustion.
+    pub fn list_get_page(
+        env: Env,
+        list_id: Symbol,
+        start_id: Option<u64>,
+        limit: u32,
+    ) -> soroban_sdk::Vec<linked_list::ListNode> {
+        Self::assert_active(&env);
+        linked_list::SortedList::get_page(&env, list_id, start_id, limit)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Flash Loan Module
+    //
+    // Intra-transaction, zero-collateral borrowing of the vault's fractional
+    // liquidity, secured entirely by a deterministic post-execution balance
+    // invariant:
+    //
+    //   balance_after >= balance_before + fee
+    //
+    // The protocol admin can configure the fee in basis points via
+    // `set_flash_loan_fee`. The default fee is 30 bps (0.30%).
+    //
+    // Execution flow:
+    //   1. Cache `balance_before` (contract's token balance).
+    //   2. Compute `fee = ceil(amount * fee_bps / 10_000)`.
+    //   3. Transfer `amount` tokens to `receiver` (interaction #1).
+    //   4. Invoke `receiver.execute_flash_loan(amount, fee, data)` via
+    //      `env.invoke_contract`. The borrower MUST repay `amount + fee` to
+    //      this contract address before returning.
+    //   5. Read `balance_after` (contract's token balance).
+    //   6. Assert `balance_after >= balance_before + fee`. If violated, the
+    //      entire transaction panics and reverts — the token transfer in step 3
+    //      and every side-effect inside the callback are atomically undone.
+    //   7. Emit a `FlashLoan` event crediting the fee to existing depositors.
+    //
+    // Security notes:
+    //   - The reentrancy guard prevents callbacks from re-entering this
+    //     contract while the flash loan is in flight.
+    //   - Balance checks use the SAC `balance()` function, not local state,
+    //     so they cannot be spoofed by manipulating contract storage.
+    //   - Fee math uses `checked_add`/`checked_mul` to prevent overflow.
+    //   - The `amount` is validated: must be > 0, <= MAX_AMOUNT_LIMIT, and
+    //     <= the contract's available liquidity before disbursement.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Set the flash loan fee in basis points (1 bps = 0.01%).
+    ///
+    /// # Arguments
+    /// * `env`     - The contract environment.
+    /// * `admin`   - Protocol admin address (must match stored admin).
+    /// * `fee_bps` - Fee in basis points. Typical value: 30 (= 0.30%).
+    ///
+    /// # Panics
+    /// * `NotAuthorized`        - If `admin` is not the protocol admin.
+    /// * `InvalidAmount`        - If `fee_bps` is 0 or exceeds 1000 (10%).
+    /// * `ContractNotInitialized` - If the contract has not been initialized.
+    pub fn set_flash_loan_fee(env: Env, admin: Address, fee_bps: u32) {
+        let _guard = ReentrancyGuard::acquire(&env);
+        if admin != Self::get_protocol_admin(&env) {
+            panic_with_error!(&env, PrinceError::NotAuthorized);
+        }
+        admin.require_auth_for_args((fee_bps,).into_val(&env));
+
+        // Guard against a 0-fee (free loans) or an unreasonably high fee (>10%).
+        if fee_bps == 0 || fee_bps > 1000 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::FlashLoanFeeBps, &fee_bps);
+        env.storage().persistent().extend_ttl(
+            &DataKey::FlashLoanFeeBps,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "FlashLoanFeeSet"),
+            ),
+            (admin, fee_bps),
+        );
+    }
+
+    /// Return the currently configured flash loan fee in basis points.
+    /// Defaults to 30 bps (0.30%) if never explicitly set.
+    pub fn get_flash_loan_fee(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FlashLoanFeeBps)
+            .unwrap_or(30u32)
+    }
+
+    /// Execute a flash loan.
+    ///
+    /// Lends `amount` tokens to `receiver`, invokes
+    /// `receiver.execute_flash_loan(amount, fee, data)`, then asserts the
+    /// strict post-execution balance invariant
+    /// `balance_after >= balance_before + fee`. Any violation causes an
+    /// uncatchable panic that atomically reverts the entire transaction.
+    ///
+    /// # Arguments
+    /// * `env`      - The contract environment.
+    /// * `receiver` - Address of the borrower contract that must implement
+    ///                `execute_flash_loan(amount: i128, fee: i128, data: Vec<Val>)`.
+    /// * `amount`   - Number of tokens to borrow (in stroops).
+    /// * `data`     - Arbitrary caller-supplied data forwarded verbatim to the
+    ///                callback. Useful for passing swap routes or identifiers.
+    ///
+    /// # Panics
+    /// * `ProtocolPaused`                 - If the protocol is paused.
+    /// * `InvalidAmount`                  - If `amount` is ≤ 0 or > MAX_AMOUNT_LIMIT.
+    /// * `FlashLoanInsufficientLiquidity` - If the contract holds fewer tokens
+    ///                                      than requested.
+    /// * `FlashLoanRepaymentFailed`       - If `balance_after < balance_before + fee`
+    ///                                      after the callback returns.
+    pub fn flash_loan(
+        env: Env,
+        receiver: Address,
+        amount: i128,
+        data: soroban_sdk::Vec<soroban_sdk::Val>,
+    ) {
+        // ── 0. Guards ────────────────────────────────────────────────────────
+        let _guard = ReentrancyGuard::acquire(&env);
+        Self::assert_active(&env);
+
+        if amount <= 0 {
+            panic_with_error!(&env, PrinceError::InvalidAmount);
+        }
+        if amount > MAX_AMOUNT_LIMIT {
+            panic_with_error!(&env, PrinceError::AmountExceedsLimit);
+        }
+
+        // ── 1. Read pre-execution vault balance ──────────────────────────────
+        // Read directly from the SAC — immune to storage manipulation.
+        let token_addr = Self::get_token(env.clone());
+        let contract_addr = env.current_contract_address();
+
+        let balance_before = token_interface::sac_balance(&env, &token_addr, &contract_addr);
+
+        // Ensure we actually have enough liquidity to lend.
+        if amount > balance_before {
+            panic_with_error!(&env, PrinceError::FlashLoanInsufficientLiquidity);
+        }
+
+        // ── 2. Compute fee = ceil(amount * fee_bps / 10_000) ────────────────
+        let fee_bps = Self::get_flash_loan_fee(env.clone()) as i128;
+        // Use ceiling division so even tiny amounts always incur at least 1
+        // stroop of fee when fee_bps > 0.
+        let fee = amount
+            .checked_mul(fee_bps)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow))
+            .checked_add(9_999)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow))
+            / 10_000;
+
+        // Minimum repayment that satisfies the invariant.
+        let required_repayment = amount
+            .checked_add(fee)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+
+        // ── 3. Disburse loan to receiver ─────────────────────────────────────
+        token_interface::sac_transfer(&env, &token_addr, &contract_addr, &receiver, &amount);
+
+        // ── 4. Invoke borrower callback ──────────────────────────────────────
+        // The callback must repay `amount + fee` to `contract_addr` before
+        // returning. Any failure inside the callback propagates as a panic and
+        // reverts the transfer above along with every side-effect.
+        env.invoke_contract::<()>(
+            &receiver,
+            &Symbol::new(&env, "execute_flash_loan"),
+            (amount, fee, data).into_val(&env),
+        );
+
+        // ── 5. Read post-execution vault balance ─────────────────────────────
+        let balance_after = token_interface::sac_balance(&env, &token_addr, &contract_addr);
+
+        // ── 6. Enforce strict balance invariant ──────────────────────────────
+        // balance_after must be at least balance_before + fee (the principal
+        // was returned plus a fee for fractional asset holders).
+        let min_expected = balance_before
+            .checked_add(fee)
+            .unwrap_or_else(|| panic_with_error!(&env, PrinceError::BudgetOverflow));
+
+        if balance_after < min_expected {
+            // This panic is uncatchable — Soroban unwinds the entire call
+            // stack, atomically reverting the disbursement and every
+            // state mutation the callback performed.
+            panic_with_error!(&env, PrinceError::FlashLoanRepaymentFailed);
+        }
+
+        // ── 7. Emit event ────────────────────────────────────────────────────
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "FlashLoan"),
+            ),
+            (receiver, amount, fee, required_repayment),
+    // Capability Tokens — Issue #478
+    //
+    // Single-use, ledger-scoped capability tokens that flatten multi-hop
+    // cross-contract authorization hierarchies.  A DAO issues one token at
+    // the entry point; every downstream contract validates it at the deepest
+    // layer instead of calling require_auth at each hop.
+    //
+    // Security properties:
+    //   * Deterministic: derived from (caller, action, seq, expiry) via SHA-256.
+    //   * Ledger-scoped: expiry_ledger = current_seq + 1 → invalid after ledger
+    //     close.  Stolen tokens cannot be used in subsequent ledgers.
+    //   * Single-use: consumed-flag in temporary storage (TTL = 1 ledger)
+    //     blocks replay within the same ledger.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Issue a single-use capability token for `caller` scoped to `action_tag`.
+    ///
+    /// The token encodes the current ledger sequence and expires at
+    /// `expiry_ledger`.  Use `env.ledger().sequence() + 1` for a tight
+    /// single-ledger token.
+    ///
+    /// # Returns
+    /// A 32-byte deterministic capability hash (`BytesN<32>`).
+    ///
+    /// # Panics
+    /// * `InvalidAmount` — if `expiry_ledger <= env.ledger().sequence()`.
+    pub fn issue_capability(
+        env: Env,
+        caller: Address,
+        action_tag: Symbol,
+        expiry_ledger: u32,
+    ) -> BytesN<32> {
+        // The caller must authorise the issuance so third parties cannot
+        // issue tokens on behalf of others.
+        caller.require_auth_for_args(
+            (caller.clone(), action_tag.clone(), expiry_ledger).into_val(&env),
+        );
+        capability_token::issue_capability(&env, &caller, &action_tag, expiry_ledger)
+    }
+
+    /// Validate and consume a capability token previously issued by
+    /// `issue_capability`.
+    ///
+    /// Performs hash re-derivation, expiry check, and single-use guard in
+    /// order.  On success, marks the token consumed for the remainder of this
+    /// ledger so it cannot be replayed.
+    ///
+    /// # Panics
+    /// * `NotAuthorized` — hash mismatch or token expired.
+    /// * `Reentrancy`    — token already consumed this ledger (replay attempt).
+    pub fn validate_capability(
+        env: Env,
+        token: BytesN<32>,
+        caller: Address,
+        action_tag: Symbol,
+        issued_at_sequence: u32,
+        expiry_ledger: u32,
+    ) {
+        capability_token::validate_and_consume_capability(
+            &env,
+            &token,
+            &caller,
+            &action_tag,
+            issued_at_sequence,
+            expiry_ledger,
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "VeryPrince"),
+                Symbol::new(&env, "CapabilityConsumed"),
+            ),
+            (caller, action_tag, expiry_ledger),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Private helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn trusted_header_key(env: &Env, chain_id: u32) -> (Symbol, u32) {
+        (Symbol::new(env, "cc_root"), chain_id)
+    }
+}
+
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod bls_tests;
+#[cfg(test)]
+mod vault_tests;
+#[cfg(test)]
+mod list_tests;
+mod list_tests;
+#[cfg(test)]
+mod flash_loan_tests;

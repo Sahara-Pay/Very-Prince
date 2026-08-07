@@ -13,6 +13,7 @@ import {
   type WebhookJobData,
 } from "../schemas/webhookJobSchemas.js";
 import { bullRedisConnection } from "./cache.js";
+import { logger } from "../utils/logger.js";
 
 export type { WebhookJobData } from "../schemas/webhookJobSchemas.js";
 
@@ -76,6 +77,7 @@ export class WebhookService {
 
     const newSecret = this.generateWebhookSecret();
     await webhookRepository.upsertConfig(organizationId, existingConfig?.url || "", newSecret);
+    logger.info({ organizationId }, "Generated new webhook signing secret");
     return newSecret;
   }
 
@@ -106,6 +108,7 @@ export class WebhookService {
   async queueWebhook(organizationId: string, event: string, data: WebhookEventData) {
     const config = await webhookRepository.getConfig(organizationId);
     if (!config || !config.url) {
+      logger.debug({ organizationId, event }, "Skipping webhook dispatch, no webhook configured");
       return;
     }
 
@@ -115,18 +118,30 @@ export class WebhookService {
       data,
     });
 
-    if (WEBHOOK_QUEUE_PROVIDER === "sqs") {
-      await this.enqueueSqsWebhook(jobData);
-      return;
-    }
+    try {
+      if (WEBHOOK_QUEUE_PROVIDER === "sqs") {
+        await this.enqueueSqsWebhook(jobData);
+      } else {
+        if (!this.webhookQueue) {
+          throw new Error("BullMQ webhook queue is not initialized");
+        }
 
-    if (!this.webhookQueue) {
-      throw new Error("BullMQ webhook queue is not initialized");
-    }
+        await this.webhookQueue.add(`webhook:${event}:${organizationId}`, {
+          ...jobData,
+        });
+      }
 
-    await this.webhookQueue.add(`webhook:${event}:${organizationId}`, {
-      ...jobData,
-    });
+      logger.info(
+        { organizationId, event, provider: WEBHOOK_QUEUE_PROVIDER },
+        "Webhook queued for dispatch"
+      );
+    } catch (error) {
+      logger.error(
+        { err: error, organizationId, event, provider: WEBHOOK_QUEUE_PROVIDER },
+        "Failed to queue webhook for dispatch"
+      );
+      throw error;
+    }
   }
 
   private async enqueueSqsWebhook(jobData: WebhookJobData): Promise<void> {

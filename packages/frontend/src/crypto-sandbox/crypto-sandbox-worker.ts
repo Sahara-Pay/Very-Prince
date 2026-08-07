@@ -309,7 +309,7 @@ declare const self: SandboxWorkerSelf | undefined;
 /** Structural stand-in for `DedicatedWorkerGlobalScope` (no webworker lib needed). */
 type DedicatedWorkerGlobalScopeLike = SandboxWorkerSelf;
 
-const globalWorkerScope = (globalThis as {
+const globalWorkerScope = (globalThis as unknown as {
   WorkerGlobalScope?: { prototype: DedicatedWorkerGlobalScopeLike };
 }).WorkerGlobalScope;
 

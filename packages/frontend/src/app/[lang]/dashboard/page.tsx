@@ -4,6 +4,7 @@ import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { WalletButton } from "@/components/WalletButton";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { FundingDependencyGraph } from "@/components/FundingDependencyGraph";
 import { useFreighter } from "@/hooks/useFreighter";
 import { Locale } from "@/lib/i18n";
 import { getDictionary } from "@/lib/getDictionary";
@@ -129,6 +130,11 @@ function DashboardPageInner({ dictionary, lang }: { dictionary: Dictionary; lang
                 {error}
               </div>
             )}
+          </div>
+
+          {/* 2D Dependency Graph of Organization Funding */}
+          <div className="mt-8">
+            <FundingDependencyGraph initialNodeCount={500} initialEdgeCount={10000} />
           </div>
 
           {/* Placeholder for dashboard content */}

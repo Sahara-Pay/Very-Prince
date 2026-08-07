@@ -49,7 +49,8 @@ export const eventsRoutes: FastifyPluginAsync = async (fastify) => {
       const heartbeat = setInterval(() => {
         try {
           reply.raw.write('event: heartbeat\ndata: ' + JSON.stringify({ timestamp: Date.now() }) + '\n\n');
-        } catch {
+        } catch (error) {
+          request.log.debug({ err: error }, 'SSE heartbeat write failed, closing connection');
           clearInterval(heartbeat);
           removeSSEConnection(reply.raw);
         }

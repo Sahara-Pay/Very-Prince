@@ -16,6 +16,17 @@ pipeline {
         REGISTRY              = 'ghcr.io/bridgetthnkechi87-cloud'
         BACKEND_IMAGE         = "${REGISTRY}/very-prince-backend"
         FRONTEND_IMAGE        = "${REGISTRY}/very-prince-frontend"
+        // The Dockerfiles consume these verbatim in `turbo run build`.
+        // `...` includes each deployable package's workspace dependencies.
+        // Defaults are used when the changeset-detection step falls back to
+        // a full build (e.g. first run, no merge base, infra-only changes).
+        BACKEND_TURBO_FILTER  = '--filter=@very-prince/backend...'
+        FRONTEND_TURBO_FILTER = '--filter=@very-prince/frontend...'
+        // Workspace package names whose Dockerfiles should be considered
+        // deployable images. The changeset-detection step maps changed
+        // package paths to this set so the pipeline only builds Docker
+        // images for packages that actually changed.
+        DEPLOYABLE_PACKAGES   = 'backend,frontend'
         // ─── BuildKit ──────────────────────────────────────────────────
         // Enable BuildKit for the legacy `docker build` command and export
         // it so the docker CLI default builder also picks it up. The
@@ -43,105 +54,144 @@ pipeline {
         stage('Setup') {
             steps {
                 script {
+                    lib.crossPlatformSh     = load('jenkins-shared-library/vars/crossPlatformSh.groovy')
+                    lib.dockerBuildImage     = load('jenkins-shared-library/vars/dockerBuildImage.groovy')
                     lib.tfSetup             = load('jenkins-shared-library/vars/tfSetup.groovy')
                     lib.tfInit              = load('jenkins-shared-library/vars/tfInit.groovy')
                     lib.tfVerifyBackendLock = load('jenkins-shared-library/vars/tfVerifyBackendLock.groovy')
                     lib.tfValidate          = load('jenkins-shared-library/vars/tfValidate.groovy')
                     lib.tfPlan              = load('jenkins-shared-library/vars/tfPlan.groovy')
                     lib.tfApply             = load('jenkins-shared-library/vars/tfApply.groovy')
-                    lib.dockerBuildImage    = load('jenkins-shared-library/vars/dockerBuildImage.groovy')
-                    lib.trivyScanImage      = load('jenkins-shared-library/vars/trivyScanImage.groovy')
-
-                    lib.tfSetup(tools: ['terraform', 'aws', 'docker', 'trivy'])
+                    lib.tfSetup(tools: ['terraform', 'aws', 'docker', 'trivy', 'turbo'])
                 }
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Detect Changed Packages') {
+            // Determine which deployable packages have changed vs the merge
+            // base (or origin/main if no merge base). We map changed file
+            // paths to workspace package names by prefix, then intersect
+            // with DEPLOYABLE_PACKAGES. Only those packages get Docker
+            // images built.
+            //
+            // The diff itself is run cross-platform via `crossPlatformSh`;
+            // the per-line parsing into package names happens in Groovy so
+            // the same code path runs on Unix and Windows.
             steps {
                 script {
-                    lib.dockerBuildImage(
-                        dockerfile: 'packages/backend/Dockerfile',
-                        imageName: env.DOCKER_IMAGE,
-                        tag: env.BUILD_NUMBER
-                    )
-        stage('Build & Push Images') {
-            // Run backend and frontend builds in parallel to reduce wall time.
-            // Each branch uses the platform-appropriate shell (sh vs bat).
-            parallel {
-                stage('Backend') {
-                    steps {
-                        script {
-                            if (isUnix()) {
-                                sh '''
-                                    set -euo pipefail
-                                    docker buildx build \
-                                      --file packages/backend/Dockerfile \
-                                      --tag ${BACKEND_IMAGE}:${BUILD_NUMBER} \
-                                      --tag ${BACKEND_IMAGE}:latest \
-                                      --cache-from=type=registry,ref=${BUILDKIT_CACHE_REF_BACKEND} \
-                                      --cache-to=type=registry,ref=${BUILDKIT_CACHE_REF_BACKEND},mode=max \
-                                      --push \
-                                      .
-                                '''
-                            } else {
-                                bat '''
-                                    docker buildx build ^
-                                      --file packages\\backend\\Dockerfile ^
-                                      --tag %BACKEND_IMAGE%:%BUILD_NUMBER% ^
-                                      --tag %BACKEND_IMAGE%:latest ^
-                                      --cache-from=type=registry,ref=%BUILDKIT_CACHE_REF_BACKEND% ^
-                                      --cache-to=type=registry,ref=%BUILDKIT_CACHE_REF_BACKEND%,mode=max ^
-                                      --push ^
-                                      .
-                                '''
+                    // Get the merge base as a short SHA
+                    def mergeBase = ''
+                    if (isUnix()) {
+                        mergeBase = sh(
+                            script: 'git merge-base HEAD origin/main 2>/dev/null || git rev-parse origin/main',
+                            returnStdout: true
+                        ).trim()
+                    } else {
+                        mergeBase = bat(
+                            script: '@echo off && for /f "delims=" %%i in (\'git merge-base HEAD origin/main 2^>nul\') do @echo %%i || for /f "delims=" %%i in (\'git rev-parse origin/main\') do @echo %%i',
+                            returnStdout: true
+                        ).trim()
+                    }
+                    // List changed file paths relative to the merge base
+                    def changedFiles = ''
+                    if (isUnix()) {
+                        changedFiles = sh(
+                            script: "git diff --name-only ${mergeBase} 2>/dev/null || true",
+                            returnStdout: true
+                        ).trim()
+                    } else {
+                        changedFiles = bat(
+                            script: "@echo off && git diff --name-only ${mergeBase} 2>nul",
+                            returnStdout: true
+                        ).trim()
+                    }
+                    // Parse in Groovy: extract unique `packages/<name>/...` segments
+                    def pkgSet = [] as Set
+                    changedFiles.split('\n').each { line ->
+                        def trimmed = line.replace('\\', '/').trim()
+                        if (trimmed.startsWith('packages/')) {
+                            def parts = trimmed.split('/')
+                            if (parts.length >= 2) {
+                                pkgSet << parts[1]
                             }
                         }
                     }
+                    def changedPackages = pkgSet.sort().join('\n')
+                    env.CHANGED_PACKAGES = changedPackages
+                    echo "Changed packages: ${changedPackages}"
                 }
+            }
+        }
 
-                stage('Frontend') {
-                    steps {
-                        script {
-                            if (isUnix()) {
-                                sh '''
+        stage('Build & Push Images') {
+            // Build Docker images only for deployable packages that changed.
+            // Uses dynamic parallel branches keyed by package name.
+            //
+            // Cross-platform: uses `crossPlatformSh` (from the shared library)
+            // for consistent sh/bat dispatch. On Windows, `docker buildx`
+            // is available natively (no WSL).
+            steps {
+                script {
+                    def deployable = env.DEPLOYABLE_PACKAGES.split(',').collect { it.trim() }
+                    def changed = env.CHANGED_PACKAGES.split('\n').collect { it.trim() }.findAll { it }
+                    def toBuild = deployable.intersect(changed)
+                    
+                    if (!toBuild) {
+                        echo 'No deployable packages changed; skipping Docker builds'
+                        env.SKIP_DOCKER_BUILD = 'true'
+                        return
+                    }
+                    
+                    def parallelStages = [:]
+                    toBuild.each { pkg ->
+                        parallelStages["${pkg}"] = {
+                            def dockerfile = "packages/${pkg}/Dockerfile"
+                            def image = (pkg == 'backend') ? env.BACKEND_IMAGE : env.FRONTEND_IMAGE
+                            def turboFilter = (pkg == 'backend') ? env.BACKEND_TURBO_FILTER : env.FRONTEND_TURBO_FILTER
+                            def cacheRef = (pkg == 'backend') ? env.BUILDKIT_CACHE_REF_BACKEND : env.BUILDKIT_CACHE_REF_FRONTEND
+                            def tag = env.BUILD_NUMBER
+
+                            // Use crossPlatformSh for consistent sh/bat dispatch
+                            lib.crossPlatformSh(
+                                sh: '''
                                     set -euo pipefail
                                     docker buildx build \
-                                      --file packages/frontend/Dockerfile \
-                                      --tag ${FRONTEND_IMAGE}:${BUILD_NUMBER} \
-                                      --tag ${FRONTEND_IMAGE}:latest \
-                                      --cache-from=type=registry,ref=${BUILDKIT_CACHE_REF_FRONTEND} \
-                                      --cache-to=type=registry,ref=${BUILDKIT_CACHE_REF_FRONTEND},mode=max \
+                                      --file ''' + dockerfile + ''' \
+                                      --build-arg TURBO_FILTER="''' + turboFilter + '"' + ''' \
+                                      --tag ''' + image + ':' + tag + ''' \
+                                      --tag ''' + image + ':latest' + ''' \
+                                      --cache-from=type=registry,ref=''' + cacheRef + ''' \
+                                      --cache-to=type=registry,ref=''' + cacheRef + ''',mode=max \
                                       --push \
                                       .
-                                '''
-                            } else {
-                                bat '''
+                                ''',
+                                bat: '''
                                     docker buildx build ^
-                                      --file packages\\frontend\\Dockerfile ^
-                                      --tag %FRONTEND_IMAGE%:%BUILD_NUMBER% ^
-                                      --tag %FRONTEND_IMAGE%:latest ^
-                                      --cache-from=type=registry,ref=%BUILDKIT_CACHE_REF_FRONTEND% ^
-                                      --cache-to=type=registry,ref=%BUILDKIT_CACHE_REF_FRONTEND%,mode=max ^
+                                      --file ''' + dockerfile.replace('/', '\\') + ''' ^
+                                      --build-arg TURBO_FILTER="''' + turboFilter + '"' + ''' ^
+                                      --tag ''' + image + ':%BUILD_NUMBER%' + ''' ^
+                                      --tag ''' + image + ':latest' + ''' ^
+                                      --cache-from=type=registry,ref=''' + cacheRef + ''' ^
+                                      --cache-to=type=registry,ref=''' + cacheRef + ''',mode=max ^
                                       --push ^
                                       .
                                 '''
-                            }
+                            )
                         }
                     }
+                    parallel parallelStages
                 }
             }
         }
 
         stage('Scan Backend Image') {
             // Security gate: scan the backend image for HIGH/CRITICAL CVEs.
-            // The frontend is not scanned here; add a parallel stage if needed.
+            // Only runs if the backend image was actually built.
+            when {
+                expression { env.SKIP_DOCKER_BUILD != 'true' && env.CHANGED_PACKAGES.contains('backend') }
+            }
             steps {
                 script {
-                    lib.trivyScanImage(
-                        imageName: env.DOCKER_IMAGE,
-                        tag: env.BUILD_NUMBER
-                    )
                     if (isUnix()) {
                         sh '''
                             trivy image --exit-code 1 --severity HIGH,CRITICAL ${BACKEND_IMAGE}:${BUILD_NUMBER}

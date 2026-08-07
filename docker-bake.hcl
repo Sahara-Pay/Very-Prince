@@ -6,8 +6,26 @@ variable "REGISTRY" {
   default = "ghcr.io/bridgetthnkechi87-cloud"
 }
 
+variable "TURBO_FILTER" {
+  default = ""
+  description = "Optional Turborepo filter (e.g. '--filter=@very-prince/backend...'). Passed as --build-arg to Dockerfiles."
+}
+
+variable "LOCAL_CACHE_DIR" {
+  default = "/tmp/buildkit-cache"
+  description = "Local directory for BuildKit cache storage mounts"
+}
+
 group "default" {
   targets = ["backend", "frontend"]
+}
+
+group "distroless" {
+  targets = ["backend-distroless", "frontend-distroless"]
+}
+
+group "alpine" {
+  targets = ["backend-alpine", "frontend-alpine"]
 }
 
 target "backend" {
@@ -19,9 +37,22 @@ target "backend" {
   //   BUILDKIT_CACHE_REF_BACKEND  = "${REGISTRY}/very-prince-backend:buildcache"
   //   BUILDKIT_CACHE_REF_FRONTEND = "${REGISTRY}/very-prince-frontend:buildcache"
   // Override with: docker buildx bake --set *.cache-from=... --set *.cache-to=...
-  cache-from = ["type=registry,ref=${REGISTRY}/very-prince-backend:buildcache"]
-  cache-to   = ["type=registry,ref=${REGISTRY}/very-prince-backend:buildcache,mode=max"]
+  // Local cache storage mount for faster parallel builds
+  cache-from = [
+    "type=local,src=${LOCAL_CACHE_DIR}/backend",
+    "type=registry,ref=${REGISTRY}/very-prince-backend:buildcache"
+  ]
+  cache-to   = [
+    "type=local,dest=${LOCAL_CACHE_DIR}/backend,mode=max",
+    "type=registry,ref=${REGISTRY}/very-prince-backend:buildcache,mode=max"
+  ]
   output     = ["type=registry"]
+  // TURBO_FILTER is passed as --build-arg so the Dockerfile's turbo runs
+  // only build the target workspace + its deps (matches Jenkins behavior).
+  // Override at build time: docker buildx bake --set "backend.args.TURBO_FILTER=--filter=@very-prince/backend..."
+  args = {
+    TURBO_FILTER = "${TURBO_FILTER}"
+  }
 }
 
 target "frontend" {
@@ -29,29 +60,89 @@ target "frontend" {
   dockerfile = "packages/frontend/Dockerfile"
   platforms  = ["linux/amd64", "linux/arm64"]
   tags       = ["${REGISTRY}/very-prince-frontend:${TAG}"]
-  cache-from = ["type=registry,ref=${REGISTRY}/very-prince-frontend:buildcache"]
-  cache-to   = ["type=registry,ref=${REGISTRY}/very-prince-frontend:buildcache,mode=max"]
+  // Local cache storage mount for faster parallel builds
+  cache-from = [
+    "type=local,src=${LOCAL_CACHE_DIR}/frontend",
+    "type=registry,ref=${REGISTRY}/very-prince-frontend:buildcache"
+  ]
+  cache-to   = [
+    "type=local,dest=${LOCAL_CACHE_DIR}/frontend,mode=max",
+    "type=registry,ref=${REGISTRY}/very-prince-frontend:buildcache,mode=max"
+  ]
   output     = ["type=registry"]
+  args = {
+    TURBO_FILTER = "${TURBO_FILTER}"
+  }
+}
+
+// Alpine variants (smaller size, includes shell for debugging)
+target "backend-alpine" {
+  inherits   = ["backend"]
+  dockerfile = "packages/backend/Dockerfile"
+  target     = "runner-alpine"
+  tags       = ["${REGISTRY}/very-prince-backend:${TAG}-alpine"]
+}
+
+target "frontend-alpine" {
+  inherits   = ["frontend"]
+  dockerfile = "packages/frontend/Dockerfile"
+  target     = "runner-alpine"
+  tags       = ["${REGISTRY}/very-prince-frontend:${TAG}-alpine"]
+}
+
+// Distroless variants (minimal attack surface, no shell)
+target "backend-distroless" {
+  inherits   = ["backend"]
+  dockerfile = "packages/backend/Dockerfile"
+  target     = "runner"
+  tags       = ["${REGISTRY}/very-prince-backend:${TAG}-distroless"]
+}
+
+target "frontend-distroless" {
+  inherits   = ["frontend"]
+  dockerfile = "packages/frontend/Dockerfile"
+  target     = "runner"
+  tags       = ["${REGISTRY}/very-prince-frontend:${TAG}-distroless"]
 }
 
 // Usage examples (run from repo root):
 //
-// 1. Local build with default cache (pushes to registry, requires auth):
+// 1. Build default (Distroless) multi-platform images:
 //    docker buildx bake
 //
-// 2. Local build without pushing (load into local Docker daemon):
+// 2. Build Alpine variants (includes shell for debugging):
+//    docker buildx bake alpine
+//
+// 3. Build Distroless variants (minimal attack surface, no shell):
+//    docker buildx bake distroless
+//
+// 4. Local build without pushing (load into local Docker daemon):
 //    docker buildx bake --set "*.output=type=docker"
 //
-// 3. Override tag:
+// 5. Override tag:
 //    docker buildx bake --set "*.tags=myregistry/very-prince-backend:v1.2.3"
 //
-// 4. Disable registry cache (use local BuildKit cache only):
+// 6. Disable registry cache (use local BuildKit cache only):
 //    docker buildx bake --set "*.cache-from=[]" --set "*.cache-to=[]"
 //
-// 5. Build only backend:
+// 7. Build only backend:
 //    docker buildx bake backend
 //
+// 8. Build with Turborepo filter (matches Jenkins dynamic behavior):
+//    docker buildx bake --set "*.args.TURBO_FILTER=--filter=@very-prince/backend..." backend
+//    docker buildx bake --set "*.args.TURBO_FILTER=--filter=@very-prince/frontend..." frontend
+//
+// 9. Build specific platform:
+//    docker buildx bake --set "*.platforms=linux/amd64" backend
+//
+// 10. Use custom local cache directory:
+//     docker buildx bake --set LOCAL_CACHE_DIR=/my/custom/cache
+//
 // Notes:
+// - Multi-platform builds (linux/amd64, linux/arm64) are enabled by default.
+// - Local cache storage mounts provide faster parallel builds by avoiding network round-trips.
+// - Registry cache is used as a fallback for distributed builds across multiple machines.
+// - Distroless images have no shell - use Alpine variants if debugging access is needed.
 // - The registry cache refs must be accessible from the build host.
 // - For CI (Jenkins), the Jenkinsfile uses the same refs but with
 //   BUILDKIT_CACHE_REF_BACKEND/FRONTEND environment variables.

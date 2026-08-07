@@ -1,3 +1,24 @@
+/**
+ * @file index.ts
+ * @description Fastify server entry point for the Very-prince backend.
+ *
+ * This file is responsible for:
+ *  1. Creating the Fastify instance with sensible defaults.
+ *  2. Registering plugins (CORS, Helmet, etc.).
+ *  3. Mounting route plugins under versioned prefixes.
+ *  4. Starting the HTTP server.
+ *
+ * ## Architecture
+ *
+ * ```
+ * index.ts (bootstrap)
+ *   └─ routes/contract.ts (route plugin)
+ *       └─ controllers/contractController.ts (business logic)
+ *           └─ services/stellarService.ts (Stellar SDK + Soroban RPC)
+ *               └─ config/env.ts (environment)
+ * ```
+ */
+
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
@@ -17,12 +38,16 @@ import { webhookRoutes } from './routes/webhook.js';
 import { apiKeyRoutes } from './routes/apiKeys.js';
 import { exportRoutes } from './routes/export.js';
 import { analyticsRoutes } from './routes/analytics.js';
+import { rateLimitRoutes } from './routes/rateLimit.js';
 import { indexerService } from './services/indexerService.js';
 import { notificationController } from './controllers/notificationController.js';
 import { configureTRPC } from './trpc/server.js';
 import { createUwsGateway } from './ws/uwsGateway.js';
 import { webhookWorker } from './workers/WebhookWorker.js';
 import { claimSagaService } from './services/claimSagaService.js';
+import { redisStreamsConsumer } from './services/redisStreams.js';
+import { evictionEngine } from './services/probabilisticEviction.js';
+import { diagnosticMonitor, diagnosticRoutes } from './services/diagnosticMonitor.js';
 import * as cron from 'node-cron';
 import * as Sentry from '@sentry/node';
 import { nodeProfilingIntegration } from '@sentry/profiling-node';
@@ -41,6 +66,11 @@ const server = Fastify({
     level: process.env['NODE_ENV'] === 'production' ? 'warn' : 'info',
     transport: process.env['NODE_ENV'] !== 'production' ? { target: 'pino-pretty', options: { colorize: true } } : undefined,
   } as any,
+  // The tRPC httpBatchLink joins multiple procedure names into the
+  // /trpc/:path route param (comma-separated). The router's default
+  // maxParamLength (100) is too small for realistic batches and would
+  // 414 them before the query complexity analyzer ever runs.
+  maxParamLength: 2000,
 });
 
 await server.register(helmet, { contentSecurityPolicy: false });
@@ -101,6 +131,8 @@ await server.register(webhookRoutes, { prefix: '/api/org/:orgId/webhook' });
 await server.register(apiKeyRoutes, { prefix: '/api/org' });
 await server.register(exportRoutes, { prefix: '/api/export' });
 await server.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
+await server.register(rateLimitRoutes, { prefix: '/api/v1' });
+await server.register(diagnosticRoutes, { prefix: '/api/v1' });
 
 await configureTRPC(server);
 
@@ -162,6 +194,8 @@ let recoveryJob: cron.ScheduledTask | null = null;
 try {
   await server.listen({ port: SERVER_PORT, host: SERVER_HOST });
   server.log.info('Very-prince backend listening on http://' + SERVER_HOST + ':' + SERVER_PORT);
+  await redisStreamsConsumer.start();
+  diagnosticMonitor.start();
   indexerService.start();
 
   // Start the Saga recovery worker to check for stalled/timed out transactions every minute
@@ -185,9 +219,15 @@ try {
       recoveryJob = null;
     }
     indexerService.stop();
+    await redisStreamsConsumer.stop();
+    diagnosticMonitor.stop();
     await webhookWorker.stop();
+    evictionEngine.destroy();
     uwsApp.close();
-    server.close(() => { server.log.info('Server closed'); process.exit(0); });
+    server.close(() => {
+      server.log.info('Server closed');
+      process.exit(0);
+    });
   };
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));

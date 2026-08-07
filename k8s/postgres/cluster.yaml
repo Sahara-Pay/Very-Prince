@@ -1,7 +1,159 @@
+---
+# CloudNativePG Cluster – Very-Prince PostgreSQL HA
+# Requires: CloudNativePG operator v1.23+  (kubectl apply -f
+#   https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.23/releases/cnpg-1.23.0.yaml)
+#
+# Topology: 1 primary  +  2 hot-standby replicas (streaming replication)
+# Failover: automatic, target RTO ≤ 10 s
+
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
   name: very-prince-pg
+  namespace: very-prince
+  labels:
+    app.kubernetes.io/name: very-prince-pg
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: very-prince
+spec:
+  # -----------------------------------------------------------------------
+  # Instances & image
+  # -----------------------------------------------------------------------
+  instances: 3            # 1 primary + 2 standbys
+
+  imageName: ghcr.io/cloudnative-pg/postgresql:15.6
+
+  # -----------------------------------------------------------------------
+  # Bootstrap – create the application database and user
+  # -----------------------------------------------------------------------
+  bootstrap:
+    initdb:
+      database: very_prince
+      owner: very_prince_app
+      secret:
+        name: very-prince-pg-app-secret   # key: username / password
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+        - CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+  # -----------------------------------------------------------------------
+  # Superuser credentials (postgres user)
+  # -----------------------------------------------------------------------
+  superuserSecret:
+    name: very-prince-pg-superuser-secret  # key: username / password
+
+  # -----------------------------------------------------------------------
+  # Storage
+  # -----------------------------------------------------------------------
+  storage:
+    size: 20Gi
+    storageClass: standard          # replace with your SC (e.g. gp3, local-path)
+
+  walStorage:
+    size: 5Gi
+    storageClass: standard
+
+  # -----------------------------------------------------------------------
+  # WAL archiving → MinIO (S3-compatible)
+  # -----------------------------------------------------------------------
+  backup:
+    retentionPolicy: "30d"
+    barmanObjectStore:
+      destinationPath: s3://very-prince-wal/
+      endpointURL: http://minio.very-prince.svc.cluster.local:9000
+      s3Credentials:
+        accessKeyId:
+          name: minio-s3-secret
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: minio-s3-secret
+          key: SECRET_ACCESS_KEY
+      wal:
+        compression: gzip
+        maxParallel: 4
+      data:
+        compression: gzip
+        immediateCheckpoint: true
+        jobs: 2
+
+  # -----------------------------------------------------------------------
+  # Scheduled base backups (daily at 02:00 UTC)
+  # -----------------------------------------------------------------------
+  # Managed by a ScheduledBackup resource (see scheduled-backup.yaml)
+
+  # -----------------------------------------------------------------------
+  # Replication – synchronous acknowledgement on at least 1 standby
+  # -----------------------------------------------------------------------
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "256MB"
+      effective_cache_size: "768MB"
+      maintenance_work_mem: "64MB"
+      checkpoint_completion_target: "0.9"
+      wal_buffers: "16MB"
+      default_statistics_target: "100"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      work_mem: "4MB"
+      min_wal_size: "1GB"
+      max_wal_size: "4GB"
+      wal_level: logical
+      archive_mode: "on"
+      # pg_stat_statements
+      shared_preload_libraries: "pg_stat_statements"
+      pg_stat_statements.track: all
+    pg_hba:
+      # Allow the app user from anywhere inside the cluster
+      - host very_prince very_prince_app all scram-sha-256
+      # Allow replication from standby pods
+      - host replication streaming_replica all scram-sha-256
+
+  # At least 1 synchronous standby (n-sync = 1 out of 2 replicas)
+  minSyncReplicas: 1
+  maxSyncReplicas: 1
+
+  # -----------------------------------------------------------------------
+  # Automated failover tuning
+  # -----------------------------------------------------------------------
+  failoverDelay: 0          # start election immediately
+  switchoverDelay: 60       # seconds to wait for graceful switchover
+
+  # -----------------------------------------------------------------------
+  # Probes & resources
+  # -----------------------------------------------------------------------
+  startDelay: 30
+  stopDelay: 30
+  smartShutdownTimeout: 180
+  primaryUpdateStrategy: unsupervised   # rolling update without manual approval
+
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+
+  # -----------------------------------------------------------------------
+  # Monitoring – expose Prometheus metrics
+  # -----------------------------------------------------------------------
+  monitoring:
+    enablePodMonitor: true   # requires prometheus-operator CRDs
+
+  # -----------------------------------------------------------------------
+  # Affinity – spread replicas across nodes
+  # -----------------------------------------------------------------------
+  affinity:
+    topologyKey: kubernetes.io/hostname
+    podAntiAffinityType: preferred
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+              - key: node-role.kubernetes.io/worker
+                operator: Exists
   namespace: data
 spec:
   instances: 3

@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { usePathname } from "next/navigation";
 import Link from "next/link";
@@ -94,12 +94,31 @@ function SettingsIcon({ className = "" }: { className?: string }) {
   );
 }
 
+function BatchIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={2}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"
+      />
+    </svg>
+  );
+}
+
 // ── Navigation Configuration ──────────────────────────────────────────────────
 
 const navLinks: NavLink[] = [
   { label: "Overview", href: "/dashboard", icon: OverviewIcon },
   { label: "Organizations", href: "/dashboard/org", icon: OrganizationIcon },
   { label: "My Payouts", href: "/dashboard/payouts", icon: PayoutIcon },
+  { label: "Batch Builder", href: "/dashboard/batch", icon: BatchIcon },
   { label: "Settings", href: "/dashboard/settings", icon: SettingsIcon },
 ];
 

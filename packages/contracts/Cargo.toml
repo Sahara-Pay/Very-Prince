@@ -12,14 +12,22 @@ crate-type = ["cdylib"]
 
 # ── Runtime Dependencies ──────────────────────────────────────────────────────
 [dependencies]
-# Official Soroban SDK — Protocol 21 compatible.
-soroban-sdk = { version = "21.7.7" }
+# Official Soroban SDK — Protocol 22 compatible.
+soroban-sdk = { version = "22.0.0" }
+
+# BLS12-381 pairing-friendly elliptic curve for signature aggregation.
+# Used for massive multi-sig DAO approvals to reduce gas costs.
+bls12_381_plus = { version = "0.8", default-features = false, features = ["groups", "pairings", "hashing"] }
+sha2 = { version = "0.10", default-features = false }
 
 # ── Dev/Test Dependencies ─────────────────────────────────────────────────────
 # The "testutils" feature unlocks Address::generate(), mock_all_auths(), etc.
 [dev-dependencies]
-soroban-sdk = { version = "21.7.7", features = ["testutils"] }
+soroban-sdk = { version = "22.0.0", features = ["testutils"] }
 proptest = "1.6.0"
+rand = "0.8"
+rand_core = "0.6"
+rand_chacha = "0.3"
 
 # ── Release Profile ───────────────────────────────────────────────────────────
 # These settings minimise WASM binary size for on-chain deployment.

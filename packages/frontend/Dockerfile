@@ -72,6 +72,9 @@ RUN --mount=type=cache,target=/root/.npm,id=npm-cache \
 # ─────────────────────────────────────────────────────────────────────────────
 FROM deps AS builder
 
+# Supplied by Jenkins so the pipeline controls the Turborepo build scope.
+ARG TURBO_FILTER=--filter=@very-prince/frontend...
+
 # Copy build configuration and source. Source is copied AFTER `npm ci` so
 # changes to application code do not invalidate the deps layer.
 COPY tsconfig.base.json turbo.json ./
@@ -85,12 +88,12 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN --mount=type=cache,target=/app/node_modules/.cache,sharing=locked \
     --mount=type=cache,target=/app/packages/frontend/.turbo,sharing=locked \
     --mount=type=cache,target=/root/.npm,id=npm-cache \
-    npx turbo run build --filter=@very-prince/frontend...
+    npx turbo run build ${TURBO_FILTER}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 5: Minimal production runtime (Next.js standalone)
+# Stage 5: Minimal production runtime (Next.js standalone - Alpine)
 # ─────────────────────────────────────────────────────────────────────────────
-FROM base AS runner
+FROM base AS runner-alpine
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 WORKDIR /app/packages/frontend
@@ -105,6 +108,28 @@ COPY --from=builder --chown=nextjs:nodejs /app/packages/frontend/.next/static   
 COPY --from=builder --chown=nextjs:nodejs /app/packages/frontend/public         ./packages/frontend/public
 
 USER nextjs
+EXPOSE 3000
+
+CMD ["node", "packages/frontend/server.js"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 6: Distroless production runtime (minimal attack surface)
+# ─────────────────────────────────────────────────────────────────────────────
+# Distroless images contain only the application and its runtime dependencies.
+# No shell, no package manager, no extra binaries - minimal attack surface.
+FROM gcr.io/distroless/nodejs20-debian12 AS runner
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app/packages/frontend
+
+# Copy the Next.js standalone server (already includes the minimal
+# production node_modules subset it needs) plus static + public assets.
+# Distroless uses nonroot user (uid 65532, gid 65532) by default.
+COPY --from=builder --chown=nonroot:nonroot /app/packages/frontend/.next/standalone ./
+COPY --from=builder --chown=nonroot:nonroot /app/packages/frontend/.next/static   ./packages/frontend/.next/static
+COPY --from=builder --chown=nonroot:nonroot /app/packages/frontend/public         ./packages/frontend/public
+
+USER nonroot
 EXPOSE 3000
 
 CMD ["node", "packages/frontend/server.js"]

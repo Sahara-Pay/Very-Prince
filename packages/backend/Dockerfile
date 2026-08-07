@@ -81,6 +81,9 @@ RUN --mount=type=cache,target=/root/.npm,id=npm-cache \
 # ─────────────────────────────────────────────────────────────────────────────
 FROM deps AS builder
 
+# Supplied by Jenkins so the pipeline controls the Turborepo build scope.
+ARG TURBO_FILTER=--filter=@very-prince/backend...
+
 # Copy build configuration and source. Source is copied AFTER `npm ci` so
 # changes to application code do not invalidate the deps layer.
 COPY tsconfig.base.json turbo.json ./
@@ -98,7 +101,7 @@ RUN --mount=type=cache,target=/app/node_modules/.cache,sharing=locked \
 RUN --mount=type=cache,target=/app/node_modules/.cache,sharing=locked \
     --mount=type=cache,target=/app/packages/backend/.turbo,sharing=locked \
     --mount=type=cache,target=/root/.npm,id=npm-cache \
-    npx turbo run build --filter=@very-prince/backend...
+    npx turbo run build ${TURBO_FILTER}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 5: Prune dev dependencies for the production image
@@ -116,9 +119,9 @@ RUN --mount=type=cache,target=/root/.npm,id=npm-cache \
           node_modules/@prisma/fetch-engine
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 6: Minimal production runtime
+# Stage 6: Minimal production runtime (Alpine)
 # ─────────────────────────────────────────────────────────────────────────────
-FROM base AS runner
+FROM base AS runner-alpine
 ENV NODE_ENV=production
 WORKDIR /app/packages/backend
 
@@ -133,6 +136,27 @@ COPY --from=builder   --chown=fastify:nodejs /app/packages/backend/package.json 
 COPY --from=builder   --chown=fastify:nodejs /app/packages/backend/dist          ./dist
 
 USER fastify
+EXPOSE 3001
+
+CMD ["node", "dist/index.js"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 7: Distroless production runtime (minimal attack surface)
+# ─────────────────────────────────────────────────────────────────────────────
+# Distroless images contain only the application and its runtime dependencies.
+# No shell, no package manager, no extra binaries - minimal attack surface.
+FROM gcr.io/distroless/nodejs20-debian12 AS runner
+ENV NODE_ENV=production
+WORKDIR /app/packages/backend
+
+# Copy the pruned production node_modules + the compiled backend.
+# Distroless uses nonroot user (uid 65532, gid 65532) by default.
+COPY --from=prod-deps --chown=nonroot:nonroot /app/node_modules              /app/node_modules
+COPY --from=prod-deps --chown=nonroot:nonroot /app/packages/backend/node_modules ./node_modules
+COPY --from=builder   --chown=nonroot:nonroot /app/packages/backend/package.json ./package.json
+COPY --from=builder   --chown=nonroot:nonroot /app/packages/backend/dist          ./dist
+
+USER nonroot
 EXPOSE 3001
 
 CMD ["node", "dist/index.js"]

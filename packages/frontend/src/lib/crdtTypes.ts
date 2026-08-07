@@ -2,6 +2,12 @@ export interface CRDTDocument<T = unknown> {
   id: string;
   type: 'organization' | 'maintainer' | 'transaction' | 'draft';
   data: T;
+  /**
+   * Serialised Yjs state vector stored as a plain number array so IndexedDB
+   * (via Dexie) can serialise it without needing special adapters.
+   * Populated by the CRDT worker whenever a document is persisted.
+   */
+  yjsState?: number[];
   version: number;
   updatedAt: number;
   deleted?: boolean;
@@ -46,4 +52,15 @@ export interface CRDTUpdate {
   docType: CRDTDocument['type'];
   update: Uint8Array;
   timestamp: number;
+}
+
+/**
+ * A generic key-value draft edited offline (e.g. RegisterOrg form, AllocatePayout form).
+ * The `fields` map is backed by a Yjs Y.Map so concurrent edits across tabs merge via CRDT.
+ */
+export interface DraftCRDT {
+  /** Matches the form key, e.g. "register-org" or "allocate-payout-<orgId>" */
+  draftKey: string;
+  fields: Record<string, unknown>;
+  savedAt: number;
 }

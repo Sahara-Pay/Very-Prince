@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import dotenv from 'dotenv';
-import { join } from 'path';
+import { join, resolve } from 'path';
+import process from 'node:process';
 
 dotenv.config({ path: join(__dirname, '../../.env') });
 
@@ -79,3 +80,25 @@ export const WEBHOOK_QUEUE_MAX_RECEIVE_COUNT = config.WEBHOOK_QUEUE_MAX_RECEIVE_
 export const WEBHOOK_QUEUE_MAX_MESSAGES = config.WEBHOOK_QUEUE_MAX_MESSAGES;
 export const WEBHOOK_QUEUE_WAIT_TIME_SECONDS = config.WEBHOOK_QUEUE_WAIT_TIME_SECONDS;
 export const WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS = config.WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS;
+
+// ─── Redis Streams (live event fan-out) ──────────────────────────────────────
+
+export const REDIS_STREAMS_ENABLED = process.env.REDIS_STREAMS_ENABLED !== 'false';
+export const REDIS_STREAMS_KEY = process.env.REDIS_STREAMS_KEY || 'streams:soroban_events';
+export const REDIS_STREAMS_CONSUMER_GROUP = process.env.REDIS_STREAMS_CONSUMER_GROUP || 'trpc_subscribers';
+export const REDIS_STREAMS_MAX_LEN = Number(process.env.REDIS_STREAMS_MAX_LEN || '100000');
+export const REDIS_STREAMS_BLOCK_MS = Number(process.env.REDIS_STREAMS_BLOCK_MS || '250');
+export const REDIS_STREAMS_BATCH_SIZE = Number(process.env.REDIS_STREAMS_BATCH_SIZE || '50');
+export const REDIS_STREAMS_CLAIM_MAX_IDLE_MS = Number(process.env.REDIS_STREAMS_CLAIM_MAX_IDLE_MS || '30000');
+export const REDIS_STREAMS_PENDING_REAP_INTERVAL_MS = Number(process.env.REDIS_STREAMS_PENDING_REAP_INTERVAL_MS || '10000');
+
+// ─── Diagnostic monitor (heap reports + snapshots) ──────────────────────────
+
+export const DIAG_ENABLED = process.env.DIAG_ENABLED !== 'false';
+export const DIAG_OUTPUT_DIR = process.env.DIAG_OUTPUT_DIR || resolve(process.cwd(), '.diagnostic');
+export const DIAG_HEAP_SAMPLE_INTERVAL_MS = Number(process.env.DIAG_HEAP_SAMPLE_INTERVAL_MS || '5000');
+/** 0 disables auto-snapshots entirely.  Default 1.5 GiB before we trigger. */
+export const DIAG_HEAP_SNAPSHOT_THRESHOLD_BYTES = Number(
+  process.env.DIAG_HEAP_SNAPSHOT_THRESHOLD_BYTES || String(1.5 * 1024 ** 3),
+);
+export const DIAG_REPORT_ON_SIGUSR2 = process.env.DIAG_REPORT_ON_SIGUSR2 !== 'false';

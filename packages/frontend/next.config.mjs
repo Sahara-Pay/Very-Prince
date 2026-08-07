@@ -61,7 +61,8 @@ const nextConfig = {
    *
    * These headers are applied to every HTML page response.  Static assets
    * (scripts, images) do not need them because the isolation applies at the
-   * page level.
+   * page level. `Cross-Origin-Resource-Policy: same-origin` is also set so
+   * cross-origin pages cannot embed this app's documents.
    *
    * References:
    *   https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#security_requirements
@@ -84,6 +85,11 @@ const nextConfig = {
             // completing the cross-origin isolation requirement.
             key: "Cross-Origin-Embedder-Policy",
             value: "require-corp",
+          },
+          {
+            // Prevents cross-origin pages from embedding this app's documents.
+            key: "Cross-Origin-Resource-Policy",
+            value: "same-origin",
           },
         ],
       },

@@ -21,7 +21,7 @@ jobs:
           # This checks if the PR body contains "closes #", "fixes #", or "resolves #" followed by a number
           if echo "$PR_BODY" | grep -iqE "(closes|fixes|resolves)\s*#[0-9]+"; then
             echo "Closing keyword found! Enabling auto-merge..."
-            gh pr merge --auto --merge "$PR_URL"
+            gh pr merge --merge "$PR_URL"
           else
             echo "No closing keyword found. Auto-merge will not be enabled."
           fi

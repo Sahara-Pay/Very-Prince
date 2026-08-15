@@ -1,0 +1,27 @@
+name: Issue-Based Auto-Merge
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  enable-auto-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR body and enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          # This checks if the PR body contains "closes #", "fixes #", or "resolves #" followed by a number
+          if echo "$PR_BODY" | grep -iqE "(closes|fixes|resolves)\s*#[0-9]+"; then
+            echo "Closing keyword found! Enabling auto-merge..."
+            gh pr merge --auto --merge "$PR_URL"
+          else
+            echo "No closing keyword found. Auto-merge will not be enabled."
+          fi

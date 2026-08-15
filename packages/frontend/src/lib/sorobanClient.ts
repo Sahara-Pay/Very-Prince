@@ -351,6 +351,65 @@ class SorobanClient {
     return xdr;
   }
 
+  /**
+   * Build a token swap transaction using the AMM pool's constant-product formula.
+   *
+   * This constructs an unsigned Soroban transaction that calls the contract's
+   * `swap` function with the user's desired token pair and amounts. The caller
+   * is responsible for signing with Freighter before submission.
+   *
+   * @param userAddress  - Stellar address of the swapper.
+   * @param tokenIn      - Symbol of the token being sold.
+   * @param tokenOut     - Symbol of the token being bought.
+   * @param amountIn     - Amount of input token to sell (atomic units).
+   * @param minAmountOut - Minimum acceptable output (atomic units) for slippage protection.
+   * @returns            - Unsigned transaction XDR string.
+   */
+  public async buildTokenSwapTransaction(
+    userAddress: string,
+    tokenIn: string,
+    tokenOut: string,
+    amountIn: bigint,
+    minAmountOut: bigint
+  ): Promise<string> {
+    const account = await this._loadAccount(userAddress);
+    const contract = new Contract(CONTRACT_ID);
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        contract.call(
+          "swap",
+          nativeToScVal(tokenIn, { type: "symbol" }),
+          nativeToScVal(tokenOut, { type: "symbol" }),
+          nativeToScVal(userAddress, { type: "address" }),
+          nativeToScVal(amountIn, { type: "i128" }),
+          nativeToScVal(minAmountOut, { type: "i128" })
+        )
+      )
+      .setTimeout(60)
+      .build();
+
+    const simResult = await this.rpcServer.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(simResult)) {
+      throw new Error(this._parseSorobanError(simResult));
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+    const xdr = preparedTx.toXDR();
+    try {
+      if (typeof window !== "undefined" && (window as any).dispatchEvent) {
+        const ev = new CustomEvent("very-prince:xdr-debug", {
+          detail: { type: "unsigned", label: "token_swap", xdr },
+        });
+        window.dispatchEvent(ev);
+      }
+    } catch (err) {}
+    return xdr;
+  }
+
   public async submitSignedTransaction(signedXdr: string): Promise<unknown> {
     const tx = TransactionBuilder.fromXDR(signedXdr, NETWORK_PASSPHRASE);
 
@@ -403,4 +462,6 @@ export const buildAllocatePayoutTransaction =
   sorobanClient.buildAllocatePayoutTransaction.bind(sorobanClient);
 export const buildUpdateOrgMetadataTransaction =
   sorobanClient.buildUpdateOrgMetadataTransaction.bind(sorobanClient);
+export const buildTokenSwapTransaction =
+  sorobanClient.buildTokenSwapTransaction.bind(sorobanClient);
 export const submitSignedTransaction = sorobanClient.submitSignedTransaction.bind(sorobanClient);

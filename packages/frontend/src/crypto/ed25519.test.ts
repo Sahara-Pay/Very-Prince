@@ -86,7 +86,7 @@ describe('verifySignature', () => {
     const message = new Uint8Array([1, 2, 3]);
     const signature = signMessage(message, secretKey);
     const tamperedSig = new Uint8Array(signature);
-    tamperedSig[0] ^= 0xFF; // flip bits
+    tamperedSig[0] = (tamperedSig[0] ?? 0) ^ 0xFF; // flip bits
 
     expect(verifySignature(message, tamperedSig, publicKey)).toBe(false);
   });

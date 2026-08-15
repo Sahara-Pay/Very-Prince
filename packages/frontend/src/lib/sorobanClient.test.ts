@@ -52,15 +52,11 @@ const mocks = vi.hoisted(() => {
 const {
   mockToXDR,
   mockBuild,
-  mockAddOperation,
-  mockSetTimeout,
   mockTransactionBuilderInstance,
   mockContractCall,
-  mockContractInstance,
   mockSimulateTransaction,
   mockSendTransaction,
   mockGetTransaction,
-  mockLoadAccount,
   mockLoadAccountHorizon,
   mockAssembleTransaction,
 } = mocks;
@@ -322,8 +318,8 @@ describe("sorobanClient — XDR builder utilities", () => {
         await import("@stellar/stellar-sdk")
       );
       (TransactionBuilder as unknown as { fromXDR: ReturnType<typeof vi.fn> }).fromXDR = vi.fn(
-        () => mockTransactionBuilderInstance
-      );
+        () => mockTransactionBuilderInstance,
+      ) as unknown as ReturnType<typeof vi.fn>;
 
       mockSendTransaction.mockResolvedValue({ status: "PENDING", hash: "TXHASH123" });
       mockGetTransaction.mockResolvedValue({

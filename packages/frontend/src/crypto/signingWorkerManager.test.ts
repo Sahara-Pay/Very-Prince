@@ -57,14 +57,14 @@ class FakeWorker extends EventTarget {
     }
   }
 
-  addEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+  override addEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
     if (type === 'message') {
       this._extraListeners.push(listener as (event: MessageEvent) => void);
     }
     super.addEventListener(type, listener);
   }
 
-  removeEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+  override removeEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
     if (type === 'message') {
       this._extraListeners = this._extraListeners.filter((l) => l !== listener);
     }

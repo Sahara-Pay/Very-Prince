@@ -1,4 +1,4 @@
-name: Issue-Based Auto-Merge
+name: Issue-Based Auto-Merge 
 
 on:
   pull_request_target:

@@ -12,15 +12,24 @@ jobs:
   instant-merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Check PR body and merge instantly
+      - name: Check PR body and merge or comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           if echo "$PR_BODY" | grep -iqE "(closes|fixes|resolves)\s*#[0-9]+"; then
-            echo "Closing keyword found! Merging instantly..."
-            gh pr merge --merge "$PR_URL"
+            echo "Closing keyword found! Attempting instant merge..."
+            
+            # Try to merge. If it fails (due to conflicts), the else block runs.
+            if gh pr merge --merge "$PR_URL"; then
+              echo "Merge successful!"
+            else
+              echo "Merge failed! Leaving a comment..."
+              gh pr comment "$PR_URL" --body "Please resolve conflicts."
+              exit 1 # Fails the action so you see a red X instead of a green check
+            fi
+            
           else
             echo "No closing keyword found. Merge will not be executed."
           fi

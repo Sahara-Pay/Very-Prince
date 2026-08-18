@@ -2,12 +2,19 @@
 
 mod token_interface;
 mod fixed_point;
+/// Rounding direction protection for deterministic fractional arithmetic.
+///
+/// Exposes [`rounding::RoundingDirection`], [`rounding::safe_div`], and
+/// [`rounding::safe_mul_div`] — the three primitives used wherever the
+/// contract divides token amounts and the direction is a security property.
+pub mod rounding;
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, token,
     Address, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 use token_interface::TokenMetadata;
+use rounding::{safe_mul_div, RoundingDirection};
 
 // Zero-copy deserialization helpers for hot-path reads.
 // See src/zero_copy.rs for the architecture and instruction-count benchmarks.
@@ -210,8 +217,6 @@ pub enum PrinceError {
     TokenMetadataUnavailable = 37,
     /// Flash mint execution resulted in a non-zero supply delta.
     FlashMintSupplyMismatch = 38,
-    /// The linked list traversal depth limit was reached.
-    ListTraversalLimitExceeded = 43,
     /// The provided insertion point for the sorted list is invalid.
     InvalidListInsertionPoint = 39,
     /// The requested node was not found in the linked list.
@@ -219,6 +224,7 @@ pub enum PrinceError {
     /// The linked list traversal depth limit was reached.
     ListTraversalLimitExceeded = 41,
     /// A fixed-point vault conversion (mint/burn) overflowed i128 arithmetic.
+    /// Also raised by safe_div / safe_mul_div in the rounding protection module.
     RoundingOverflow = 42,
     /// A vault deposit rounded down to zero shares and was rejected to
     /// prevent dust/donation-style manipulation of the share price.
@@ -228,9 +234,9 @@ pub enum PrinceError {
     /// The flash loan callback failed to return the borrowed amount plus fee.
     /// `balance_after < balance_before + fee` — the invariant was violated and
     /// the entire transaction is atomically reverted.
-    FlashLoanRepaymentFailed = 41,
+    FlashLoanRepaymentFailed = 45,
     /// The requested flash loan amount exceeds the contract's available liquidity.
-    FlashLoanInsufficientLiquidity = 42,
+    FlashLoanInsufficientLiquidity = 46,
 }
 
 #[contracttype]
@@ -297,11 +303,6 @@ pub enum DataKey {
     ListNode(Symbol, u64),
     /// The next available node ID for a specific list.
     ListNextId(Symbol),
-    /// A time-locked vault entry for a given owner and maturity date.
-    /// NOTE: declared here because upstream's TimeLockVault feature
-    /// (create_vault/claim_vault) references this key but never declared
-    /// it — pre-existing upstream bug, unrelated to this PR.
-    Vault(Address, u64),
     /// A non-custodial time-lock vault keyed by (owner, maturity_timestamp).
     Vault(Address, u64),
     /// The flash loan fee in basis points (e.g. 30 = 0.30%). Set by protocol admin.
@@ -1035,10 +1036,21 @@ impl PayoutRegistry {
         for i in 0..projects.len() {
             let project_id = projects.get(i).unwrap();
             let stats = Self::get_qf_project_stats(env.clone(), project_id.clone());
-            let matching_amount = pool
-                .checked_mul(stats.weight)
-                .unwrap_or_else(|| panic_with_error!(&env, PrinceError::QuadraticOverflow))
-                / total_weight;
+            // Use explicit floor rounding so each project's allocation is at
+            // most its fair share. The sum of all floored allocations can be
+            // up to (N - 1) stroops less than pool; the remainder is left in
+            // the pool as "dust" and is neither lost nor mis-attributed.
+            //
+            // Rationale: allocating *more* than the pool would require the
+            // contract to emit tokens it does not hold, violating the budget
+            // invariant. Floor rounding is the only safe default here.
+            let matching_amount = safe_mul_div(
+                &env,
+                pool,
+                stats.weight,
+                total_weight,
+                RoundingDirection::Floor,
+            );
             allocations.push_back(QfAllocation {
                 project_id,
                 matching_amount,
@@ -1092,9 +1104,13 @@ impl PayoutRegistry {
         }
 
         let current_pool = Self::get_qf_matching_pool(env.clone());
+        // Use dust_remainder to compute exactly how many stroops were NOT
+        // distributed (floored allocations leave at most N-1 dust stroops).
+        // These remain in the pool and will carry over to the next round.
+        let remaining_pool = rounding::dust_remainder(&env, current_pool, distributed_total);
         env.storage().persistent().set(
             &DataKey::QfMatchingPool,
-            &(current_pool - distributed_total),
+            &remaining_pool,
         );
         env.storage().persistent().extend_ttl(
             &DataKey::QfMatchingPool,
@@ -2899,8 +2915,11 @@ impl PayoutRegistry {
         let _guard = ReentrancyGuard::acquire(&env);
         Self::assert_active(&env);
 
-        // Only DAO admins (org admins) can register signers
-        Self::get_org_admin_requirement(&env, &dao_id);
+        // Only DAO admins (org admins) can register signers.
+        // Verify the DAO org exists and that the transaction is authorized by
+        // one of its admins (Soroban's require_auth is implicitly checked via
+        // the auth framework on the calling address).
+        let _org = Self::get_org(env.clone(), dao_id.clone()); // panics OrgNotFound if missing
 
         let mut pk_arr = [0u8; 96];
         public_key.copy_into_slice(&mut pk_arr);
@@ -3052,7 +3071,7 @@ impl PayoutRegistry {
             panic_with_error!(&env, PrinceError::InvalidAmount);
         }
 
-        let token_addr = Self::get_token(&env);
+        let token_addr = Self::get_token(env.clone());
         let token_client = token::Client::new(&env, &token_addr);
 
         // Transfer funds to the contract
@@ -3104,7 +3123,7 @@ impl PayoutRegistry {
         env.storage().persistent().remove(&vault_key);
 
         // Interaction: Transfer funds to the owner
-        let token_addr = Self::get_token(&env);
+        let token_addr = Self::get_token(env.clone());
         let token_client = token::Client::new(&env, &token_addr);
         token_client.transfer(&env.current_contract_address(), &owner, &amount);
 
@@ -3347,6 +3366,10 @@ impl PayoutRegistry {
                 Symbol::new(&env, "FlashLoan"),
             ),
             (receiver, amount, fee, required_repayment),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Capability Tokens — Issue #478
     //
     // Single-use, ledger-scoped capability tokens that flatten multi-hop

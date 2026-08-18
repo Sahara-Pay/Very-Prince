@@ -167,8 +167,8 @@ pub fn sac_mint(
 
 /// Burn tokens from the specified `from` address.
 ///
-/// Delegates to the SAC admin `burn(from, amount)` function. This requires the
-/// caller to be the token administrator.
+/// Uses the standard Token interface `burn(from, amount)` which requires
+/// authorization from `from`.
 #[inline]
 pub fn sac_burn(
     env: &Env,
@@ -176,8 +176,8 @@ pub fn sac_burn(
     from: &Address,
     amount: &i128,
 ) {
-    let sac_admin = token::StellarAssetClient::new(env, token_address);
-    sac_admin.burn(from, amount);
+    let token = token::TokenClient::new(env, token_address);
+    token.burn(from, amount);
 }
 
 /// Set the administrator of the SAC token.

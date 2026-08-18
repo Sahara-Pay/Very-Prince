@@ -8,10 +8,10 @@
 //! pairings, regardless of the number of signers.
 
 use bls12_381_plus::{
-    multi_miller_loop, G1Affine, G2Affine, G1Projective, G2Prepared, G2Projective, Gt, ExpandMsgXmd,
-    hash_to_curve::HashToCurve, group::Group, group::Curve,
+    multi_miller_loop, G1Affine, G2Affine, G1Projective, G2Prepared, G2Projective,
+    Gt, group::Curve,
 };
-use soroban_sdk::{Env, Symbol};
+use bls12_381_plus::elliptic_curve::hash2curve::ExpandMsgXmd;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -48,18 +48,18 @@ pub fn verify_aggregated(
         None => return false,
     };
 
-    // Hash message to G1
-    let h_m = G1Projective::hash_to_curve::<ExpandMsgXmd<sha2::Sha256>>(message, DST_SIG).to_affine();
+    // Hash message to G1 using bls12_381_plus 0.8.x API.
+    let h_m = G1Projective::hash::<ExpandMsgXmd<sha2::Sha256>>(message, DST_SIG).to_affine();
 
     // Perform pairing check: e(sig, -G2) * e(h_m, pk) == 1
     let g2_gen_neg = -G2Affine::generator();
-    
+
     let miller = multi_miller_loop(&[
         (&sig, &G2Prepared::from(g2_gen_neg)),
         (&h_m, &G2Prepared::from(pk)),
     ]);
-    
-    miller.final_exponentiation() == Gt::identity()
+
+    miller.final_exponentiation() == Gt::IDENTITY
 }
 
 /// Verify a Proof-of-Possession (PoP) for a public key.
@@ -82,8 +82,8 @@ pub fn verify_pop(
         None => return false,
     };
 
-    // Hash the public key to G1 using the PoP domain tag
-    let h_pk = G1Projective::hash_to_curve::<ExpandMsgXmd<sha2::Sha256>>(pk_bytes, DST_POP).to_affine();
+    // Hash the public key to G1 using the PoP domain tag.
+    let h_pk = G1Projective::hash::<ExpandMsgXmd<sha2::Sha256>>(pk_bytes, DST_POP).to_affine();
 
     let g2_gen_neg = -G2Affine::generator();
 
@@ -91,8 +91,8 @@ pub fn verify_pop(
         (&pop, &G2Prepared::from(g2_gen_neg)),
         (&h_pk, &G2Prepared::from(pk)),
     ]);
-    
-    miller.final_exponentiation() == Gt::identity()
+
+    miller.final_exponentiation() == Gt::IDENTITY
 }
 
 /// Aggregate a new public key into an existing aggregated key.
@@ -102,14 +102,14 @@ pub fn aggregate_pk(
     current_agg_pk_bytes: &[u8; 96],
     new_pk_bytes: &[u8; 96],
 ) -> Option<[u8; 96]> {
-    let current_agg = if current_agg_pk_bytes == &[0u8; 96] {
-        G2Projective::identity()
+    let current_agg: G2Projective = if current_agg_pk_bytes == &[0u8; 96] {
+        G2Projective::IDENTITY
     } else {
         G2Affine::from_compressed(current_agg_pk_bytes).into_option()?.into()
     };
-    
+
     let new_pk = G2Affine::from_compressed(new_pk_bytes).into_option()?;
-    
+
     let updated_agg = (current_agg + new_pk).to_affine();
     Some(updated_agg.to_compressed())
 }

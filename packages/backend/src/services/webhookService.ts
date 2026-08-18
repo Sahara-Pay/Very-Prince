@@ -1,6 +1,6 @@
 import { webhookRepository } from "../repositories/WebhookRepository.js";
 import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { Queue } from "bullmq";
 import {
   AWS_REGION,
@@ -14,6 +14,7 @@ import {
 } from "../schemas/webhookJobSchemas.js";
 import { bullRedisConnection } from "./cache.js";
 import { logger } from "../utils/logger.js";
+import { calculateSignature as hmacCalculateSignature } from "../utils/signatureVerify.js";
 
 export type { WebhookJobData } from "../schemas/webhookJobSchemas.js";
 
@@ -50,17 +51,17 @@ export class WebhookService {
    * @returns A 64-character hex string.
    */
   private generateWebhookSecret(): string {
-    return randomBytes(32).toString('hex');
+    return randomBytes(32).toString("hex");
   }
 
   /**
-   * Calculates a SHA-256 HMAC signature for a webhook payload.
+   * Calculates a hex-encoded HMAC-SHA256 signature for a webhook payload.
    * @param payload The raw stringified JSON payload.
    * @param secret The organization's webhook secret.
    * @returns The hex-encoded signature.
    */
   calculateSignature(payload: string, secret: string): string {
-    return createHash('sha256').update(payload).update(secret).digest('hex');
+    return hmacCalculateSignature(payload, secret);
   }
 
   /**
@@ -70,13 +71,17 @@ export class WebhookService {
    */
   async generateSecretForOrganization(organizationId: string): Promise<string> {
     const existingConfig = await webhookRepository.getConfig(organizationId);
-    
+
     if (existingConfig && existingConfig.secret) {
       return existingConfig.secret;
     }
 
     const newSecret = this.generateWebhookSecret();
-    await webhookRepository.upsertConfig(organizationId, existingConfig?.url || "", newSecret);
+    await webhookRepository.upsertConfig(
+      organizationId,
+      existingConfig?.url || "",
+      newSecret,
+    );
     logger.info({ organizationId }, "Generated new webhook signing secret");
     return newSecret;
   }
@@ -100,15 +105,22 @@ export class WebhookService {
   }
 
   /**
-   * Dispatches a webhook asynchronously using BullMQ.
+   * Dispatches a webhook asynchronously using BullMQ or SQS.
    * @param organizationId The organization to notify.
    * @param event The event name.
    * @param data The payload data.
    */
-  async queueWebhook(organizationId: string, event: string, data: WebhookEventData) {
+  async queueWebhook(
+    organizationId: string,
+    event: string,
+    data: WebhookEventData,
+  ) {
     const config = await webhookRepository.getConfig(organizationId);
     if (!config || !config.url) {
-      logger.debug({ organizationId, event }, "Skipping webhook dispatch, no webhook configured");
+      logger.debug(
+        { organizationId, event },
+        "Skipping webhook dispatch, no webhook configured",
+      );
       return;
     }
 
@@ -126,19 +138,24 @@ export class WebhookService {
           throw new Error("BullMQ webhook queue is not initialized");
         }
 
-        await this.webhookQueue.add(`webhook:${event}:${organizationId}`, {
+        await this.webhookQueue.add(`webhook:\( {event}: \){organizationId}`, {
           ...jobData,
         });
       }
 
       logger.info(
         { organizationId, event, provider: WEBHOOK_QUEUE_PROVIDER },
-        "Webhook queued for dispatch"
+        "Webhook queued for dispatch",
       );
     } catch (error) {
       logger.error(
-        { err: error, organizationId, event, provider: WEBHOOK_QUEUE_PROVIDER },
-        "Failed to queue webhook for dispatch"
+        {
+          err: error,
+          organizationId,
+          event,
+          provider: WEBHOOK_QUEUE_PROVIDER,
+        },
+        "Failed to queue webhook for dispatch",
       );
       throw error;
     }
@@ -149,20 +166,22 @@ export class WebhookService {
       throw new Error("SQS webhook queue is not initialized");
     }
 
-    await this.sqsClient.send(new SendMessageCommand({
-      QueueUrl: WEBHOOK_QUEUE_URL,
-      MessageBody: JSON.stringify(jobData),
-      MessageAttributes: {
-        organizationId: {
-          DataType: "String",
-          StringValue: jobData.organizationId,
+    await this.sqsClient.send(
+      new SendMessageCommand({
+        QueueUrl: WEBHOOK_QUEUE_URL,
+        MessageBody: JSON.stringify(jobData),
+        MessageAttributes: {
+          organizationId: {
+            DataType: "String",
+            StringValue: jobData.organizationId,
+          },
+          event: {
+            DataType: "String",
+            StringValue: jobData.event,
+          },
         },
-        event: {
-          DataType: "String",
-          StringValue: jobData.event,
-        },
-      },
-    }));
+      }),
+    );
   }
 
   /**
@@ -174,11 +193,11 @@ export class WebhookService {
    * @param ledger The ledger sequence number.
    */
   async dispatchPayoutClaimed(
-    organizationId: string, 
-    maintainer: string, 
-    amountStroops: string, 
+    organizationId: string,
+    maintainer: string,
+    amountStroops: string,
     txHash: string,
-    ledger: number
+    ledger: number,
   ) {
     await this.queueWebhook(organizationId, "payout_claimed", {
       maintainer,

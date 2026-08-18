@@ -11,6 +11,7 @@ import { MaintainerBalancesWidget } from "@/components/MaintainerBalancesWidget"
 import { RelatedTokensWidget } from "@/components/RelatedTokensWidget";
 import { WebhookSettings } from "@/components/WebhookSettings";
 import { ApiKeySettings } from "@/components/ApiKeySettings";
+import { AssetDepthChart, generateMockOrderBook } from "@/components/AssetDepthChart";
 import {
   OrgDetailsSkeleton,
   FundingHistorySkeleton,
@@ -192,6 +193,13 @@ export function DashboardContent({ initialOrgId }: DashboardContentProps) {
                 </ErrorBoundary>
               </div>
 
+              {/* WebGL Asset Depth Chart — off-main-thread OffscreenCanvas rendering */}
+              <div className="mb-8">
+                <ErrorBoundary variant="inline">
+                  <AssetDepthChartWidget />
+                </ErrorBoundary>
+              </div>
+
               <ErrorBoundary variant="inline">
                 <Suspense
                   fallback={
@@ -262,5 +270,21 @@ export function DashboardContent({ initialOrgId }: DashboardContentProps) {
         </ErrorBoundary>
       )}
     </>
+  );
+}
+
+// ── Depth Chart Widget ─────────────────────────────────────────────────────────
+// Separate component so the mock data is generated once per mount (not on every
+// render of DashboardContent) and avoids closure over parent state.
+
+function AssetDepthChartWidget() {
+  const [orderBook] = useState(() => generateMockOrderBook(1.42, 0.005, 80));
+  return (
+    <AssetDepthChart
+      bids={orderBook.bids}
+      asks={orderBook.asks}
+      baseAsset="XLM"
+      quoteAsset="USDC"
+    />
   );
 }

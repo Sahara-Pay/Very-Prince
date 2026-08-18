@@ -5,11 +5,13 @@
 
 import {
   DeleteMessageCommand,
+  ChangeMessageVisibilityCommand,
   ReceiveMessageCommand,
   SQSClient,
   type Message,
 } from "@aws-sdk/client-sqs";
-import { Worker, type Job } from "bullmq";
+import { UnrecoverableError, Worker, type Job } from "bullmq";
+import { ZodError } from "zod";
 import {
   AWS_REGION,
   WEBHOOK_QUEUE_MAX_MESSAGES,
@@ -18,6 +20,11 @@ import {
   WEBHOOK_QUEUE_URL,
   WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS,
   WEBHOOK_QUEUE_WAIT_TIME_SECONDS,
+  WEBHOOK_DELIVERY_TIMEOUT_MS,
+  WEBHOOK_RETRY_BASE_DELAY_MS,
+  WEBHOOK_RETRY_JITTER_RATIO,
+  WEBHOOK_RETRY_MAX_DELAY_MS,
+  WEBHOOK_WORKER_CONCURRENCY,
 } from "../config/env.js";
 import { webhookRepository } from "../repositories/WebhookRepository.js";
 import {
@@ -33,6 +40,12 @@ import {
 } from "../services/webhookDlqService.js";
 import { webhookService } from "../services/webhookService.js";
 import { logger } from "../utils/logger.js";
+import {
+  calculateBackoffMs,
+  isRetryableStatus,
+  parseRetryAfter,
+  toSqsVisibilityTimeoutSeconds,
+} from "../services/webhookRetryPolicy.js";
 
 interface WebhookJobContext {
   id: string;
@@ -53,12 +66,22 @@ interface WebhookProcessResult {
 class WebhookProcessingError extends Error {
   readonly dlqFailure: WebhookDlqFailure;
   readonly originalError: unknown;
+  readonly retryable: boolean;
+  readonly retryAfterMs?: number;
 
-  constructor(errorMessage: string, dlqFailure: WebhookDlqFailure, originalError: unknown) {
+  constructor(
+    errorMessage: string,
+    dlqFailure: WebhookDlqFailure,
+    originalError: unknown,
+    retryable = true,
+    retryAfterMs?: number,
+  ) {
     super(errorMessage);
     this.name = "WebhookProcessingError";
     this.dlqFailure = dlqFailure;
     this.originalError = originalError;
+    this.retryable = retryable;
+    if (retryAfterMs !== undefined) this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -106,16 +129,20 @@ export class WebhookWorker {
         try {
           return await this.processWebhookJob(context);
         } catch (error) {
-          if (this.isFinalAttempt(context)) {
+          const retryable = this.isRetryableError(error);
+          if (!retryable || this.isFinalAttempt(context)) {
             await this.routeFailureToDlq(this.getDlqFailure(error, context));
           }
 
+          if (!retryable) {
+            throw new UnrecoverableError(this.getErrorMessage(error));
+          }
           throw error;
         }
       },
       {
         connection: bullRedisConnection,
-        concurrency: 5,
+        concurrency: WEBHOOK_WORKER_CONCURRENCY,
       },
     );
 
@@ -197,7 +224,8 @@ export class WebhookWorker {
         "SQS webhook message completed successfully",
       );
     } catch (error) {
-      const finalAttempt = attemptsMade >= WEBHOOK_QUEUE_MAX_RECEIVE_COUNT;
+      const retryable = this.isRetryableError(error);
+      const finalAttempt = !retryable || attemptsMade >= WEBHOOK_QUEUE_MAX_RECEIVE_COUNT;
 
       if (finalAttempt) {
         const dlqFailure = this.getDlqFailure(
@@ -209,6 +237,8 @@ export class WebhookWorker {
         if (routed) {
           await this.deleteSqsMessage(message);
         }
+      } else {
+        await this.deferSqsMessage(message, attemptsMade, error);
       }
 
       logger.error(
@@ -218,6 +248,7 @@ export class WebhookWorker {
           attemptsMade,
           maxAttempts: WEBHOOK_QUEUE_MAX_RECEIVE_COUNT,
           finalAttempt,
+          retryable,
         },
         "SQS webhook message failed",
       );
@@ -239,7 +270,13 @@ export class WebhookWorker {
     try {
       config = await webhookRepository.getConfig(organizationId);
       if (!config || !config.url) {
-        throw new Error(`Webhook configuration missing for org: ${organizationId}`);
+        const errorMessage = `Webhook configuration missing for org: ${organizationId}`;
+        throw new WebhookProcessingError(
+          errorMessage,
+          this.buildDlqFailure(context, errorMessage, payload, config),
+          new Error(errorMessage),
+          false,
+        );
       }
 
       const payloadString = JSON.stringify(payload);
@@ -253,7 +290,7 @@ export class WebhookWorker {
           "X-Very-prince-Timestamp": payload.timestamp,
         },
         body: payloadString,
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(WEBHOOK_DELIVERY_TIMEOUT_MS),
       });
 
       const responseBody = await response.text();
@@ -270,7 +307,14 @@ export class WebhookWorker {
       deliveryId = delivery.id;
 
       if (!response.ok) {
-        throw new Error(errorMessage);
+        const failureMessage = errorMessage ?? `Webhook failed with status: ${response.status}`;
+        throw new WebhookProcessingError(
+          failureMessage,
+          this.buildDlqFailure(context, failureMessage, payload, config, deliveryId),
+          new Error(failureMessage),
+          isRetryableStatus(response.status),
+          parseRetryAfter(response.headers.get("retry-after")),
+        );
       }
 
       return { success: true, status: response.status };
@@ -294,6 +338,8 @@ export class WebhookWorker {
           );
         }
       }
+
+      if (error instanceof WebhookProcessingError) throw error;
 
       throw new WebhookProcessingError(
         errorMessage,
@@ -429,6 +475,28 @@ export class WebhookWorker {
     }));
   }
 
+  private async deferSqsMessage(
+    message: Message,
+    attemptsMade: number,
+    error: unknown,
+  ): Promise<void> {
+    if (!this.sqsClient || !WEBHOOK_QUEUE_URL || !message.ReceiptHandle) return;
+    const retryAfterMs = error instanceof WebhookProcessingError
+      ? error.retryAfterMs
+      : undefined;
+    const delayMs = calculateBackoffMs(attemptsMade, {
+      baseDelayMs: WEBHOOK_RETRY_BASE_DELAY_MS,
+      maxDelayMs: WEBHOOK_RETRY_MAX_DELAY_MS,
+      jitterRatio: WEBHOOK_RETRY_JITTER_RATIO,
+    }, retryAfterMs);
+
+    await this.sqsClient.send(new ChangeMessageVisibilityCommand({
+      QueueUrl: WEBHOOK_QUEUE_URL,
+      ReceiptHandle: message.ReceiptHandle,
+      VisibilityTimeout: toSqsVisibilityTimeoutSeconds(delayMs),
+    }));
+  }
+
   private getSqsReceiveCount(message: Message): number {
     const receiveCount = Number(message.Attributes?.["ApproximateReceiveCount"] ?? "1");
     return Number.isFinite(receiveCount) && receiveCount > 0 ? receiveCount : 1;
@@ -442,6 +510,11 @@ export class WebhookWorker {
 
   private isFinalAttempt(context: WebhookJobContext): boolean {
     return context.attemptsMade >= context.maxAttempts;
+  }
+
+  private isRetryableError(error: unknown): boolean {
+    if (error instanceof SyntaxError || error instanceof ZodError) return false;
+    return !(error instanceof WebhookProcessingError) || error.retryable;
   }
 
   private getErrorMessage(error: unknown): string {

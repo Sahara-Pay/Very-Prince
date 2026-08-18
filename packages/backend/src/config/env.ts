@@ -45,6 +45,11 @@ const envSchema = z.object({
   WEBHOOK_QUEUE_MAX_MESSAGES: z.coerce.number().int().min(1).max(10).default(5),
   WEBHOOK_QUEUE_WAIT_TIME_SECONDS: z.coerce.number().int().min(0).max(20).default(20),
   WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(30),
+  WEBHOOK_RETRY_BASE_DELAY_MS: z.coerce.number().int().positive().default(5_000),
+  WEBHOOK_RETRY_MAX_DELAY_MS: z.coerce.number().int().positive().default(15 * 60_000),
+  WEBHOOK_RETRY_JITTER_RATIO: z.coerce.number().min(0).max(1).default(0.2),
+  WEBHOOK_DELIVERY_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  WEBHOOK_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(100).default(20),
 });
 
 const config = envSchema.parse(process.env);
@@ -80,6 +85,11 @@ export const WEBHOOK_QUEUE_MAX_RECEIVE_COUNT = config.WEBHOOK_QUEUE_MAX_RECEIVE_
 export const WEBHOOK_QUEUE_MAX_MESSAGES = config.WEBHOOK_QUEUE_MAX_MESSAGES;
 export const WEBHOOK_QUEUE_WAIT_TIME_SECONDS = config.WEBHOOK_QUEUE_WAIT_TIME_SECONDS;
 export const WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS = config.WEBHOOK_QUEUE_VISIBILITY_TIMEOUT_SECONDS;
+export const WEBHOOK_RETRY_BASE_DELAY_MS = config.WEBHOOK_RETRY_BASE_DELAY_MS;
+export const WEBHOOK_RETRY_MAX_DELAY_MS = config.WEBHOOK_RETRY_MAX_DELAY_MS;
+export const WEBHOOK_RETRY_JITTER_RATIO = config.WEBHOOK_RETRY_JITTER_RATIO;
+export const WEBHOOK_DELIVERY_TIMEOUT_MS = config.WEBHOOK_DELIVERY_TIMEOUT_MS;
+export const WEBHOOK_WORKER_CONCURRENCY = config.WEBHOOK_WORKER_CONCURRENCY;
 
 // ─── Redis Streams (live event fan-out) ──────────────────────────────────────
 

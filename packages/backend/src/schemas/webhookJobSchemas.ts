@@ -17,10 +17,10 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 );
 
 export const webhookJobDataSchema = z.object({
-  organizationId: z.string().min(1),
-  event: z.string().min(1),
+  organizationId: z.string().trim().min(1).max(191),
+  event: z.string().trim().min(1).max(128),
   data: z.record(jsonValueSchema),
-});
+}).strict();
 
 export type WebhookJobData = z.infer<typeof webhookJobDataSchema>;
 

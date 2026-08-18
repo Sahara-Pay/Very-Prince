@@ -6,6 +6,7 @@ import {
   AWS_REGION,
   WEBHOOK_QUEUE_PROVIDER,
   WEBHOOK_QUEUE_URL,
+  WEBHOOK_RETRY_BASE_DELAY_MS,
 } from "../config/env.js";
 import {
   webhookJobDataSchema,
@@ -37,7 +38,7 @@ export class WebhookService {
           attempts: 5,
           backoff: {
             type: "exponential",
-            delay: 5000,
+            delay: WEBHOOK_RETRY_BASE_DELAY_MS,
           },
           removeOnComplete: true,
           removeOnFail: false,
@@ -138,7 +139,7 @@ export class WebhookService {
           throw new Error("BullMQ webhook queue is not initialized");
         }
 
-        await this.webhookQueue.add(`webhook:\( {event}: \){organizationId}`, {
+        await this.webhookQueue.add(`webhook:${event}:${organizationId}`, {
           ...jobData,
         });
       }

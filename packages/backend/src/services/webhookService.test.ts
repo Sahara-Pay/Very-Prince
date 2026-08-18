@@ -44,6 +44,7 @@ vi.mock("../config/env.js", () => ({
   AWS_REGION: "us-east-1",
   WEBHOOK_QUEUE_PROVIDER: "bullmq",
   WEBHOOK_QUEUE_URL: undefined,
+  WEBHOOK_RETRY_BASE_DELAY_MS: 5_000,
 }));
 
 import { WebhookService } from "./webhookService.js";

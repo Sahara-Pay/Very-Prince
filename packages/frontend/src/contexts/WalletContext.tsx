@@ -69,12 +69,13 @@ export function WalletProvider({ children }: WalletProviderProps) {
 
   // ── Discover installed wallet extensions (EIP-6963 + legacy fallbacks) ───
 
-  useEffect(() => {
-    const unsubscribe = subscribeToProviders((detail) => {
-      send({ type: 'PROVIDER_DISCOVERED', detail });
-    });
-    return unsubscribe;
-  }, [send]);
+  useEffect(
+    () =>
+      subscribeToProviders((detail) => {
+        send({ type: 'PROVIDER_DISCOVERED', detail });
+      }),
+    [send]
+  );
 
   // ── Freighter-specific event bridge (account/network/disconnect) ─────────
 

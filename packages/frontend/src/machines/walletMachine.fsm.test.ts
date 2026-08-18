@@ -1,321 +1,373 @@
 /**
  * @file walletMachine.fsm.test.ts
- * @description Comprehensive state machine transition tests for wallet FSM.
- * 
- * These tests validate that the XState v5 wallet machine correctly handles:
- * - All 12 documented edge cases
- * - State transition validity
- * - Impossible state prevention
- * - Hardware wallet timeout flows
- * - Multi-wallet discovery
- * - Session persistence
- * - Network changes
- * 
- * The tests ensure that the FSM prevents race conditions and impossible UI states
- * that could occur with boolean-flag-based implementations.
+ * @description State-machine transition guarantees for the XState v5 wallet FSM.
+ *
+ * These tests validate the structural guarantees the FSM provides over a
+ * boolean-flag implementation:
+ *   - exactly-one-state invariant and impossible-state prevention
+ *   - provider discovery / de-duplication
+ *   - connect → connected and hardware-timeout recovery flows
+ *   - network / account / disconnect transitions while connected
+ *   - signing and hardware-timeout-sign recovery flows
+ *
+ * The adapter (`getWalletAdapter`) is exercised end-to-end through a mocked
+ * `@stellar/freighter-api`, mirroring the integration tests in
+ * `walletMachine.test.ts`, so connect/sign actually resolve instead of hanging.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createActor, fromPromise } from 'xstate';
-import { walletMachine, type WalletMachineEvent, type WalletMachineContext } from './walletMachine';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createActor, waitFor } from 'xstate';
+import { walletMachine, type WalletMachineEvent } from './walletMachine';
+import type { WalletProviderDetail } from '../lib/web3/eip6963';
 
-// Mock the wallet adapter
-vi.mock('../lib/web3/walletAdapters', () => ({
-  getWalletAdapter: vi.fn(),
-  REQUIRED_NETWORK: 'testnet',
+vi.mock('@stellar/freighter-api', () => ({
+  default: {
+    isConnected: vi.fn(),
+    isAllowed: vi.fn(),
+    getPublicKey: vi.fn(),
+    getNetwork: vi.fn(),
+    signTransaction: vi.fn(),
+  },
 }));
 
-describe('Wallet Machine FSM - State Transitions', () => {
-  let machine: ReturnType<typeof createActor<typeof walletMachine>>;
+import freighterApi from '@stellar/freighter-api';
 
+const mockIsConnected = freighterApi.isConnected as ReturnType<typeof vi.fn>;
+const mockGetPublicKey = freighterApi.getPublicKey as ReturnType<typeof vi.fn>;
+const mockGetNetwork = freighterApi.getNetwork as ReturnType<typeof vi.fn>;
+const mockSignTransaction = freighterApi.signTransaction as ReturnType<typeof vi.fn>;
+
+const SESSION_KEY = 'very-prince.wallet-session';
+const FREIGHTER_RDNS = 'app.freighter';
+
+function mockSuccessfulFreighter(publicKey = 'GABC123', network: 'PUBLIC' | 'TESTNET' = 'TESTNET') {
+  mockIsConnected.mockResolvedValue(true);
+  mockGetPublicKey.mockResolvedValue(publicKey);
+  mockGetNetwork.mockResolvedValue(network);
+}
+
+function providerDetail(rdns: string, name: string): WalletProviderDetail {
+  return {
+    info: { rdns, name, kind: 'stellar', source: 'eip6963' },
+    provider: {},
+  };
+}
+
+describe('Wallet Machine FSM - State Transitions', () => {
   beforeEach(() => {
-    machine = createActor(walletMachine, { input: {} });
-    machine.start();
+    vi.clearAllMocks();
+    window.localStorage.clear();
   });
 
   afterEach(() => {
-    machine.stop();
+    vi.useRealTimers();
   });
 
   describe('Initial State', () => {
-    it('should start in disconnected state', () => {
-      expect(machine.getSnapshot().matches('disconnected')).toBe(true);
-    });
+    it('starts in disconnected with empty providers and no selection', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
+      const snapshot = actor.getSnapshot();
 
-    it('should have empty providers initially', () => {
-      expect(machine.getSnapshot().context.providers).toEqual([]);
-    });
+      expect(snapshot.matches('disconnected')).toBe(true);
+      expect(snapshot.context.providers).toEqual([]);
+      expect(snapshot.context.selectedRdns).toBeNull();
+      expect(snapshot.context.publicKey).toBeNull();
 
-    it('should have no selected wallet initially', () => {
-      expect(machine.getSnapshot().context.selectedRdns).toBeNull();
+      actor.stop();
     });
   });
 
   describe('Provider Discovery (EIP-6963)', () => {
-    it('should register discovered providers', () => {
-      const providerDetail = {
-        info: {
-          rdns: 'app.freighter',
-          uuid: 'uuid-1',
-          name: 'Freighter',
-          icon: 'data:image/svg+xml;base64,...',
-        },
-        provider: {} as any,
-      };
+    it('registers discovered providers', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
 
-      machine.send({ type: 'PROVIDER_DISCOVERED', detail: providerDetail });
+      actor.send({ type: 'PROVIDER_DISCOVERED', detail: providerDetail(FREIGHTER_RDNS, 'Freighter') });
 
-      expect(machine.getSnapshot().context.providers).toHaveLength(1);
-      expect(machine.getSnapshot().context.providers[0]?.rdns).toBe('app.freighter');
+      expect(actor.getSnapshot().context.providers).toHaveLength(1);
+      expect(actor.getSnapshot().context.providers[0]?.rdns).toBe(FREIGHTER_RDNS);
+
+      actor.stop();
     });
 
-    it('should deduplicate providers by rdns', () => {
-      const providerDetail = {
-        info: {
-          rdns: 'app.freighter',
-          uuid: 'uuid-1',
-          name: 'Freighter',
-          icon: 'data:image/svg+xml;base64,...',
-        },
-        provider: {} as any,
-      };
+    it('de-duplicates providers by rdns', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
+      const detail = providerDetail(FREIGHTER_RDNS, 'Freighter');
 
-      machine.send({ type: 'PROVIDER_DISCOVERED', detail: providerDetail });
-      machine.send({ type: 'PROVIDER_DISCOVERED', detail: providerDetail });
+      actor.send({ type: 'PROVIDER_DISCOVERED', detail });
+      actor.send({ type: 'PROVIDER_DISCOVERED', detail });
 
-      expect(machine.getSnapshot().context.providers).toHaveLength(1);
+      expect(actor.getSnapshot().context.providers).toHaveLength(1);
+
+      actor.stop();
     });
 
-    it('should handle multiple providers', () => {
-      const provider1 = {
-        info: { rdns: 'app.freighter', uuid: 'uuid-1', name: 'Freighter', icon: '' },
-        provider: {} as any,
-      };
-      const provider2 = {
-        info: { rdns: 'app.metamask', uuid: 'uuid-2', name: 'MetaMask', icon: '' },
-        provider: {} as any,
-      };
+    it('tracks multiple providers without conflict', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
 
-      machine.send({ type: 'PROVIDER_DISCOVERED', detail: provider1 });
-      machine.send({ type: 'PROVIDER_DISCOVERED', detail: provider2 });
+      actor.send({ type: 'PROVIDER_DISCOVERED', detail: providerDetail(FREIGHTER_RDNS, 'Freighter') });
+      actor.send({ type: 'PROVIDER_DISCOVERED', detail: providerDetail('app.metamask', 'MetaMask') });
 
-      expect(machine.getSnapshot().context.providers).toHaveLength(2);
+      expect(actor.getSnapshot().context.providers.map((p) => p.rdns).sort()).toEqual([
+        FREIGHTER_RDNS,
+        'app.metamask',
+      ]);
+
+      actor.stop();
     });
   });
 
   describe('Connection Flow', () => {
-    it('should transition to connecting on CONNECT event', () => {
-      machine.send({ type: 'CONNECT' });
-      expect(machine.getSnapshot().matches('connecting')).toBe(true);
+    it('transitions to connecting on CONNECT', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
+
+      actor.send({ type: 'CONNECT' });
+
+      expect(actor.getSnapshot().matches('connecting')).toBe(true);
+
+      actor.stop();
     });
 
-    it('should select specific wallet on SELECT_WALLET event', () => {
-      machine.send({ type: 'SELECT_WALLET', rdns: 'app.metamask' });
-      expect(machine.getSnapshot().matches('connecting')).toBe(true);
-      expect(machine.getSnapshot().context.selectedRdns).toBe('app.metamask');
+    it('selects a specific wallet on SELECT_WALLET', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
+
+      actor.send({ type: 'SELECT_WALLET', rdns: 'app.metamask' });
+
+      expect(actor.getSnapshot().matches('connecting')).toBe(true);
+      expect(actor.getSnapshot().context.selectedRdns).toBe('app.metamask');
+
+      actor.stop();
     });
 
-    it('should prevent connection attempts while already connecting', () => {
-      machine.send({ type: 'CONNECT' });
-      const snapshot = machine.getSnapshot();
-      
-      // Should remain in connecting state
-      expect(snapshot.matches('connecting')).toBe(true);
+    it('reaches connected.idle on successful connection', async () => {
+      mockSuccessfulFreighter();
+      const actor = createActor(walletMachine, { input: {} }).start();
+
+      actor.send({ type: 'CONNECT' });
+      await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
+
+      const snapshot = actor.getSnapshot();
+      expect(snapshot.context.publicKey).toBe('GABC123');
+      expect(snapshot.context.error).toBeNull();
+
+      actor.stop();
+    });
+
+    it('keeps a registered provider while connecting', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
+
+      actor.send({ type: 'PROVIDER_DISCOVERED', detail: providerDetail(FREIGHTER_RDNS, 'Freighter') });
+      actor.send({ type: 'CONNECT' });
+
+      expect(actor.getSnapshot().matches('connecting')).toBe(true);
+      expect(actor.getSnapshot().context.providers).toHaveLength(1);
+
+      actor.stop();
     });
   });
 
-  describe('Hardware Wallet Timeout', () => {
-    it('should transition to hardwareTimeoutConnect on timeout', () => {
-      // This would normally be triggered by the delay, but we can test the state
-      machine.send({ type: 'CONNECT' });
-      
-      // Simulate timeout by sending appropriate error
-      // In real implementation, this happens via the delay
-      expect(machine.getSnapshot().matches('connecting')).toBe(true);
+  describe('Hardware Wallet Timeout (connect)', () => {
+    it('recovers via RETRY after a connect timeout', async () => {
+      vi.useFakeTimers();
+      mockSuccessfulFreighter();
+      // Hang the connect promise so the hardware-timeout delay fires.
+      mockGetPublicKey.mockReturnValue(new Promise(() => {}));
+
+      const actor = createActor(walletMachine, { input: { hardwareTimeoutMs: 1000 } }).start();
+      actor.send({ type: 'CONNECT' });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(actor.getSnapshot().matches('hardwareTimeoutConnect')).toBe(true);
+
+      actor.send({ type: 'RETRY' });
+      expect(actor.getSnapshot().matches('connecting')).toBe(true);
+
+      actor.stop();
     });
 
-    it('should allow retry from hardwareTimeoutConnect', () => {
-      machine.send({ type: 'CONNECT' });
-      // Force transition to hardware timeout (in real scenario via delay)
-      machine.send({ type: 'RETRY' });
-      
-      // Should go back to connecting
-      expect(machine.getSnapshot().matches('connecting')).toBe(true);
-    });
+    it('cancels a connect timeout back to disconnected', async () => {
+      vi.useFakeTimers();
+      mockSuccessfulFreighter();
+      mockGetPublicKey.mockReturnValue(new Promise(() => {}));
 
-    it('should allow cancel from hardwareTimeoutConnect', () => {
-      machine.send({ type: 'CONNECT' });
-      machine.send({ type: 'CANCEL' });
-      
-      // Should go to disconnected
-      expect(machine.getSnapshot().matches('disconnected')).toBe(true);
+      const actor = createActor(walletMachine, { input: { hardwareTimeoutMs: 1000 } }).start();
+      actor.send({ type: 'CONNECT' });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(actor.getSnapshot().matches('hardwareTimeoutConnect')).toBe(true);
+
+      actor.send({ type: 'CANCEL' });
+      expect(actor.getSnapshot().matches('disconnected')).toBe(true);
+
+      actor.stop();
     });
   });
 
   describe('Connected States', () => {
-    it('should transition to connected.idle on successful connection', () => {
-      // Mock successful connection would happen here
-      // For now, test the state structure
-      machine.send({ type: 'CONNECT' });
-      
-      // In real scenario with mocked adapter, this would transition
-      expect(machine.getSnapshot().matches('connecting')).toBe(true);
+    it('disconnects back to disconnected and clears state', async () => {
+      mockSuccessfulFreighter();
+      const actor = createActor(walletMachine, { input: {} }).start();
+
+      actor.send({ type: 'CONNECT' });
+      await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
+
+      actor.send({ type: 'DISCONNECT' });
+
+      const snapshot = actor.getSnapshot();
+      expect(snapshot.matches('disconnected')).toBe(true);
+      expect(snapshot.context.publicKey).toBeNull();
+
+      actor.stop();
     });
 
-    it('should handle DISCONNECT event from connected state', () => {
-      // First need to get to connected state (would require mocking)
-      // For now, test that the event is defined
-      const snapshot = machine.getSnapshot();
-      expect(snapshot).toBeDefined();
+    it('flags an external disconnect with an error', async () => {
+      mockSuccessfulFreighter();
+      const actor = createActor(walletMachine, { input: {} }).start();
+
+      actor.send({ type: 'CONNECT' });
+      await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
+
+      actor.send({ type: 'EXT_DISCONNECTED' });
+
+      const snapshot = actor.getSnapshot();
+      expect(snapshot.matches('disconnected')).toBe(true);
+      expect(snapshot.context.publicKey).toBeNull();
+      expect(snapshot.context.error).toBe('Wallet was disconnected from the extension.');
+
+      actor.stop();
     });
 
-    it('should handle EXT_DISCONNECTED event', () => {
-      machine.send({ type: 'EXT_DISCONNECTED' });
-      expect(machine.getSnapshot().matches('disconnected')).toBe(true);
-    });
-  });
+    it('updates the public key in place on ACCOUNT_CHANGED', async () => {
+      mockSuccessfulFreighter('GABC123');
+      const actor = createActor(walletMachine, { input: {} }).start();
 
-  describe('Network Changes', () => {
-    it('should handle NETWORK_CHANGED event', () => {
-      // This would transition to wrongNetwork if network != REQUIRED_NETWORK
-      const event: WalletMachineEvent = { 
-        type: 'NETWORK_CHANGED', 
-        network: 'public' 
-      };
-      
-      // Event is defined, actual transition depends on current state
-      expect(event.type).toBe('NETWORK_CHANGED');
+      actor.send({ type: 'CONNECT' });
+      await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
+
+      actor.send({ type: 'ACCOUNT_CHANGED', publicKey: 'GNEW...' });
+
+      const snapshot = actor.getSnapshot();
+      expect(snapshot.matches({ connected: 'idle' })).toBe(true);
+      expect(snapshot.context.publicKey).toBe('GNEW...');
+
+      actor.stop();
     });
 
-    it('should handle SWITCH_NETWORK event', () => {
-      const event: WalletMachineEvent = { type: 'SWITCH_NETWORK' };
-      expect(event.type).toBe('SWITCH_NETWORK');
-    });
-  });
+    it('moves to wrongNetwork when the network changes to an unsupported one', async () => {
+      mockSuccessfulFreighter();
+      const actor = createActor(walletMachine, { input: {} }).start();
 
-  describe('Account Changes', () => {
-    it('should handle ACCOUNT_CHANGED event', () => {
-      const event: WalletMachineEvent = { 
-        type: 'ACCOUNT_CHANGED', 
-        publicKey: 'GABCD...' 
-      };
-      
-      machine.send(event);
-      // Should update context without changing state
-      expect(machine.getSnapshot().context.publicKey).toBe('GABCD...');
-    });
+      actor.send({ type: 'CONNECT' });
+      await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
 
-    it('should handle account disconnection', () => {
-      const event: WalletMachineEvent = { 
-        type: 'ACCOUNT_CHANGED', 
-        publicKey: null 
-      };
-      
-      machine.send(event);
-      expect(machine.getSnapshot().context.publicKey).toBeNull();
+      actor.send({ type: 'NETWORK_CHANGED', network: 'public' });
+
+      expect(actor.getSnapshot().matches({ connected: 'wrongNetwork' })).toBe(true);
+      expect(actor.getSnapshot().context.publicKey).toBe('GABC123');
+
+      actor.stop();
     });
   });
 
   describe('Signing Flow', () => {
-    it('should handle SIGN_REQUEST event', () => {
-      const event: WalletMachineEvent = { 
-        type: 'SIGN_REQUEST', 
-        xdr: 'AAAA...' 
-      };
-      
-      // Event is defined
-      expect(event.type).toBe('SIGN_REQUEST');
+    it('signs and stores the signed XDR before returning to idle', async () => {
+      mockSuccessfulFreighter();
+      mockSignTransaction.mockResolvedValue('SIGNED_XDR');
+
+      const actor = createActor(walletMachine, { input: {} }).start();
+      actor.send({ type: 'CONNECT' });
+      await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
+
+      actor.send({ type: 'SIGN_REQUEST', xdr: 'AAAA...' });
+      await waitFor(actor, (s) => s.matches({ connected: 'idle' }) && s.context.lastSignedXdr === 'SIGNED_XDR');
+
+      const snapshot = actor.getSnapshot();
+      expect(snapshot.context.pendingSignXdr).toBeNull();
+      expect(snapshot.context.lastSignedXdr).toBe('SIGNED_XDR');
+
+      actor.stop();
     });
 
-    it('should transition to signing state when connected', () => {
-      // Would need to be in connected.idle state first
-      const event: WalletMachineEvent = { 
-        type: 'SIGN_REQUEST', 
-        xdr: 'AAAA...' 
-      };
-      
-      expect(event.type).toBe('SIGN_REQUEST');
+    it('cancels a signing timeout back to idle with a cancel error', async () => {
+      vi.useFakeTimers();
+      mockSuccessfulFreighter();
+
+      const actor = createActor(walletMachine, { input: { hardwareTimeoutMs: 1000 } }).start();
+      actor.send({ type: 'CONNECT' });
+      await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
+
+      mockSignTransaction.mockReturnValue(new Promise(() => {}));
+      actor.send({ type: 'SIGN_REQUEST', xdr: 'AAAA...' });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(actor.getSnapshot().matches({ connected: 'hardwareTimeoutSign' })).toBe(true);
+
+      actor.send({ type: 'CANCEL' });
+
+      const snapshot = actor.getSnapshot();
+      expect(snapshot.matches({ connected: 'idle' })).toBe(true);
+      expect(snapshot.context.error).toBe('Signing was cancelled.');
+
+      actor.stop();
     });
   });
 
   describe('Impossible State Prevention', () => {
-    it('should prevent simultaneous connecting and connected states', () => {
-      // The FSM structure makes this impossible
-      // You can't be in both 'connecting' and 'connected' states
-      machine.send({ type: 'CONNECT' });
-      const isConnecting = machine.getSnapshot().matches('connecting');
-      const isConnected = machine.getSnapshot().matches('connected');
-      
-      expect(isConnecting || isConnected).toBe(true);
-      expect(isConnecting && isConnected).toBe(false);
+    it('ignores SIGN_REQUEST while disconnected', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
+
+      actor.send({ type: 'SIGN_REQUEST', xdr: 'AAAA...' });
+
+      expect(actor.getSnapshot().matches('disconnected')).toBe(true);
+
+      actor.stop();
     });
 
-    it('should prevent simultaneous signing and disconnected states', () => {
-      // The FSM structure makes this impossible
-      // 'signing' is a substate of 'connected'
-      const isDisconnected = machine.getSnapshot().matches('disconnected');
-      const isSigning = machine.getSnapshot().matches({ connected: 'signing' });
-      
-      if (isDisconnected) {
-        expect(isSigning).toBe(false);
-      }
+    it('ignores DISCONNECT while already disconnected', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
+
+      actor.send({ type: 'DISCONNECT' });
+
+      expect(actor.getSnapshot().matches('disconnected')).toBe(true);
+      expect(actor.getSnapshot().context.error).toBeNull();
+
+      actor.stop();
     });
 
-    it('should prevent hardware timeout without prior operation', () => {
-      // Hardware timeout states are only reachable from connecting or signing
-      const isHardwareTimeoutConnect = machine.getSnapshot().matches('hardwareTimeoutConnect');
-      const isHardwareTimeoutSign = machine.getSnapshot().matches({ connected: 'hardwareTimeoutSign' });
-      
-      // Initially should not be in either timeout state
-      expect(isHardwareTimeoutConnect || isHardwareTimeoutSign).toBe(false);
+    it('is never simultaneously connecting and connected', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
+      actor.send({ type: 'CONNECT' });
+
+      const snapshot = actor.getSnapshot();
+      expect(snapshot.matches('connecting')).toBe(true);
+      expect(snapshot.matches('connected')).toBe(false);
+
+      actor.stop();
     });
   });
 
   describe('Session Persistence', () => {
-    it('should attempt silent restore on mount if session exists', () => {
-      // This is handled by the 'always' guard in disconnected state
-      const snapshot = machine.getSnapshot();
-      expect(snapshot.matches('disconnected')).toBe(true);
-    });
+    it('silently restores a persisted session on startup', async () => {
+      window.localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ rdns: FREIGHTER_RDNS, publicKey: 'GABC123' }),
+      );
+      mockSuccessfulFreighter('GABC123');
 
-    it('should clear session on disconnect', () => {
-      machine.send({ type: 'DISCONNECT' });
-      
-      // Session should be cleared
-      expect(machine.getSnapshot().context.publicKey).toBeNull();
-      expect(machine.getSnapshot().context.network).toBeNull();
-    });
-  });
+      const actor = createActor(walletMachine, { input: {} }).start();
+      await waitFor(actor, (s) => s.matches({ connected: 'idle' }));
 
-  describe('Error Handling', () => {
-    it('should handle connection errors gracefully', () => {
-      // Errors are handled in the onError transitions
-      machine.send({ type: 'CONNECT' });
-      
-      // Should remain in a valid state
-      const snapshot = machine.getSnapshot();
-      expect(['disconnected', 'connecting', 'hardwareTimeoutConnect']).some(
-        state => snapshot.matches(state as any)
-      ).toBe(true);
-    });
+      expect(actor.getSnapshot().context.publicKey).toBe('GABC123');
 
-    it('should handle signing errors gracefully', () => {
-      // Signing errors transition back to idle with error message
-      const event: WalletMachineEvent = { 
-        type: 'SIGN_REQUEST', 
-        xdr: 'AAAA...' 
-      };
-      
-      expect(event.type).toBe('SIGN_REQUEST');
+      actor.stop();
     });
   });
 
   describe('Type Safety', () => {
-    it('should have fully typed events', () => {
+    it('defines every event with a discriminator string', () => {
       const validEvents: WalletMachineEvent[] = [
-        { type: 'PROVIDER_DISCOVERED', detail: {} as any },
+        { type: 'PROVIDER_DISCOVERED', detail: providerDetail(FREIGHTER_RDNS, 'Freighter') },
         { type: 'CONNECT' },
-        { type: 'SELECT_WALLET', rdns: 'app.freighter' },
+        { type: 'SELECT_WALLET', rdns: FREIGHTER_RDNS },
         { type: 'RETRY' },
         { type: 'CANCEL' },
         { type: 'DISCONNECT' },
@@ -326,187 +378,23 @@ describe('Wallet Machine FSM - State Transitions', () => {
         { type: 'SIGN_REQUEST', xdr: 'AAAA...' },
       ];
 
-      validEvents.forEach(event => {
-        expect(event).toBeDefined();
+      for (const event of validEvents) {
         expect(typeof event.type).toBe('string');
-      });
+      }
     });
 
-    it('should have fully typed context', () => {
-      const snapshot = machine.getSnapshot();
-      const context = snapshot.context as WalletMachineContext;
+    it('exposes a fully-shaped context', () => {
+      const actor = createActor(walletMachine, { input: {} }).start();
+      const context = actor.getSnapshot().context;
 
-      expect(typeof context.providers).toBe('object');
+      expect(Array.isArray(context.providers)).toBe(true);
       expect(typeof context.providerDetails).toBe('object');
-      expect(typeof context.selectedRdns).toBe('string' || context.selectedRdns === null);
-      expect(typeof context.publicKey).toBe('string' || context.publicKey === null);
-      expect(typeof context.network).toBe('string' || context.network === null);
-      expect(typeof context.error).toBe('string' || context.error === null);
-    });
-  });
+      expect(context.selectedRdns).toBeNull();
+      expect(context.publicKey).toBeNull();
+      expect(context.network).toBeNull();
+      expect(context.error).toBeNull();
 
-  describe('Edge Cases from Documentation', () => {
-    it('Edge case #1: No wallet extension installed', () => {
-      // Should remain in disconnected with empty providers
-      expect(machine.getSnapshot().context.providers).toHaveLength(0);
-      expect(machine.getSnapshot().matches('disconnected')).toBe(true);
-    });
-
-    it('Edge case #2: Multiple extensions installed at once', () => {
-      const providers = [
-        { info: { rdns: 'app.freighter', uuid: '1', name: 'Freighter', icon: '' }, provider: {} as any },
-        { info: { rdns: 'app.metamask', uuid: '2', name: 'MetaMask', icon: '' }, provider: {} as any },
-      ];
-
-      providers.forEach(p => machine.send({ type: 'PROVIDER_DISCOVERED', detail: p }));
-
-      expect(machine.getSnapshot().context.providers).toHaveLength(2);
-    });
-
-    it('Edge case #3: User picks specific wallet', () => {
-      machine.send({ type: 'SELECT_WALLET', rdns: 'app.metamask' });
-      expect(machine.getSnapshot().context.selectedRdns).toBe('app.metamask');
-    });
-
-    it('Edge case #8: Wallet disconnected externally', () => {
-      machine.send({ type: 'EXT_DISCONNECTED' });
-      expect(machine.getSnapshot().matches('disconnected')).toBe(true);
-      expect(machine.getSnapshot().context.error).toBe('Wallet was disconnected from the extension.');
-    });
-
-    it('Edge case #7: Account switched while connected', () => {
-      const event: WalletMachineEvent = { 
-        type: 'ACCOUNT_CHANGED', 
-        publicKey: 'GNEW...' 
-      };
-      
-      machine.send(event);
-      expect(machine.getSnapshot().context.publicKey).toBe('GNEW...');
-    });
-  });
-
-  describe('State Machine Guarantees', () => {
-    it('should always be in exactly one state', () => {
-      const snapshot = machine.getSnapshot();
-      const states = [
-        'disconnected',
-        'connecting',
-        'hardwareTimeoutConnect',
-        'connected',
-      ];
-
-      const matchingStates = states.filter(state => snapshot.matches(state as any));
-      expect(matchingStates).toHaveLength(1);
-    });
-
-    it('should prevent invalid state transitions', () => {
-      // The FSM structure prevents invalid transitions
-      // For example, you can't go from disconnected directly to signing
-      const signingEvent: WalletMachineEvent = { 
-        type: 'SIGN_REQUEST', 
-        xdr: 'AAAA...' 
-      };
-      
-      // Sending SIGN_REQUEST while disconnected should not transition to signing
-      machine.send(signingEvent);
-      expect(machine.getSnapshot().matches('disconnected')).toBe(true);
-    });
-
-    it('should maintain context consistency across transitions', () => {
-      // Register a provider
-      const provider = {
-        info: { rdns: 'app.freighter', uuid: '1', name: 'Freighter', icon: '' },
-        provider: {} as any,
-      };
-      machine.send({ type: 'PROVIDER_DISCOVERED', detail: provider });
-
-      // Transition to connecting
-      machine.send({ type: 'CONNECT' });
-
-      // Provider should still be registered
-      expect(machine.getSnapshot().context.providers).toHaveLength(1);
-      expect(machine.getSnapshot().context.providers[0]?.rdns).toBe('app.freighter');
-    });
-  });
-});
-
-describe('Wallet Machine FSM - Integration Tests', () => {
-  describe('Multi-Wallet Scenarios', () => {
-    it('should handle wallet switching without race conditions', () => {
-      const machine = createActor(walletMachine, { input: {} });
-      machine.start();
-
-      // Discover multiple wallets
-      const providers = [
-        { info: { rdns: 'app.freighter', uuid: '1', name: 'Freighter', icon: '' }, provider: {} as any },
-        { info: { rdns: 'app.metamask', uuid: '2', name: 'MetaMask', icon: '' }, provider: {} as any },
-        { info: { rdns: 'app.rabet', uuid: '3', name: 'Rabet', icon: '' }, provider: {} as any },
-      ];
-
-      providers.forEach(p => machine.send({ type: 'PROVIDER_DISCOVERED', detail: p }));
-
-      // Select first wallet
-      machine.send({ type: 'SELECT_WALLET', rdns: 'app.freighter' });
-      expect(machine.getSnapshot().context.selectedRdns).toBe('app.freighter');
-
-      // Switch to second wallet
-      machine.send({ type: 'SELECT_WALLET', rdns: 'app.metamask' });
-      expect(machine.getSnapshot().context.selectedRdns).toBe('app.metamask');
-
-      // All providers should still be registered
-      expect(machine.getSnapshot().context.providers).toHaveLength(3);
-
-      machine.stop();
-    });
-  });
-
-  describe('Hardware Wallet Recovery', () => {
-    it('should provide retry mechanism after timeout', () => {
-      const machine = createActor(walletMachine, { input: {} });
-      machine.start();
-
-      // Simulate timeout scenario
-      machine.send({ type: 'CONNECT' });
-      // In real scenario, timeout would trigger hardwareTimeoutConnect state
-      
-      // User retries
-      machine.send({ type: 'RETRY' });
-      
-      // Should attempt connection again
-      expect(machine.getSnapshot().matches('connecting')).toBe(true);
-
-      machine.stop();
-    });
-
-    it('should allow cancellation of hardware operation', () => {
-      const machine = createActor(walletMachine, { input: {} });
-      machine.start();
-
-      machine.send({ type: 'CONNECT' });
-      machine.send({ type: 'CANCEL' });
-      
-      // Should return to disconnected state
-      expect(machine.getSnapshot().matches('disconnected')).toBe(true);
-
-      machine.stop();
-    });
-  });
-
-  describe('Network Switching', () => {
-    it('should detect wrong network and show warning', () => {
-      const machine = createActor(walletMachine, { input: {} });
-      machine.start();
-
-      // This would normally happen when connected
-      // For now, test that the event exists
-      const event: WalletMachineEvent = { 
-        type: 'NETWORK_CHANGED', 
-        network: 'public' 
-      };
-      
-      expect(event.network).toBe('public');
-
-      machine.stop();
+      actor.stop();
     });
   });
 });

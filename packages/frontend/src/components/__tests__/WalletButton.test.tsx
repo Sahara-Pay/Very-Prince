@@ -14,8 +14,14 @@ function createMockState(overrides: Record<string, unknown> = {}) {
     isConnected: false,
     publicKey: null,
     isLoading: false,
+    isHardwareTimeout: false,
+    isWrongNetwork: false,
+    network: "testnet",
+    providers: [],
     connect: mockConnect,
     disconnect: mockDisconnect,
+    retryConnection: vi.fn(),
+    cancelHardwareWait: vi.fn(),
     error: null,
     ...overrides,
   };
@@ -43,7 +49,7 @@ describe("WalletButton", () => {
     mockUseUnifiedWallet.mockReturnValue(createMockState({ isInstalled: false }));
     render(<WalletButton />);
 
-    const link = screen.getByRole("link", { name: /install freighter/i });
+    const link = screen.getByRole("link", { name: /install wallet/i });
     expect(link).toHaveAttribute("href", "https://freighter.app");
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
@@ -53,7 +59,7 @@ describe("WalletButton", () => {
     mockUseUnifiedWallet.mockReturnValue(createMockState());
     render(<WalletButton />);
 
-    const btn = screen.getByRole("button", { name: "Connect Freighter wallet" });
+    const btn = screen.getByRole("button", { name: "Connect wallet" });
     expect(btn).toBeInTheDocument();
     expect(btn).not.toBeDisabled();
   });
@@ -62,7 +68,7 @@ describe("WalletButton", () => {
     mockUseUnifiedWallet.mockReturnValue(createMockState({ isLoading: true }));
     render(<WalletButton />);
 
-    const btn = screen.getByRole("button", { name: "Connect Freighter wallet" });
+    const btn = screen.getByRole("button", { name: "Connect wallet" });
     expect(btn).toBeDisabled();
   });
 

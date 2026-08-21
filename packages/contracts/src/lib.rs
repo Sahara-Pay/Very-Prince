@@ -28,6 +28,9 @@ pub mod linked_list;
 pub mod capability_token;
 // Issue #479: O(log N) binary search over sorted vesting tranche arrays.
 // Replaces the O(N) linear scan in claim_payout / claim_payout_with_nonce.
+// Fractional asset wrapping — pure-math kernel for deterministic SAC token
+// wrapping / unwrapping with comprehensive proptest invariant suites.
+pub mod fractional_wrap;
 pub mod vesting_search;
 
 // SDK compatibility tests to ensure safe version upgrades

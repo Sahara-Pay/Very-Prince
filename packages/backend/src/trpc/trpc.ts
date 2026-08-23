@@ -1,12 +1,27 @@
 /**
  * @file trpc.ts
- * @description Shared tRPC instance for router and middleware modules.
+ * @description Shared tRPC instance with standard error formatting.
  */
 
 import { initTRPC } from "@trpc/server";
+import { ZodError } from "zod";
 
 export interface TRPCContext {
   stateHash?: string;
 }
 
-export const t = initTRPC.context<TRPCContext>().create();
+export const t = initTRPC.context<TRPCContext>().create({
+  errorFormatter({ shape, error }) {
+    return {
+      ...shape,
+      data: {
+        ...shape.data,
+        // Expose flattened Zod issues for BAD_REQUEST only; never stack in prod shape beyond defaults
+        zodError:
+          error.code === "BAD_REQUEST" && error.cause instanceof ZodError
+            ? error.cause.flatten()
+            : null,
+      },
+    };
+  },
+});

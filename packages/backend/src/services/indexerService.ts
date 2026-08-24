@@ -25,6 +25,7 @@ import {
   type IndexerBatch,
   type TransactionBatchRow,
 } from './indexerBulkUpsert.js';
+import { chainReorgHandler } from './chainReorgHandler.js';
 
 /**
  * How many events are decoded/accumulated before yielding to the event loop.
@@ -119,6 +120,36 @@ export class IndexerService {
     const lastProcessedLedger = await this.getCursor();
     logger.info({ fromLedger: lastProcessedLedger + 1 }, 'Indexing from ledger');
 
+    // ── Chain re-org detection ────────────────────────────────────────────
+    // Check the current ledger sequence to detect potential re-orgs before
+    // processing new events. This is non-blocking and uses the singleton
+    // chainReorgHandler which maintains checkpoint state in memory.
+    try {
+      const latestLedgerInfo = await stellarService.getLatestLedger();
+      if (latestLedgerInfo) {
+        const reorgResult = await chainReorgHandler.detectReorg(latestLedgerInfo.sequence);
+        if (reorgResult.isReorg && reorgResult.orphanedLedgers && reorgResult.orphanedLedgers.length > 0) {
+          logger.warn(
+            {
+              currentLedger: latestLedgerInfo.sequence,
+              lastProcessed: lastProcessedLedger,
+              orphanedLedgers: reorgResult.orphanedLedgers,
+            },
+            'Chain reorganization detected, rolling back orphaned state',
+          );
+          await chainReorgHandler.rollback(reorgResult.orphanedLedgers);
+          // Re-read cursor after rollback
+          const rolledBackCursor = await this.getCursor();
+          logger.info({ cursor: rolledBackCursor }, 'Cursor after re-org rollback');
+        }
+      }
+    } catch (err) {
+      // Re-org detection is best-effort; don't fail the sync cycle if it errors.
+      // The indexer will continue processing and may encounter inconsistencies
+      // that trigger a manual investigation.
+      logger.debug({ err }, 'Re-org detection skipped (best-effort)');
+    }
+
     const eventsResponse = await stellarService.getEvents(lastProcessedLedger + 1);
 
     if (eventsResponse.events && eventsResponse.events.length > 0) {
@@ -204,6 +235,14 @@ export class IndexerService {
           update: { lastProcessedLedger: latestLedger },
           create: { id: this.CURSOR_ID, lastProcessedLedger: latestLedger },
         });
+      });
+
+      // Record checkpoint for re-org detection so future rollbacks can
+      // efficiently identify and remove affected rows.
+      await chainReorgHandler.recordCheckpoint(latestLedger, {
+        transactions: batch.transactions.map((r) => r.txHash),
+        fundingEvents: batch.fundingEvents.map((r) => r.orgId),
+        payoutEvents: batch.payoutEvents.map((r) => r.orgId),
       });
 
       logger.info({ latestLedger }, 'Successfully processed events up to ledger');

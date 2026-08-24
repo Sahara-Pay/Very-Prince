@@ -18,6 +18,25 @@ import {
   type PayoutClaimedEvent,
   type MaintainerAddedEvent,
 } from '../utils/xdrDecoder.js';
+import {
+  createEmptyBatch,
+  batchHasRows,
+  indexerBulkUpsertService,
+  type IndexerBatch,
+  type TransactionBatchRow,
+} from './indexerBulkUpsert.js';
+
+/**
+ * How many events are decoded/accumulated before yielding to the event loop.
+ * Prevents a large RPC page (thousands of events) from starving parallel
+ * HTTP / tRPC / WebSocket work during the CPU-bound decode + row-mapping pass.
+ */
+const EVENT_LOOP_YIELD_INTERVAL = 500;
+
+/** Yields to the event loop so parallel operations are never starved. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 export class IndexerService {
   private isRunning = false;
@@ -105,6 +124,15 @@ export class IndexerService {
     if (eventsResponse.events && eventsResponse.events.length > 0) {
       logger.info({ count: eventsResponse.events.length }, 'Processing new events');
 
+      // ── Pass 1: decode, validate, dedupe, accumulate ──────────────────────
+      // All DB writes are accumulated into typed batches instead of being
+      // issued per-event, so a finalization burst (thousands of events) is
+      // persisted in a handful of bulk upsert statements below.
+      const batch: IndexerBatch = createEmptyBatch();
+      const claimedEvents: PayoutClaimedEvent[] = [];
+      const fundedOrgIds = new Set<string>();
+      let processedCount = 0;
+
       for (let i = 0; i < eventsResponse.events.length; i++) {
         const rawEvent = eventsResponse.events[i];
         if (!rawEvent) continue;
@@ -116,12 +144,57 @@ export class IndexerService {
             continue;
           }
           const eventIndex = i;
-          logger.info({ eventName: contractEvent.eventName }, 'Processing event');
-          await this.handleContractEvent(contractEvent, eventIndex);
+          const createdAt = new Date(contractEvent.ledgerClosedAt);
+
+          // HLL replay-attack filter (probabilistic; DB-confirmed on positives).
+          const { isDuplicate } = await txHashFilter.check(contractEvent.txHash, eventIndex, createdAt);
+          if (isDuplicate) {
+            logger.debug(
+              { txHash: contractEvent.txHash, eventIndex, eventName: contractEvent.eventName },
+              '[IndexerService] Duplicate event suppressed by HLL filter',
+            );
+            continue;
+          }
+
+          // Non-blocking side effects: live fan-out + SSE are fire-and-forget so
+          // the event loop is never held hostage by Redis or socket backpressure.
+          void publishToStream(contractEvent, eventIndex);
+          this.emitSSE(contractEvent);
+
+          // Accumulate DB rows (batch upsert happens once per sync).
+          this.accumulate(batch, contractEvent, eventIndex, createdAt);
+          processedCount++;
+
+          if (contractEvent.eventName === 'PayoutClaimed') {
+            claimedEvents.push(contractEvent as PayoutClaimedEvent);
+          } else if (contractEvent.eventName === 'OrgFunded') {
+            fundedOrgIds.add((contractEvent as OrgFundedEvent).orgId);
+          }
+
+          if (i > 0 && i % EVENT_LOOP_YIELD_INTERVAL === 0) {
+            await yieldToEventLoop();
+          }
         } catch (error) {
-          logger.error({ err: error }, 'Error processing event for SSE');
+          logger.error({ err: error }, 'Error processing event');
         }
       }
+
+      logger.info({ processedCount }, 'Events accumulated, flushing batch');
+
+      // ── Pass 2: single bulk upsert transaction ────────────────────────────
+      if (batchHasRows(batch)) {
+        await indexerBulkUpsertService.flush(batch);
+      }
+
+      // Non-blocking invalidation + webhook dispatch after the durable write,
+      // so cache hits and external HTTP never delay the sync.
+      for (const orgId of fundedOrgIds) {
+        void invalidateOnFundingEvent(orgId);
+      }
+      if (processedCount > 0) {
+        void invalidateOnTransactionEvent();
+      }
+      void this.dispatchClaimedWebhooks(claimedEvents);
 
       const latestLedger = Math.max(...eventsResponse.events.map(e => e.ledger));
 
@@ -141,41 +214,96 @@ export class IndexerService {
     logger.info('Blockchain data sync completed successfully');
   }
 
-  private async handleContractEvent(event: ContractEvent, eventIndex: number): Promise<void> {
-    const createdAt = new Date(event.ledgerClosedAt);
-
-    // ── HLL replay-attack filter ──────────────────────────────────────────────
-    // Check before any SSE emission, webhook dispatch, stream publish, or DB write.
-    // The filter is probabilistic: confirmed positives are dropped immediately;
-    // false positives are verified against the DB and allowed through.
-    const { isDuplicate, decidedBy } = await txHashFilter.check(event.txHash, eventIndex, createdAt);
-    if (isDuplicate) {
-      logger.debug(
-        { txHash: event.txHash, eventIndex, eventName: event.eventName, decidedBy },
-        '[IndexerService] Duplicate event suppressed by HLL filter',
-      );
-      return;
-    }
-
-    // ── Redis Streams push (live path) ────────────────────────────────────────
-    // Publish to the central stream BEFORE DB persistence so connected clients
-    // see the mutation instantly even under slow transaction commits. If the
-    // stream is unavailable, `publishToStream` degrades to the local event bus.
-    void publishToStream(event, eventIndex);
-    // Log filter metrics periodically for observability (every 500 events).
-    if (txHashFilter.getMetrics().totalChecked % 500 === 0) {
-      logger.info(txHashFilter.getMetrics(), '[TxHashFilter] metrics snapshot');
-    }
-    // ─────────────────────────────────────────────────────────────────────────
-
-    let walletAddress = '';
-    let volumeUSD = BigInt(0);
-
+  /**
+   * Accumulates a decoded contract event into the batch. Pure row-mapping —
+   * no I/O — so it is cheap and testable in isolation.
+   */
+  private accumulate(
+    batch: IndexerBatch,
+    event: ContractEvent,
+    eventIndex: number,
+    createdAt: Date,
+  ): void {
     switch (event.eventName) {
       case 'PayoutAllocated': {
         const payoutEvent = event as PayoutAllocatedEvent;
-        walletAddress = payoutEvent.maintainer;
-        volumeUSD = BigInt(payoutEvent.amount);
+        batch.payoutEvents.push({
+          orgId: payoutEvent.orgId,
+          maintainer: payoutEvent.maintainer,
+          amountStroops: BigInt(payoutEvent.amount),
+          amountXlm: stroopsToXlm(payoutEvent.amount),
+          ledger: payoutEvent.ledger,
+          txHash: payoutEvent.txHash,
+          createdAt,
+        });
+        batch.transactions.push(this.toTransactionRow(event, eventIndex, createdAt, payoutEvent.maintainer, payoutEvent.amount));
+        break;
+      }
+      case 'PayoutClaimed': {
+        const claimEvent = event as PayoutClaimedEvent;
+        batch.transactions.push(this.toTransactionRow(event, eventIndex, createdAt, claimEvent.maintainer, claimEvent.amount));
+        break;
+      }
+      case 'OrgFunded': {
+        const fundEvent = event as OrgFundedEvent;
+        batch.fundingEvents.push({
+          orgId: fundEvent.orgId,
+          from: fundEvent.from,
+          amountStroops: BigInt(fundEvent.amount),
+          amountXlm: stroopsToXlm(fundEvent.amount),
+          ledger: fundEvent.ledger,
+          txHash: fundEvent.txHash,
+          createdAt,
+        });
+        batch.transactions.push(this.toTransactionRow(event, eventIndex, createdAt, fundEvent.from, fundEvent.amount));
+        break;
+      }
+      case 'MaintainerAdded': {
+        const maintainerEvent = event as MaintainerAddedEvent;
+        batch.maintainers.push({
+          address: maintainerEvent.maintainer,
+          orgId: maintainerEvent.orgId,
+        });
+        batch.transactions.push(this.toTransactionRow(event, eventIndex, createdAt, maintainerEvent.maintainer, '0'));
+        break;
+      }
+      case 'OrgRegistered':
+        batch.transactions.push(this.toTransactionRow(event, eventIndex, createdAt, event.orgId, '0'));
+        break;
+      case 'ProtocolPaused':
+      case 'ProtocolUnpaused':
+      case 'Initialized':
+      case 'ContractUpgraded':
+        batch.transactions.push(this.toTransactionRow(event, eventIndex, createdAt, event.protocolAdmin, '0'));
+        break;
+    }
+  }
+
+  /** Maps an event to a `Transaction` row, preserving the previous table contract. */
+  private toTransactionRow(
+    event: ContractEvent,
+    eventIndex: number,
+    createdAt: Date,
+    walletAddress: string,
+    volumeUSD: string,
+  ): TransactionBatchRow {
+    return {
+      txHash: event.txHash,
+      eventIndex,
+      walletAddress,
+      volumeUSD,
+      createdAt,
+      type: event.eventName,
+      ledger: event.ledger,
+      rawData: JSON.stringify(event),
+    };
+  }
+
+  /** Synchronous, cheap SSE fan-out. Kept separate so the hot loop stays readable. */
+  private emitSSE(event: ContractEvent): void {
+    switch (event.eventName) {
+      case 'PayoutAllocated': {
+        const payoutEvent = event as PayoutAllocatedEvent;
         emitSSEEvent('payout_allocated', {
           orgId: payoutEvent.orgId,
           maintainer: payoutEvent.maintainer,
@@ -184,23 +312,10 @@ export class IndexerService {
           ledger: payoutEvent.ledger,
           txHash: payoutEvent.txHash,
         });
-        await prisma.payoutEvent.create({
-          data: {
-            orgId: payoutEvent.orgId,
-            maintainer: payoutEvent.maintainer,
-            amountStroops: BigInt(payoutEvent.amount),
-            amountXlm: stroopsToXlm(payoutEvent.amount),
-            ledger: payoutEvent.ledger,
-            txHash: payoutEvent.txHash,
-            createdAt,
-          }
-        });
         break;
       }
       case 'PayoutClaimed': {
         const claimEvent = event as PayoutClaimedEvent;
-        walletAddress = claimEvent.maintainer;
-        volumeUSD = BigInt(claimEvent.amount);
         emitSSEEvent('payout_claimed', {
           maintainer: claimEvent.maintainer,
           amountStroops: claimEvent.amount,
@@ -208,18 +323,10 @@ export class IndexerService {
           ledger: claimEvent.ledger,
           txHash: claimEvent.txHash,
         });
-        const maintainer = await prisma.maintainer.findUnique({ where: { address: claimEvent.maintainer } });
-        if (maintainer) {
-          await webhookService.dispatchPayoutClaimed(maintainer.orgId, claimEvent.maintainer, claimEvent.amount, claimEvent.txHash, claimEvent.ledger);
-        }
         break;
       }
       case 'OrgFunded': {
         const fundEvent = event as OrgFundedEvent;
-        walletAddress = fundEvent.from;
-        volumeUSD = BigInt(fundEvent.amount);
-
-        // Emit SSE for real-time UI updates
         emitSSEEvent('funds_deposited', {
           orgId: fundEvent.orgId,
           from: fundEvent.from,
@@ -228,71 +335,70 @@ export class IndexerService {
           ledger: fundEvent.ledger,
           txHash: fundEvent.txHash,
         });
-
-        // Persist to DB for optimized SQL aggregation (avoids N+1 Stellar RPC calls)
-        // Uses upsert via createMany skipDuplicates for idempotency on the
-        // unique constraint (txHash, orgId, createdAt).
-        await prisma.fundingEvent.createMany({
-          data: [
-            {
-              orgId: fundEvent.orgId,
-              from: fundEvent.from,
-              amountStroops: BigInt(fundEvent.amount),
-              amountXlm: stroopsToXlm(fundEvent.amount),
-              ledger: fundEvent.ledger,
-              txHash: fundEvent.txHash,
-              createdAt,
-            },
-          ],
-          skipDuplicates: true,
-        });
-        void invalidateOnFundingEvent(fundEvent.orgId);
         break;
       }
-      case 'OrgRegistered': {
-        walletAddress = event.orgId;
+      case 'OrgRegistered':
         emitSSEEvent('org_registered', { orgId: event.orgId, ledger: event.ledger, txHash: event.txHash });
         break;
-      }
       case 'MaintainerAdded': {
         const maintainerEvent = event as MaintainerAddedEvent;
-        walletAddress = maintainerEvent.maintainer;
         emitSSEEvent('maintainer_added', { orgId: maintainerEvent.orgId, maintainer: maintainerEvent.maintainer, ledger: maintainerEvent.ledger, txHash: maintainerEvent.txHash });
-        await prisma.maintainer.upsert({
-          where: { address: maintainerEvent.maintainer },
-          update: { orgId: maintainerEvent.orgId },
-          create: { address: maintainerEvent.maintainer, orgId: maintainerEvent.orgId }
-        });
         break;
       }
-      case 'ProtocolPaused': {
-        walletAddress = event.protocolAdmin;
+      case 'ProtocolPaused':
         emitSSEEvent('protocol_paused', { protocolAdmin: event.protocolAdmin, ledger: event.ledger, txHash: event.txHash });
         break;
-      }
-      case 'ProtocolUnpaused': {
-        walletAddress = event.protocolAdmin;
+      case 'ProtocolUnpaused':
         emitSSEEvent('protocol_unpaused', { protocolAdmin: event.protocolAdmin, ledger: event.ledger, txHash: event.txHash });
         break;
-      }
-      case 'Initialized': {
-        walletAddress = event.protocolAdmin;
+      case 'Initialized':
         emitSSEEvent('contract_initialized', { token: event.token, protocolAdmin: event.protocolAdmin, ledger: event.ledger, txHash: event.txHash });
         break;
-      }
-      case 'ContractUpgraded': {
-        walletAddress = event.protocolAdmin;
+      case 'ContractUpgraded':
         emitSSEEvent('contract_upgraded', { protocolAdmin: event.protocolAdmin, newWasmHash: event.newWasmHash, ledger: event.ledger, txHash: event.txHash });
         break;
-      }
     }
+  }
 
-    await prisma.transaction.upsert({
-      where: { txHash_eventIndex_createdAt: { txHash: event.txHash, eventIndex, createdAt } },
-      update: {},
-      create: { txHash: event.txHash, eventIndex, walletAddress, volumeUSD: volumeUSD.toString(), type: event.eventName, ledger: event.ledger, rawData: JSON.stringify(event), createdAt },
-    });
-    void invalidateOnTransactionEvent();
+  /**
+   * Dispatches payout webhooks for all claimed events in one bulk maintainer
+   * lookup instead of one `findUnique` per event. Fire-and-forget: the indexer
+   * never blocks on outbound HTTP / queue delivery.
+   */
+  private async dispatchClaimedWebhooks(claimedEvents: PayoutClaimedEvent[]): Promise<void> {
+    if (claimedEvents.length === 0) return;
+
+    const maintainerAddresses = [...new Set(claimedEvents.map((e) => e.maintainer))];
+
+    try {
+      const maintainers = await prisma.maintainer.findMany({
+        where: { address: { in: maintainerAddresses } },
+        select: { address: true, orgId: true },
+      });
+      const orgByAddress = new Map(maintainers.map((m) => [m.address, m.orgId]));
+
+      for (const claimEvent of claimedEvents) {
+        const orgId = orgByAddress.get(claimEvent.maintainer);
+        if (!orgId) {
+          logger.debug(
+            { maintainer: claimEvent.maintainer },
+            '[IndexerService] Skipping webhook, maintainer has no org',
+          );
+          continue;
+        }
+        // Fire-and-forget so queue/SQS latency never blocks the sync loop.
+        void webhookService
+          .dispatchPayoutClaimed(orgId, claimEvent.maintainer, claimEvent.amount, claimEvent.txHash, claimEvent.ledger)
+          .catch((error) => {
+            logger.error(
+              { err: error, orgId, maintainer: claimEvent.maintainer },
+              '[IndexerService] Webhook dispatch failed',
+            );
+          });
+      }
+    } catch (error) {
+      logger.error({ err: error }, '[IndexerService] Bulk maintainer lookup failed, skipping webhook dispatch');
+    }
   }
 
   getStatus(): { isRunning: boolean; lastProcessedLedger?: number; consecutiveFailures: number; currentBackoffMs: number } {

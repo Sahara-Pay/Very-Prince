@@ -87,7 +87,7 @@ async function ensureLuaScriptLoaded(): Promise<string> {
   
   const script = await loadLuaScript();
   try {
-    luaSha = await redis.script('LOAD', script);
+    luaSha = (await redis.script('LOAD', script)) as string;
     logger.info({ sha: luaSha }, 'Token bucket Lua script loaded into Redis');
     return luaSha;
   } catch (error) {
@@ -185,12 +185,14 @@ export async function getBucketState(
   const bucketKey = `${cfg.keyPrefix}:${identifier}`;
 
   try {
-    const result = await redis.hmget(bucketKey, 'tokens', 'lastRefill');
-    if (!result[0] || !result[1]) return null;
+    const result = (await redis.hmget(bucketKey, 'tokens', 'lastRefill')) as Array<string | null>;
+    const tokens = result[0];
+    const lastRefill = result[1];
+    if (tokens == null || lastRefill == null) return null;
 
     return {
-      tokens: parseFloat(result[0]),
-      lastRefill: parseInt(result[1], 10),
+      tokens: parseFloat(tokens),
+      lastRefill: parseInt(lastRefill, 10),
     };
   } catch (error) {
     logger.error({ err: error, identifier }, 'Failed to get bucket state');

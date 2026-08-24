@@ -24,9 +24,26 @@ import {
   DEFAULT_AST_CONFIG,
 } from "./astParser.js";
 
+// Uses DISTINCT keys at every level so the depth tests measure depth only and
+// never accidentally trip the monotonous-structure detector.
 function buildDeepObject(depth: number): Record<string, unknown> {
   if (depth <= 0) return { leaf: true };
-  return { a: buildDeepObject(depth - 1) };
+  return { [`k${depth}`]: buildDeepObject(depth - 1) };
+}
+
+// A large alphabet of distinct characters. A shuffled 60-char slice yields
+// keys whose Shannon entropy is exactly log2(60) ≈ 5.9 — genuinely
+// "high-entropy" under the analyzer's metric (maxKeyEntropy 5.5).
+const ENTROPY_ALPHABET =
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.<>?/";
+
+function makeHighEntropyKey(): string {
+  const chars = [...ENTROPY_ALPHABET];
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+  return chars.slice(0, 60).join("");
 }
 
 function buildWideObject(keyCount: number): Record<string, string> {
@@ -404,7 +421,7 @@ describe("analyzeAST – high entropy key detection", () => {
   it("blocks input with many high-entropy (randomized) keys", () => {
     const input: Record<string, unknown> = {};
     for (let i = 0; i < 10; i++) {
-      input[`k${Math.random().toString(36).substring(2, 10)}`] = `v${i}`;
+      input[makeHighEntropyKey()] = `v${i}`;
     }
     const result = analyzeAST(input);
     expect(result.isSafe).toBe(false);
@@ -426,8 +443,8 @@ describe("analyzeAST – high entropy key detection", () => {
 
   it("does not flag input with few keys even if high entropy", () => {
     const input: Record<string, unknown> = {};
-    input[`${Math.random().toString(36)}`] = "value";
-    input[`${Math.random().toString(36)}`] = "value2";
+    input[makeHighEntropyKey()] = "value";
+    input[makeHighEntropyKey()] = "value2";
     const result = analyzeAST(input);
     expect(result.isSafe).toBe(true);
   });
@@ -435,7 +452,7 @@ describe("analyzeAST – high entropy key detection", () => {
   it("respects custom maxKeyEntropy override", () => {
     const input: Record<string, unknown> = {};
     for (let i = 0; i < 10; i++) {
-      input[`k${Math.random().toString(36).substring(2, 10)}`] = `v${i}`;
+      input[makeHighEntropyKey()] = `v${i}`;
     }
     const result = analyzeAST(input, { maxKeyEntropy: 8 });
     expect(result.isSafe).toBe(true);

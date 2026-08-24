@@ -29,7 +29,6 @@ export { securityMetrics, resetSecurityMetrics, getSecurityMetrics };
 
 function categorizeViolation(
   reason: string,
-  analysis: ReturnType<typeof analyzeAST>,
 ): keyof typeof securityMetrics.violations {
   if (reason.includes('depth')) return 'depthExceeded';
   if (reason.includes('Node count')) return 'nodeCountExceeded';
@@ -107,7 +106,7 @@ export function buildSecurityMiddleware(tInstance: ReturnType<typeof initTRPC.cr
       securityMetrics.blockedRequests++;
 
       if (analysis.reason) {
-        const violationType = categorizeViolation(analysis.reason, analysis);
+        const violationType = categorizeViolation(analysis.reason);
         securityMetrics.violations[violationType]++;
       }
 

@@ -33,7 +33,6 @@
  */
 
 import { SorobanRpc } from "@stellar/stellar-sdk";
-import { RPC_URL } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -78,15 +77,20 @@ function createSorobanRpcServer(config: SorobanRpcConfig): SorobanRpc.Server {
  * @internal
  */
 function getSorobanRpcConfig(): SorobanRpcConfig {
-  if (!RPC_URL) {
+  // Read straight from the environment rather than the (defaulted) `RPC_URL`
+  // const so an explicitly unset variable is honored: env.ts provides a
+  // convenience default for production, but local tooling may want to fail
+  // fast when the endpoint is missing.
+  const url = process.env.RPC_URL;
+  if (!url) {
     throw new Error(
       "RPC_URL environment variable is required. Please configure it in your .env file."
     );
   }
 
   return {
-    url: RPC_URL,
-    allowHttp: RPC_URL.startsWith("http://"),
+    url,
+    allowHttp: url.startsWith("http://"),
   };
 }
 

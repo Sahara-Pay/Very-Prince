@@ -252,7 +252,7 @@ export class RedisStreamsConsumerService {
         const [, claimed] = result;
         if (claimed && claimed.length > 0) {
           const ids = claimed.map(([id]) => id);
-          for (const [streamId, fields] of claimed) {
+          for (const [, fields] of claimed) {
             const envelope = parseStreamFields(fields);
             if (envelope) emitEnvelopeToLocalBus(envelope);
           }

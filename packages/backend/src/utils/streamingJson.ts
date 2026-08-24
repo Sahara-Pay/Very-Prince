@@ -117,7 +117,7 @@ export async function streamAsyncEnvelope<Meta, Item>(
       yield* sliceString(JSON.stringify(item), ITEM_CHUNK_BYTES);
     }
     yield ']}';
-  }(), opts.encoding ?? 'utf8');
+  }(), { encoding: opts.encoding ?? 'utf8' });
   return pipeToResponse(replyRaw, source, opts);
 }
 
@@ -157,7 +157,7 @@ class ChunkedArrayReadable<T> extends Readable {
   private readonly opts: StreamOptions;
 
   constructor(items: T[], opts: StreamOptions) {
-    super({ defaultEncoding: opts.encoding ?? 'utf8' });
+    super({ encoding: opts.encoding ?? 'utf8' });
     this.items = items;
     this.opts = opts;
     this.buf = '[';
@@ -208,7 +208,7 @@ class ChunkedEnvelopeReadable<Meta, Item> extends Readable {
   private headerEmitted = false;
 
   constructor(metadata: Meta, items: Item[], opts: StreamOptions) {
-    super({ defaultEncoding: opts.encoding ?? 'utf8' });
+    super({ encoding: opts.encoding ?? 'utf8' });
     this.metadata = metadata;
     this.items = items;
     this.opts = opts;
@@ -325,7 +325,7 @@ async function pipeToResponse(
  * Rows come out one-by-one and memory stays bounded to `take` rows, even
  * when you iterate through 10 million of them.
  */
-export async function* cursorIterable<T, K extends PropertyKey>(
+export async function* cursorIterable<T, K>(
   fetchPage: (cursor: K | null) => Promise<T[]>,
   getKey: (row: T) => K,
   pageSize = 1000,

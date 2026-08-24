@@ -175,7 +175,7 @@ function buildDedupKey(txHash: string, eventIndex: number, createdAt: Date): str
   return createHash('sha256').update(raw).digest('hex');
 }
 
-class TxHashFilter {
+export class TxHashFilter {
   private readonly hll: HyperLogLog;
 
   /** Total events evaluated since process start. */

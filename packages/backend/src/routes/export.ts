@@ -85,7 +85,8 @@ export const exportRoutes: FastifyPluginAsync = async (fastify) => {
         });
 
         const recordFetcher = async function* () {
-          const iterator = cursorIterable(
+          type TransactionRow = Awaited<ReturnType<typeof prismaRead.transaction.findMany>>[number];
+          const iterator = cursorIterable<TransactionRow, { id: string; createdAt: Date }>(
             async (cursor) => {
               return prismaRead.transaction.findMany({
                 where: {

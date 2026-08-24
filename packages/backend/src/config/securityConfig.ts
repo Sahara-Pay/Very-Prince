@@ -59,7 +59,7 @@ function envFloat(key: string, fallback: number): number {
  * - enableRiskScoring: true — holistic assessment combining all signals
  * - maxRiskScore: 0.7 — blocks when aggregate signals indicate likely attack
  * - detectSuspiciousStringValues: true — catches embedded XSS/injection in string fields
- * - maxSuspiciousStringValues: 5 — legitimate data may rarely contain 'javascript:' etc.
+ * - maxSuspiciousStringValues: 3 — 3+ embedded XSS/injection patterns in one payload is a strong attack signal
  */
 export const securityConfig: SecurityConfig = {
   enabled: envBool('SECURITY_MIDDLEWARE_ENABLED', true),
@@ -96,7 +96,7 @@ export const securityConfig: SecurityConfig = {
     maxRiskScore: envFloat('SECURITY_MAX_RISK_SCORE', 0.7),
 
     detectSuspiciousStringValues: envBool('SECURITY_DETECT_SUSPICIOUS_STRINGS', true),
-    maxSuspiciousStringValues: envInt('SECURITY_MAX_SUSPICIOUS_STRINGS', 5),
+    maxSuspiciousStringValues: envInt('SECURITY_MAX_SUSPICIOUS_STRINGS', 3),
   },
 
   pathOverrides: {

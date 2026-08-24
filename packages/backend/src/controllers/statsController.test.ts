@@ -1,13 +1,15 @@
 /**
  * @file statsController.test.ts
- * @description Unit tests for statsController.getTotalFundsRaised().
+ * @description Unit tests for statsController.getTotalFundsRaised() and
+ * getOrgFundingHistory().
  *
  * These tests verify:
- *   - Correct SQL aggregation and response shaping.
+ *   - Correct aggregation and response shaping via Prisma aggregate/groupBy.
  *   - Optional date-filter parameters are forwarded to the query.
  *   - Zero/empty results are handled gracefully.
  *   - Results are cached for subsequent calls.
  *   - Cache is keyed by date filters so different filters get independent entries.
+ *   - Org funding history is cursor-streamed from the DB.
  *
  * Prisma and the Redis cache are both mocked so no real DB or network
  * connection is required.
@@ -20,11 +22,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // To allow the mocked implementations to be accessed in tests, we use
 // vi.hoisted() which also runs before the mock factories execute.
 // ---------------------------------------------------------------------------
-const { safeGetMock, safeSetMock, queryRawUnsafeMock, findManyMock } = vi.hoisted(() => ({
-  safeGetMock:          vi.fn<[string], Promise<string | null>>(),
-  safeSetMock:          vi.fn<[string, string, number], Promise<void>>(),
-  queryRawUnsafeMock:   vi.fn(),
-  findManyMock:         vi.fn(),
+const { safeGetMock, safeSetMock, aggregateMock, groupByMock, findManyMock } = vi.hoisted(() => ({
+  safeGetMock:       vi.fn(),
+  safeSetMock:       vi.fn(),
+  aggregateMock:     vi.fn(),
+  groupByMock:       vi.fn(),
+  findManyMock:      vi.fn(),
 }));
 
 vi.mock('../services/cache.js', () => ({
@@ -35,9 +38,12 @@ vi.mock('../services/cache.js', () => ({
 
 vi.mock('../services/db.js', () => ({
   prismaRead: {
-    $queryRawUnsafe: queryRawUnsafeMock,
     invoice: { aggregate: vi.fn() },
-    fundingEvent: { findMany: findManyMock },
+    fundingEvent: {
+      aggregate: aggregateMock,
+      groupBy:   groupByMock,
+      findMany:  findManyMock,
+    },
   },
 }));
 
@@ -60,15 +66,17 @@ import { statsController } from '../controllers/statsController.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Build a fake aggregation row as PostgreSQL would return it. */
-function makeAggRow(totalStroops: bigint, eventCount: bigint, orgCount: bigint) {
-  return [
-    {
-      total_stroops: totalStroops,
-      event_count:   eventCount,
-      org_count:     orgCount,
-    },
-  ];
+/** Build a fake Prisma aggregate result as the DB layer would return it. */
+function makeAggregate(totalStroops: bigint | null, eventCount: number) {
+  return {
+    _sum: { amountStroops: totalStroops },
+    _count: { _all: eventCount },
+  };
+}
+
+/** Build a fake Prisma groupBy result (COUNT DISTINCT orgId). */
+function makeGroupBy(orgIds: string[]) {
+  return orgIds.map((orgId) => ({ orgId }));
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +89,7 @@ describe('statsController.getTotalFundsRaised()', () => {
     // By default, cache misses so the DB query is always reached
     safeGetMock.mockResolvedValue(null);
     safeSetMock.mockResolvedValue(undefined);
+    groupByMock.mockResolvedValue(makeGroupBy(['org-1', 'org-2']));
   });
 
   // -------------------------------------------------------------------------
@@ -88,7 +97,7 @@ describe('statsController.getTotalFundsRaised()', () => {
   // -------------------------------------------------------------------------
   it('returns correct aggregated totals with no date filters', async () => {
     const stroops = 150_000_000n; // 15 XLM
-    queryRawUnsafeMock.mockResolvedValue(makeAggRow(stroops, 3n, 2n));
+    aggregateMock.mockResolvedValue(makeAggregate(stroops, 3));
 
     const result = await statsController.getTotalFundsRaised();
 
@@ -99,35 +108,48 @@ describe('statsController.getTotalFundsRaised()', () => {
     expect(result.fromDate).toBeUndefined();
     expect(result.toDate).toBeUndefined();
     expect(result.cachedAt).toBeDefined();
+
+    // No date filters → empty where clause on the aggregate.
+    expect(aggregateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ where: {} }),
+    );
   });
 
   // -------------------------------------------------------------------------
   // Happy-path: with both date filters
   // -------------------------------------------------------------------------
-  it('passes fromDate and toDate through to the raw query and response', async () => {
-    queryRawUnsafeMock.mockResolvedValue(makeAggRow(70_000_000n, 1n, 1n));
+  it('passes fromDate and toDate through to the aggregate and response', async () => {
+    aggregateMock.mockResolvedValue(makeAggregate(70_000_000n, 1));
+    groupByMock.mockResolvedValue(makeGroupBy(['org-1']));
 
     const from = '2024-01-01T00:00:00.000Z';
     const to   = '2024-06-30T23:59:59.999Z';
 
     const result = await statsController.getTotalFundsRaised(from, to);
 
-    expect(queryRawUnsafeMock).toHaveBeenCalledOnce();
-    const [sqlTemplate, p1, p2] = queryRawUnsafeMock.mock.calls[0] as [string, Date, Date];
-    expect(sqlTemplate).toContain('WHERE');
-    expect(p1).toEqual(new Date(from));
-    expect(p2).toEqual(new Date(to));
+    expect(aggregateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          createdAt: {
+            gte: new Date(from),
+            lte: new Date(to),
+          },
+        },
+      }),
+    );
 
     expect(result.fromDate).toBe(from);
     expect(result.toDate).toBe(to);
     expect(result.totalFundsRaisedStroops).toBe('70000000');
+    expect(result.distinctOrgsCount).toBe(1);
   });
 
   // -------------------------------------------------------------------------
   // Edge-case: empty table (no funding events yet)
   // -------------------------------------------------------------------------
   it('handles zero results gracefully (empty FundingEvent table)', async () => {
-    queryRawUnsafeMock.mockResolvedValue(makeAggRow(0n, 0n, 0n));
+    aggregateMock.mockResolvedValue(makeAggregate(0n, 0));
+    groupByMock.mockResolvedValue([]);
 
     const result = await statsController.getTotalFundsRaised();
 
@@ -141,9 +163,7 @@ describe('statsController.getTotalFundsRaised()', () => {
   // Edge-case: DB returns null for the SUM (COALESCE to zero)
   // -------------------------------------------------------------------------
   it('handles null SUM from PostgreSQL (coalesces to zero)', async () => {
-    queryRawUnsafeMock.mockResolvedValue([
-      { total_stroops: null, event_count: 0n, org_count: 0n },
-    ]);
+    aggregateMock.mockResolvedValue(makeAggregate(null, 0));
 
     const result = await statsController.getTotalFundsRaised();
 
@@ -167,14 +187,15 @@ describe('statsController.getTotalFundsRaised()', () => {
     const result = await statsController.getTotalFundsRaised();
 
     expect(result.totalFundsRaisedStroops).toBe('999000000');
-    expect(queryRawUnsafeMock).not.toHaveBeenCalled();
+    expect(aggregateMock).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
   // Caching: result is stored in cache with 5-minute TTL after DB fetch
   // -------------------------------------------------------------------------
   it('stores the result in the cache with a 5-minute TTL after fetching from DB', async () => {
-    queryRawUnsafeMock.mockResolvedValue(makeAggRow(50_000_000n, 2n, 1n));
+    aggregateMock.mockResolvedValue(makeAggregate(50_000_000n, 2));
+    groupByMock.mockResolvedValue(makeGroupBy(['org-1']));
 
     await statsController.getTotalFundsRaised();
 
@@ -189,7 +210,7 @@ describe('statsController.getTotalFundsRaised()', () => {
   // Caching: different filter combos produce independent cache keys
   // -------------------------------------------------------------------------
   it('uses separate cache keys for different date filter combinations', async () => {
-    queryRawUnsafeMock.mockResolvedValue(makeAggRow(10_000_000n, 1n, 1n));
+    aggregateMock.mockResolvedValue(makeAggregate(10_000_000n, 1));
 
     await statsController.getTotalFundsRaised();
     await statsController.getTotalFundsRaised('2024-01-01T00:00:00.000Z');
@@ -204,7 +225,7 @@ describe('statsController.getTotalFundsRaised()', () => {
   // Only fromDate provided
   // -------------------------------------------------------------------------
   it('handles only fromDate without toDate', async () => {
-    queryRawUnsafeMock.mockResolvedValue(makeAggRow(20_000_000n, 1n, 1n));
+    aggregateMock.mockResolvedValue(makeAggregate(20_000_000n, 1));
 
     const from = '2025-01-01T00:00:00.000Z';
     const result = await statsController.getTotalFundsRaised(from);
@@ -212,19 +233,20 @@ describe('statsController.getTotalFundsRaised()', () => {
     expect(result.fromDate).toBe(from);
     expect(result.toDate).toBeUndefined();
 
-    // Only one date param should be passed to the raw query (sql + 1 param)
-    expect(queryRawUnsafeMock.mock.calls[0]).toHaveLength(2);
-    const [sqlTemplate, p1] = queryRawUnsafeMock.mock.calls[0] as [string, Date];
-    expect(p1).toEqual(new Date(from));
-    expect(sqlTemplate).toContain('WHERE');
-    expect(sqlTemplate).not.toContain('$2');
+    // Only the gte bound is forwarded to the aggregate query.
+    expect(aggregateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { createdAt: { gte: new Date(from) } },
+      }),
+    );
   });
 
   // -------------------------------------------------------------------------
   // Only toDate provided
   // -------------------------------------------------------------------------
   it('handles only toDate without fromDate', async () => {
-    queryRawUnsafeMock.mockResolvedValue(makeAggRow(30_000_000n, 2n, 2n));
+    aggregateMock.mockResolvedValue(makeAggregate(30_000_000n, 2));
+    groupByMock.mockResolvedValue(makeGroupBy(['org-1', 'org-2']));
 
     const to = '2025-12-31T23:59:59.999Z';
     const result = await statsController.getTotalFundsRaised(undefined, to);
@@ -232,23 +254,23 @@ describe('statsController.getTotalFundsRaised()', () => {
     expect(result.fromDate).toBeUndefined();
     expect(result.toDate).toBe(to);
 
-    // Only one date param should be passed (sql + 1 param)
-    expect(queryRawUnsafeMock.mock.calls[0]).toHaveLength(2);
-    const [sqlTemplate, p1] = queryRawUnsafeMock.mock.calls[0] as [string, Date];
-    expect(p1).toEqual(new Date(to));
-    expect(sqlTemplate).toContain('WHERE');
+    expect(aggregateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { createdAt: { lte: new Date(to) } },
+      }),
+    );
   });
 
   // -------------------------------------------------------------------------
   // No WHERE clause when no date filters
   // -------------------------------------------------------------------------
   it('omits WHERE clause when no date filters are supplied', async () => {
-    queryRawUnsafeMock.mockResolvedValue(makeAggRow(0n, 0n, 0n));
+    aggregateMock.mockResolvedValue(makeAggregate(0n, 0));
 
     await statsController.getTotalFundsRaised();
 
-    const [sqlTemplate] = queryRawUnsafeMock.mock.calls[0] as [string];
-    expect(sqlTemplate).not.toContain('WHERE');
+    const call = aggregateMock.mock.calls[0] as [{ where?: object }];
+    expect(call[0]?.where).toEqual({});
   });
 
   // -------------------------------------------------------------------------
@@ -257,7 +279,8 @@ describe('statsController.getTotalFundsRaised()', () => {
   it('preserves BigInt precision for very large stroop values', async () => {
     // 1 billion XLM = 10^16 stroops — exceeds Number.MAX_SAFE_INTEGER
     const hugeStroops = 10_000_000_000_000_000n;
-    queryRawUnsafeMock.mockResolvedValue(makeAggRow(hugeStroops, 100n, 50n));
+    aggregateMock.mockResolvedValue(makeAggregate(hugeStroops, 100));
+    groupByMock.mockResolvedValue(makeGroupBy(Array.from({ length: 50 }, (_, i) => `org-${i}`)));
 
     const result = await statsController.getTotalFundsRaised();
 
@@ -279,9 +302,11 @@ describe('statsController.getOrgFundingHistory()', () => {
 
     const result = await statsController.getOrgFundingHistory('stellar');
 
+    // First page: no cursor, `take` capped for streaming.
     expect(findManyMock).toHaveBeenCalledWith({
       where: { orgId: 'stellar' },
       orderBy: { createdAt: 'asc' },
+      take: 1000,
     });
     expect(result).toEqual([]);
   });
@@ -338,33 +363,27 @@ describe('statsController.getOrgFundingHistory()', () => {
     });
   });
 
-  it('serves results from cache and stores to cache', async () => {
-    const cachedData = [
+  it('streams from the DB (caching happens at the tRPC layer, not the controller)', async () => {
+    const mockEvents = [
       {
         id: '1',
         orgId: 'stellar',
         from: 'GDX...',
-        amountStroops: '10000000',
+        amountStroops: 10_000_000n,
         amountXlm: '1.0000000',
-        cumulativeStroops: '10000000',
-        cumulativeXlm: '1.0000000',
+        ledger: 100,
         txHash: 'hash1',
-        createdAt: '2026-07-17T08:00:00.000Z',
+        createdAt: new Date('2026-07-17T08:00:00.000Z'),
       },
     ];
+    findManyMock.mockResolvedValue(mockEvents);
 
-    // Cache hit
-    safeGetMock.mockResolvedValue(JSON.stringify(cachedData));
-    let result = await statsController.getOrgFundingHistory('stellar');
-    expect(result).toEqual(cachedData);
-    expect(findManyMock).not.toHaveBeenCalled();
+    const result = await statsController.getOrgFundingHistory('stellar');
 
-    // Cache miss & save
-    safeGetMock.mockResolvedValue(null);
-    findManyMock.mockResolvedValue([]);
-    result = await statsController.getOrgFundingHistory('stellar');
-    expect(result).toEqual([]);
     expect(findManyMock).toHaveBeenCalledOnce();
-    expect(safeSetMock).toHaveBeenCalledWith('stats:funding-history:stellar', JSON.stringify([]), 60);
+    expect(result).toHaveLength(1);
+    // The controller itself never touches the cache — the tRPC router does.
+    expect(safeGetMock).not.toHaveBeenCalled();
+    expect(safeSetMock).not.toHaveBeenCalled();
   });
 });

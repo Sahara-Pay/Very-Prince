@@ -5,7 +5,7 @@ type ContractControllerMock = {
   getOrganizations: ReturnType<typeof vi.fn>;
 };
 
-vi.mock('../controllers/contractController.ts', () => {
+vi.mock('../../controllers/contractController.js', () => {
   return {
     contractController: {
       getOrganizations: vi.fn().mockResolvedValue({
@@ -21,11 +21,11 @@ let contractController: ContractControllerMock;
 
 beforeAll(async () => {
   // @ts-ignore
-  const controllerModule = await import('../controllers/contractController');
+  const controllerModule = await import('../../controllers/contractController.js');
   contractController = controllerModule.contractController;
 
   // @ts-ignore
-  const routeModule = await import('../contract');
+  const routeModule = await import('../contract.js');
   app = fastify();
   app.register(routeModule.contractRoutes, { prefix: '/api/v1/contract' });
   await app.ready();

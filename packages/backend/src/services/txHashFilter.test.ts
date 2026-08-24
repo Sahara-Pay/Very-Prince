@@ -16,7 +16,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── Mock prisma before importing the module under test ──────────────────────
-const mockFindFirst = vi.fn();
+// `vi.hoisted` is required: `vi.mock` factories are hoisted above top-level
+// `const` declarations, so the spy must be created via hoisted() to be
+// referencable inside the factory.
+const { mockFindFirst } = vi.hoisted(() => ({
+  mockFindFirst: vi.fn(),
+}));
 
 vi.mock("./db.js", () => ({
   prisma: {
@@ -43,7 +48,7 @@ vi.mock("../utils/logger.js", () => ({
 // For brevity the top-level singleton is used throughout; state carries over
 // between tests intentionally where noted.
 
-import { txHashFilter } from "./txHashFilter.js";
+import { txHashFilter, TxHashFilter } from "./txHashFilter.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -53,7 +58,9 @@ const BASE_DATE = new Date("2026-07-24T00:00:00.000Z");
 
 describe("TxHashFilter", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    // reset (not just clear) so queued `mockResolvedValueOnce` values from a
+    // previous test can never leak into this one.
+    vi.resetAllMocks();
   });
 
   // ── Path: hll_new ──────────────────────────────────────────────────────────
@@ -104,31 +111,39 @@ describe("TxHashFilter", () => {
 
   // ── Path: hll_positive_db_confirmed ───────────────────────────────────────
 
+  // NOTE: these tests use a FRESH filter instance instead of the process-wide
+  // singleton. The singleton's HLL registers are shared across every test, so
+  // unrelated keys can collide into the same register and erase the "already
+  // seen" bit that these seed-then-replay cases depend on. A fresh instance
+  // makes the replay deterministically hit the HLL.
+
   describe("confirmed duplicate (hll_positive_db_confirmed path)", () => {
     it("suppresses an exact duplicate after the HLL and DB both confirm it", async () => {
+      const filter = new TxHashFilter();
       const txHash = "dup_tx_hash_deadbeef01";
       const eventIndex = 0;
 
       // First pass — registers it in HLL
-      await txHashFilter.check(txHash, eventIndex, BASE_DATE);
+      await filter.check(txHash, eventIndex, BASE_DATE);
 
       // Second pass — HLL fires positive hit; DB confirms the row exists
       mockFindFirst.mockResolvedValueOnce({ id: "some-cuid" });
-      const result = await txHashFilter.check(txHash, eventIndex, BASE_DATE);
+      const result = await filter.check(txHash, eventIndex, BASE_DATE);
 
       expect(result.isDuplicate).toBe(true);
       expect(result.decidedBy).toBe("hll_positive_db_confirmed");
     });
 
     it("queries the DB with the exact txHash, eventIndex, and createdAt", async () => {
+      const filter = new TxHashFilter();
       const txHash = "dup_tx_hash_deadbeef02";
       const eventIndex = 3;
       const createdAt = new Date("2026-07-10T12:00:00.000Z");
 
-      await txHashFilter.check(txHash, eventIndex, createdAt);
+      await filter.check(txHash, eventIndex, createdAt);
 
       mockFindFirst.mockResolvedValueOnce({ id: "some-cuid" });
-      await txHashFilter.check(txHash, eventIndex, createdAt);
+      await filter.check(txHash, eventIndex, createdAt);
 
       expect(mockFindFirst).toHaveBeenCalledWith({
         where: { txHash, eventIndex, createdAt },
@@ -141,48 +156,38 @@ describe("TxHashFilter", () => {
 
   describe("false positive (hll_positive_db_miss path)", () => {
     it("allows event through when HLL fires but DB has no row", async () => {
-      // To reliably trigger a false positive we need two different keys that
-      // map to the same HLL register and rho value.  Rather than engineering
-      // a collision, we mock the behaviour by using the singleton's internal
-      // state: after we populate enough entries some natural collisions will
-      // fire.  For a deterministic unit test, instead we verify the code path
-      // by testing with a hash that happens to collide — or we stub HLL.add.
-      //
-      // Strategy: spy on the private HLL via the exported singleton.
-      // We add a hash, then immediately try the same logical key with a
-      // slightly different string (different eventIndex) that may collide in
-      // the HLL. We tell the DB mock to return null to simulate a false positive.
-
+      // A fresh filter makes the replay deterministically fire the HLL
+      // (same key seeded, then replayed) while the DB reports "no row".
+      const filter = new TxHashFilter();
       const txHash = "false_positive_hash_0001";
       // Seed the filter so this specific dedup key is in the HLL
-      await txHashFilter.check(txHash, 0, BASE_DATE);
+      await filter.check(txHash, 0, BASE_DATE);
 
-      // Now pretend a *different* key collides with it; easiest is to replay
-      // an identical key but instruct the DB to say it doesn't exist.
+      // Replay the identical key but instruct the DB to say it doesn't exist.
       mockFindFirst.mockResolvedValueOnce(null);
-      const result = await txHashFilter.check(txHash, 0, BASE_DATE);
+      const result = await filter.check(txHash, 0, BASE_DATE);
 
-      // DB returned null — it is a false positive if the HLL fired.
-      // If the HLL didn't fire, result is hll_new — both are valid non-duplicate outcomes.
+      // HLL fired → DB says no row → false positive, event allowed through.
       expect(result.isDuplicate).toBe(false);
-      expect(["hll_new", "hll_positive_db_miss"]).toContain(result.decidedBy);
+      expect(result.decidedBy).toBe("hll_positive_db_miss");
     });
 
     it("returns isDuplicate=false even when HLL fires but DB has no matching row", async () => {
       // Craft a scenario where we KNOW the HLL will fire: use a key we already
       // inserted, but tell the DB findFirst to return null (simulating DB out
       // of sync / race condition).
+      const filter = new TxHashFilter();
       const txHash = "false_positive_confirmed_0002";
       const eventIndex = 7;
       const createdAt = new Date("2026-01-01T00:00:00.000Z");
 
       // First check — inserts into HLL, definitely hll_new
-      const first = await txHashFilter.check(txHash, eventIndex, createdAt);
+      const first = await filter.check(txHash, eventIndex, createdAt);
       expect(first.isDuplicate).toBe(false);
 
       // Second check — HLL positive hit; DB responds with null (false positive)
       mockFindFirst.mockResolvedValueOnce(null);
-      const second = await txHashFilter.check(txHash, eventIndex, createdAt);
+      const second = await filter.check(txHash, eventIndex, createdAt);
 
       // The HLL must have fired (same key inserted twice), so we're on the DB path.
       expect(second.isDuplicate).toBe(false);
@@ -194,29 +199,31 @@ describe("TxHashFilter", () => {
 
   describe("error fallback (fallback_allowed path)", () => {
     it("returns isDuplicate=false and allows the event through when DB throws", async () => {
+      const filter = new TxHashFilter();
       const txHash = "error_path_hash_ffff";
       const eventIndex = 0;
 
       // First call seeds the HLL
-      await txHashFilter.check(txHash, eventIndex, BASE_DATE);
+      await filter.check(txHash, eventIndex, BASE_DATE);
 
       // Second call triggers a positive hit, but DB throws
       mockFindFirst.mockRejectedValueOnce(new Error("DB connection lost"));
-      const result = await txHashFilter.check(txHash, eventIndex, BASE_DATE);
+      const result = await filter.check(txHash, eventIndex, BASE_DATE);
 
       expect(result.isDuplicate).toBe(false);
       expect(result.decidedBy).toBe("fallback_allowed");
     });
 
     it("never drops a valid event when findFirst throws unexpectedly", async () => {
+      const filter = new TxHashFilter();
       mockFindFirst.mockRejectedValueOnce(new Error("timeout"));
 
       const txHash = "safe_fallback_hash_9999";
       // Even on a brand-new hash where no DB query occurs the system stays safe;
       // test the at-risk scenario — after one seed + a DB error on second call.
-      await txHashFilter.check(txHash, 0, BASE_DATE);
+      await filter.check(txHash, 0, BASE_DATE);
       mockFindFirst.mockRejectedValueOnce(new Error("timeout"));
-      const result = await txHashFilter.check(txHash, 0, BASE_DATE);
+      const result = await filter.check(txHash, 0, BASE_DATE);
 
       expect(result.isDuplicate).toBe(false);
     });

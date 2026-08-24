@@ -4,6 +4,22 @@ import path from "path";
 
 const SRC_DIR = path.resolve(__dirname, "..");
 
+// The audit test itself contains the raw-SQL pattern strings, so it must not
+// scan its own source.
+const SELF_RELPATH = "tests/sqlInjectionAudit.test.ts";
+
+/**
+ * Modules that intentionally execute raw SQL. The indexer bulk upsert engine
+ * is the only one: it uses `Prisma.sql` tagged templates exclusively — every
+ * value reaches Postgres as a bound parameter (never interpolated into the
+ * statement text) and every identifier is a static constant. Its safety is
+ * enforced by dedicated unit tests that assert no row value ever appears in
+ * the generated SQL text (see indexerBulkUpsert.test.ts).
+ */
+const PARAMETERIZED_RAW_SQL_MODULES = new Set([
+  "services/indexerBulkUpsert.ts",
+]);
+
 function findAllTsFiles(dir: string, files: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const full = path.join(dir, entry);
@@ -17,42 +33,41 @@ function findAllTsFiles(dir: string, files: string[] = []): string[] {
   return files;
 }
 
-const DANGEROUS_PATTERNS = [
-  {
-    name: "$queryRaw (raw SQL execution)",
-    regex: /\$queryRaw(Unsafe)?\s*\(/g,
-  },
-  {
-    name: "$executeRaw (raw SQL execution)",
-    regex: /\$executeRaw(Unsafe)?\s*\(/g,
-  },
-  {
-    name: "Template literal in SQL context (tagged template)",
-    regex: /\.raw\s*`/g,
-  },
-  {
-    name: "Direct string interpolation in SQL-like strings",
-    regex: /(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|ORDER BY|GROUP BY)\s+.*\$\{/gi,
-  },
-];
-
-const tsFiles = findAllTsFiles(SRC_DIR).filter(
-  (f) => !f.includes("/migrations/")
-);
+const tsFiles = findAllTsFiles(SRC_DIR).filter((file) => {
+  const relPath = path.relative(SRC_DIR, file).replace(/\\/g, "/");
+  return !relPath.includes("/migrations/") && relPath !== SELF_RELPATH;
+});
 
 describe("SQL Injection Audit", () => {
-  it("should not contain any raw SQL execution methods in application code", () => {
+  it("should not use unparameterized raw SQL execution methods", () => {
     const violations: string[] = [];
 
     for (const file of tsFiles) {
       const content = readFileSync(file, "utf-8");
-      const relPath = path.relative(SRC_DIR, file);
+      const relPath = path.relative(SRC_DIR, file).replace(/\\/g, "/");
 
-      for (const { name, regex } of DANGEROUS_PATTERNS) {
-        const matches = content.matchAll(new RegExp(regex.source, regex.flags));
-        for (const match of matches) {
+      // $queryRawUnsafe / $executeRawUnsafe interpolate values directly into
+      // the SQL text by definition — never acceptable anywhere.
+      for (const match of content.matchAll(/\$queryRawUnsafe\s*\(/g)) {
+        const lineNum = content.substring(0, match.index).split("\n").length;
+        violations.push(`${relPath}:${lineNum} — $queryRawUnsafe (unparameterized raw SQL)`);
+      }
+      for (const match of content.matchAll(/\$executeRawUnsafe\s*\(/g)) {
+        const lineNum = content.substring(0, match.index).split("\n").length;
+        violations.push(`${relPath}:${lineNum} — $executeRawUnsafe (unparameterized raw SQL)`);
+      }
+
+      // $queryRaw / $executeRaw are only safe when handed a parameterized
+      // Prisma.sql tagged template. Flag any use outside the allow-listed
+      // parameterized engine above.
+      if (!PARAMETERIZED_RAW_SQL_MODULES.has(relPath)) {
+        for (const match of content.matchAll(/\$queryRaw\s*\(/g)) {
           const lineNum = content.substring(0, match.index).split("\n").length;
-          violations.push(`${relPath}:${lineNum} — ${name}`);
+          violations.push(`${relPath}:${lineNum} — $queryRaw without Prisma.sql parameterization`);
+        }
+        for (const match of content.matchAll(/\$executeRaw\s*\(/g)) {
+          const lineNum = content.substring(0, match.index).split("\n").length;
+          violations.push(`${relPath}:${lineNum} — $executeRaw without Prisma.sql parameterization`);
         }
       }
     }

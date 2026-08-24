@@ -10,6 +10,7 @@ import { stellarService } from "../services/stellarService.js";
 import { safeGet, safeSet } from "../services/cache.js";
 import { prismaRead } from "../services/db.js";
 import { mapWithConcurrency } from "../utils/concurrency.js";
+import { cursorIterable } from "../utils/streamingJson.js";
 import type {
   GlobalStatsResponse,
   TVLResponse,
@@ -294,7 +295,8 @@ export const statsController = {
    * @param orgId - The ID/Symbol of the organization
    */
   async *getOrgFundingHistoryStream(orgId: string): AsyncIterable<FundingHistoryResponse> {
-    const iterator = cursorIterable(
+    type FundingEventRow = Awaited<ReturnType<typeof prismaRead.fundingEvent.findMany>>[number];
+    const iterator = cursorIterable<FundingEventRow, { id: string; createdAt: Date }>(
       async (cursor) => {
         return prismaRead.fundingEvent.findMany({
           where: { orgId },

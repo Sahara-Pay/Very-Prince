@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    // Tests are type-checked by Vitest (esbuild) and executed separately;
+    // keeping them out of the production build avoids pulling test-only
+    // globals and fixtures into `dist`.
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "src/tests/**"
+  ]
+}

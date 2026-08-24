@@ -24,6 +24,21 @@ function buildDeepObject(depth: number): Record<string, unknown> {
   return { a: buildDeepObject(depth - 1) };
 }
 
+// A large alphabet of distinct characters. A shuffled 60-char slice yields
+// keys whose Shannon entropy is exactly log2(60) ≈ 5.9 — genuinely
+// "high-entropy" under the analyzer's metric (maxKeyEntropy 5.5).
+const ENTROPY_ALPHABET =
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{};:,.<>?/";
+
+function makeHighEntropyKey(): string {
+  const chars = [...ENTROPY_ALPHABET];
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+  return chars.slice(0, 60).join("");
+}
+
 function runMiddlewareLogic(input: unknown, path = "test.proc"): void {
   securityMetrics.totalRequests++;
   const config = securityConfig.global;
@@ -206,7 +221,7 @@ describe("analyzeAST – high entropy key detection", () => {
   it("blocks input with many high-entropy (randomized) keys", () => {
     const input: Record<string, unknown> = {};
     for (let i = 0; i < 10; i++) {
-      input[`k${Math.random().toString(36).substring(2, 10)}`] = `v${i}`;
+      input[makeHighEntropyKey()] = `v${i}`;
     }
     const result = analyzeAST(input, securityConfig.global);
     expect(result.isSafe).toBe(false);

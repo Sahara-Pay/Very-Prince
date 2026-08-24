@@ -261,6 +261,9 @@ export const appRouter = t.router({
         if (amountIn <= BigInt(0)) {
           throw new Error("amountIn must be positive");
         }
+        if (minAmountOut < BigInt(0)) {
+          throw new Error("minAmountOut must be non-negative");
+        }
 
         return {
           valid: true,

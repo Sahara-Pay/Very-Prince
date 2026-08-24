@@ -78,7 +78,7 @@ export const DEFAULT_AST_CONFIG: ASTAnalysisConfig = {
   enableRiskScoring: true,
   maxRiskScore: 0.7,
   detectSuspiciousStringValues: true,
-  maxSuspiciousStringValues: 5,
+  maxSuspiciousStringValues: 3,
 };
 
 const SUSPICIOUS_VALUE_PATTERNS = [
@@ -121,7 +121,12 @@ export function analyzeAST(
   const visited = new WeakSet<object>();
   const allKeys: string[] = [];
   let suspiciousStringCount = 0;
-  const monotonousDepthRef = { depth: 0 };
+
+  // Hard stops are resource-exhaustion signals (depth, node count, array
+  // size, circular refs). Soft signals (suspicious keys, monotonous patterns,
+  // deep query selections, …) only flip `isSafe` and must NOT abort the walk
+  // so the composite risk score can see the full payload.
+  let hardStop = false;
 
   const result: ASTAnalysisResult = {
     maxDepth: 0,
@@ -150,6 +155,7 @@ export function analyzeAST(
     result.totalNodes++;
 
     if (result.totalNodes > fullConfig.maxNodes) {
+      hardStop = true;
       result.isSafe = false;
       result.reason = `Node count exceeded limit (${fullConfig.maxNodes})`;
       return;
@@ -160,6 +166,7 @@ export function analyzeAST(
     }
 
     if (currentDepth > fullConfig.maxDepth) {
+      hardStop = true;
       result.isSafe = false;
       result.reason = `Nesting depth exceeded limit (${fullConfig.maxDepth})`;
       if (fullConfig.trackPaths) {
@@ -185,6 +192,7 @@ export function analyzeAST(
     }
 
     if (visited.has(value as object)) {
+      hardStop = true;
       result.hasCircularReference = true;
       result.isSafe = false;
       result.reason = 'Circular reference detected';
@@ -199,6 +207,7 @@ export function analyzeAST(
       }
 
       if (arraySize > fullConfig.maxArraySize) {
+        hardStop = true;
         result.isSafe = false;
         result.reason = `Array size exceeded limit (${fullConfig.maxArraySize})`;
         if (fullConfig.trackPaths) {
@@ -210,7 +219,7 @@ export function analyzeAST(
       for (let i = 0; i < arraySize; i++) {
         const elementPath = fullConfig.trackPaths ? `${path}[${i}]` : '';
         traverse(value[i], currentDepth + 1, elementPath, currentQueryDepth, []);
-        if (!result.isSafe) return;
+        if (hardStop) return;
       }
       return;
     }
@@ -234,12 +243,14 @@ export function analyzeAST(
           }
           result.isSafe = false;
           result.reason = `Suspicious key detected: "${key}" (possible ${key === '__proto__' || key === 'constructor' || key === 'prototype' ? 'prototype pollution' : 'injection'} attack)`;
-          return;
+          // Do NOT abort: keep walking so the composite risk score sees the
+          // entire payload, not just the first flagged key.
         }
       }
-    }
-
-    if (fullConfig.detectSuspiciousKeys && keys.length === 0) {
+    }    if (fullConfig.detectSuspiciousKeys) {
+      // Object-literal `__proto__: {...}` silently mutates the prototype and
+      // never appears in Object.keys(), so check the prototype directly on
+      // every plain object (not only key-less ones) to catch the attack.
       const isPlainObj = Object.prototype.toString.call(value) === '[object Object]';
       if (isPlainObj) {
         const proto = Object.getPrototypeOf(value);
@@ -247,7 +258,6 @@ export function analyzeAST(
           result.suspiciousKeys.push(path ? `${path}.__proto__` : '__proto__');
           result.isSafe = false;
           result.reason = 'Suspicious key detected: "__proto__" (possible prototype pollution attack via __proto__ setter)';
-          return;
         }
       }
     }
@@ -256,7 +266,9 @@ export function analyzeAST(
       for (const key of keys) {
         if (QUERY_SELECTION_KEYS.has(key)) {
           const newQueryDepth = currentQueryDepth + 1;
-          if (newQueryDepth > fullConfig.maxQuerySelectionDepth) {
+          // Depth reaches the limit = abuse (the limit is the max ALLOWED
+          // nesting, so the Nth nested query key is blocked).
+          if (newQueryDepth >= fullConfig.maxQuerySelectionDepth) {
             result.hasDeepQuerySelection = true;
             const selectionPath = fullConfig.trackPaths
               ? path ? `${path}.${key}` : key
@@ -277,7 +289,7 @@ export function analyzeAST(
                 newQueryDepth,
                 [],
               );
-              if (!result.isSafe) return;
+              if (hardStop) return;
             }
             return;
           }
@@ -296,25 +308,26 @@ export function analyzeAST(
       const nested = (value as Record<string, unknown>)[key];
 
       if (fullConfig.detectMonotonousStructures) {
-        if (
-          typeof nested === 'object' && nested !== null &&
-          !Array.isArray(nested) && !visited.has(nested)
-        ) {
-          const nestedKeys = Object.keys(nested);
-          if (nestedKeys.length === 1 && nestedKeys[0] === key) {
-            const newChain = [...monotonousKeyChain, key];
-            if (newChain.length >= fullConfig.monotonousThreshold) {
-              result.monotonousDepth = Math.max(result.monotonousDepth, newChain.length);
-              if (result.isSafe) {
-                result.isSafe = false;
-                result.reason = `Monotonous structure detected: key "${key}" repeated ${newChain.length} levels deep (synthetic attack pattern)`;
-              }
+        // A node whose ONLY key equals the key we arrived through continues
+        // (or starts) a monotonous chain. The final level may hold a primitive
+        // (e.g. `{a: {a: "leaf"}}`), so we count the key itself — not only
+        // nested objects — to avoid an off-by-one on the recorded depth.
+        if (keys.length === 1 && keys[0] === key) {
+          const newChain =
+            monotonousKeyChain.length > 0 && monotonousKeyChain[monotonousKeyChain.length - 1] === key
+              ? [...monotonousKeyChain, key]
+              : [key];
+          if (newChain.length >= fullConfig.monotonousThreshold) {
+            result.monotonousDepth = Math.max(result.monotonousDepth, newChain.length);
+            if (result.isSafe) {
+              result.isSafe = false;
+              result.reason = `Monotonous structure detected: key "${key}" repeated ${newChain.length} levels deep (synthetic attack pattern)`;
             }
-            const propPath = fullConfig.trackPaths ? (path ? `${path}.${key}` : key) : '';
-            traverse(nested, currentDepth + 1, propPath, currentQueryDepth, newChain);
-            if (!result.isSafe) return;
-            continue;
           }
+          const propPath = fullConfig.trackPaths ? (path ? `${path}.${key}` : key) : '';
+          traverse(nested, currentDepth + 1, propPath, currentQueryDepth, newChain);
+          if (hardStop) return;
+          continue;
         }
       }
 
@@ -330,7 +343,7 @@ export function analyzeAST(
         [],
       );
 
-      if (!result.isSafe) return;
+      if (hardStop) return;
     }
   }
 
@@ -341,7 +354,7 @@ export function analyzeAST(
   if (
     result.isSafe &&
     fullConfig.detectSuspiciousStringValues &&
-    suspiciousStringCount > fullConfig.maxSuspiciousStringValues
+    suspiciousStringCount >= fullConfig.maxSuspiciousStringValues
   ) {
     result.isSafe = false;
     result.reason = `Suspicious string value patterns exceeded limit (${suspiciousStringCount} > ${fullConfig.maxSuspiciousStringValues})`;
@@ -398,7 +411,9 @@ export function analyzeAST(
       1,
     );
 
-    if (result.isSafe && result.riskScore > fullConfig.maxRiskScore) {
+    if (result.riskScore > fullConfig.maxRiskScore) {
+      // Risk score is the aggregate signal: when it fires it overrides an
+      // earlier (more specific) reason so callers see the dominant cause.
       result.isSafe = false;
       result.reason = `Composite risk score ${result.riskScore.toFixed(2)} exceeded threshold ${fullConfig.maxRiskScore}`;
     }

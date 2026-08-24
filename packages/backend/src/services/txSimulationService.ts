@@ -93,10 +93,10 @@ export async function simulateTransactionDryRun(
 
     if ("cost" in simResult && simResult.cost) {
       const cost = simResult.cost as { cpuInsns?: string | number; memBytes?: string | number };
-      success.cost = {
-        cpuInsns: cost.cpuInsns != null ? String(cost.cpuInsns) : undefined,
-        memBytes: cost.memBytes != null ? String(cost.memBytes) : undefined,
-      };
+      const costOut: { cpuInsns?: string; memBytes?: string } = {};
+      if (cost.cpuInsns != null) costOut.cpuInsns = String(cost.cpuInsns);
+      if (cost.memBytes != null) costOut.memBytes = String(cost.memBytes);
+      success.cost = costOut;
     }
 
     if ("latestLedger" in simResult && simResult.latestLedger != null) {

@@ -175,12 +175,12 @@ class DiagnosticMonitor {
       });
       session.off('HeapProfiler.addHeapSnapshotChunk', chunkHandler);
       // Wait for the stream to finish draining before we stat the file.
-      await new Promise((resolve) => {
-        if (!this.snapshotStream) resolve(true);
+      await new Promise<void>((resolve) => {
+        if (!this.snapshotStream) resolve();
         else {
           const s = this.snapshotStream;
-          if (s.closed || s.writableEnded) resolve(true);
-          else s.on('finish', resolve);
+          if (s.closed || s.writableEnded) resolve();
+          else s.on('finish', () => resolve());
         }
       });
       const stat = fs.statSync(target);
@@ -224,7 +224,7 @@ class DiagnosticMonitor {
       javascriptHeapSpaces: v8.getHeapSpaceStatistics(),
       systemMemory: process.memoryUsage.rss
         ? { rssBytes: process.memoryUsage.rss() }
-        : (process.memoryUsage() as Record<string, number>),
+        : { ...process.memoryUsage() },
       libuvVersion: process.versions.uv,
       versions: process.versions,
       os: { hostname: os.hostname(), platform: process.platform, arch: process.arch, cpus: os.cpus().length },
@@ -235,10 +235,6 @@ class DiagnosticMonitor {
     try {
       const stat = v8.getHeapStatistics();
       const mem = process.memoryUsage();
-      const ratio =
-        stat.total_available_size > 0
-          ? stat.used_heap_size / stat.total_available_size
-          : 0;
       this.lastSample = stat;
       // Automatic snapshot trigger.
       if (

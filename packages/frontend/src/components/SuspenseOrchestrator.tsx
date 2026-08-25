@@ -20,6 +20,7 @@ export interface BoundaryState {
 export interface SuspenseOrchestratorContextType {
   registerBoundary: (id: string, isCritical?: boolean) => void;
   resolveBoundary: (id: string) => void;
+  unregisterBoundary: (id: string) => void;
   isFullyResolved: boolean;
   isPending: boolean;
   registeredBoundaries: Record<string, BoundaryState>;
@@ -38,46 +39,62 @@ export function useSuspenseOrchestrator() {
 export function SuspenseOrchestratorProvider({
   children,
   fallback,
+  minHeight = "min-h-[50vh]",
 }: {
   children: ReactNode;
   fallback: ReactNode;
+  minHeight?: string;
 }) {
   const [boundaries, setBoundaries] = useState<Record<string, BoundaryState>>({});
   const [isFullyResolved, setIsFullyResolved] = useState(false);
   const [isPending, startTransition] = useTransition();
 
   const registerBoundary = useCallback((id: string, isCritical = true) => {
+    if (!id || typeof id !== "string" || id.trim() === "") return;
+    const cleanId = id.trim();
     setBoundaries((prev) => {
-      if (prev[id] && prev[id].isCritical === isCritical) return prev;
+      if (prev[cleanId] && prev[cleanId].isCritical === isCritical) return prev;
       return {
         ...prev,
-        [id]: {
-          id,
+        [cleanId]: {
+          id: cleanId,
           isCritical,
-          isResolved: prev[id]?.isResolved ?? false,
+          isResolved: prev[cleanId]?.isResolved ?? false,
         },
       };
     });
   }, []);
 
   const resolveBoundary = useCallback((id: string) => {
+    if (!id || typeof id !== "string" || id.trim() === "") return;
+    const cleanId = id.trim();
     setBoundaries((prev) => {
-      if (prev[id]?.isResolved) return prev;
+      if (!prev[cleanId] || prev[cleanId].isResolved) return prev;
       return {
         ...prev,
-        [id]: {
-          id,
-          isCritical: prev[id]?.isCritical ?? true,
+        [cleanId]: {
+          ...prev[cleanId],
           isResolved: true,
         },
       };
     });
   }, []);
 
+  const unregisterBoundary = useCallback((id: string) => {
+    if (!id || typeof id !== "string" || id.trim() === "") return;
+    const cleanId = id.trim();
+    setBoundaries((prev) => {
+      if (!prev[cleanId]) return prev;
+      const next = { ...prev };
+      delete next[cleanId];
+      return next;
+    });
+  }, []);
+
   // Determine whether all critical registered boundaries are resolved
   const checkCriticalResolved = useCallback((bMap: Record<string, BoundaryState>) => {
     const keys = Object.keys(bMap);
-    if (keys.length === 0) return false;
+    if (keys.length === 0) return true;
     const criticalKeys = keys.filter((k) => bMap[k].isCritical);
     if (criticalKeys.length === 0) return true;
     return criticalKeys.every((k) => bMap[k].isResolved);
@@ -85,9 +102,9 @@ export function SuspenseOrchestratorProvider({
 
   useEffect(() => {
     const criticalResolved = checkCriticalResolved(boundaries);
-    if (criticalResolved && !isFullyResolved) {
+    if (criticalResolved !== isFullyResolved) {
       startTransition(() => {
-        setIsFullyResolved(true);
+        setIsFullyResolved(criticalResolved);
       });
     }
   }, [boundaries, checkCriticalResolved, isFullyResolved]);
@@ -96,19 +113,20 @@ export function SuspenseOrchestratorProvider({
     () => ({
       registerBoundary,
       resolveBoundary,
+      unregisterBoundary,
       isFullyResolved,
       isPending,
       registeredBoundaries: boundaries,
     }),
-    [registerBoundary, resolveBoundary, isFullyResolved, isPending, boundaries]
+    [registerBoundary, resolveBoundary, unregisterBoundary, isFullyResolved, isPending, boundaries]
   );
 
   return (
     <SuspenseOrchestratorContext.Provider value={contextValue}>
-      <div className="relative w-full min-h-[50vh]">
-        {/* Render children inside container; keep invisible & non-interactive until critical data resolves */}
+      <div className={`relative w-full ${minHeight} contain-layout`}>
+        {/* Render children inside container; keep invisible & non-interactive until critical data resolves without layout shift */}
         <div
-          className={`w-full transition-opacity duration-300 ease-in-out ${
+          className={`w-full transition-opacity duration-300 ease-in-out motion-reduce:transition-none ${
             isFullyResolved && !isPending ? "opacity-100" : "opacity-0 pointer-events-none"
           }`}
           aria-hidden={!isFullyResolved || isPending}
@@ -118,7 +136,13 @@ export function SuspenseOrchestratorProvider({
 
         {/* Coordinated unified loader overlay matching layout until critical paint is ready */}
         {(!isFullyResolved || isPending) && (
-          <div className="absolute inset-0 z-10 w-full bg-transparent" aria-busy="true">
+          <div
+            className="absolute inset-0 z-10 w-full bg-transparent flex flex-col justify-start"
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            aria-label="Loading content"
+          >
             {fallback}
           </div>
         )}
@@ -140,11 +164,14 @@ export function OrchestratedBoundary({
   isReady,
   children,
 }: OrchestratedBoundaryProps) {
-  const { registerBoundary, resolveBoundary } = useSuspenseOrchestrator();
+  const { registerBoundary, resolveBoundary, unregisterBoundary } = useSuspenseOrchestrator();
 
   useEffect(() => {
     registerBoundary(id, isCritical);
-  }, [id, isCritical, registerBoundary]);
+    return () => {
+      unregisterBoundary(id);
+    };
+  }, [id, isCritical, registerBoundary, unregisterBoundary]);
 
   useEffect(() => {
     if (isReady) {
@@ -153,4 +180,41 @@ export function OrchestratedBoundary({
   }, [id, isReady, resolveBoundary]);
 
   return <>{children}</>;
+}
+
+/**
+ * Hook for Web3 state mutations ensuring zero-layout-shift and maintaining 60FPS UI
+ * responsiveness during heavy state changes by running mutations inside Concurrent React transitions.
+ */
+export function useZeroLayoutShiftMutation<T, R>(
+  mutationFn: (args: T) => Promise<R>
+) {
+  const [isPending, startTransition] = useTransition();
+  const [error, setError] = useState<Error | null>(null);
+
+  const executeMutation = useCallback(
+    async (args: T): Promise<R | undefined> => {
+      setError(null);
+      return new Promise<R | undefined>((resolve, reject) => {
+        startTransition(() => {
+          mutationFn(args)
+            .then((res) => {
+              resolve(res);
+            })
+            .catch((err) => {
+              const e = err instanceof Error ? err : new Error(String(err));
+              setError(e);
+              reject(e);
+            });
+        });
+      });
+    },
+    [mutationFn]
+  );
+
+  return {
+    executeMutation,
+    isPending,
+    error,
+  };
 }

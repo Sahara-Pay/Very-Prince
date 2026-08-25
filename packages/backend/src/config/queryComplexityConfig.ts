@@ -52,6 +52,12 @@ const DEFAULT_PROCEDURE_WEIGHTS: Record<string, number> = {
   'transaction.validateClaimPayout': 2,
   'sync.push': 8,
   'sync.pull': 5,
+  'webhook.get': 3,
+  'webhook.update': 5,
+  'webhook.deliveries': 6,
+  'webhook.test': 5,
+  'webhook.ingest': 12,
+  'webhook.ingestBatch': 15,
 };
 
 export const queryComplexityConfig: QueryComplexityConfig = {

@@ -187,3 +187,24 @@ describe("queryComplexityMiddleware — performance", () => {
     expect(averageMs).toBeLessThan(1);
   });
 });
+
+describe("queryComplexityMiddleware — Web3 Webhook Ingestion", () => {
+  it("correctly weights and scores webhook.ingest procedures", () => {
+    const single = computeBatchComplexity("webhook.ingest", {
+      organizationId: "org-1",
+      event: "payout_claimed",
+      data: { amount: "1000" },
+    });
+    expect(single.procedures[0]?.weight).toBe(12);
+    expect(single.exceeds).toBe(false);
+
+    const heavyBatch = computeBatchComplexity(
+      "webhook.ingest,webhook.ingest,webhook.ingest,webhook.ingest",
+      buildBatchBody(4, {
+        0: { organizationId: "org-1", event: "block_finalized", data: buildDeepObject(15) },
+      })
+    );
+    expect(heavyBatch.exceeds).toBe(true);
+  });
+});
+

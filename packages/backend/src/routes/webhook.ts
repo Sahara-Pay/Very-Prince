@@ -218,4 +218,55 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.status(500).send({ error: "Failed to reveal secret" });
     }
   });
+
+  /**
+   * POST /ingest
+   * Non-blocking ingestion for finalized Web3 block webhooks with query complexity scoring.
+   * Protects the Node.js event loop and Prisma DB pool during high concurrency block spikes.
+   */
+  fastify.post("/ingest", {
+    config: {
+      rateLimit: {
+        max: 60,
+        timeWindow: "1 minute",
+      },
+    },
+  }, async (request, reply) => {
+    const { computeBatchComplexity } = await import("../trpc/queryComplexityMiddleware.js");
+    const { queryComplexityConfig } = await import("../config/queryComplexityConfig.js");
+    const { webhookJobDataSchema } = await import("../schemas/webhookJobSchemas.js");
+
+    const complexityResult = computeBatchComplexity("webhook.ingest", request.body);
+
+    if (complexityResult.exceeds) {
+      request.log.warn({ totalScore: complexityResult.totalScore }, "Rejected webhook ingestion: complexity limit exceeded");
+      return reply.status(429).send({
+        error: "Too Many Requests",
+        message: `Query complexity score ${complexityResult.totalScore.toFixed(2)} exceeds limit ${queryComplexityConfig.maxBatchScore}`,
+      });
+    }
+
+    const parseResult = webhookJobDataSchema.safeParse(request.body);
+    if (!parseResult.success) {
+      return reply.status(400).send({
+        error: "Bad Request",
+        message: "Malformed webhook payload",
+        details: parseResult.error.format(),
+      });
+    }
+
+    try {
+      const { organizationId, event, data } = parseResult.data;
+      await webhookService.queueWebhook(organizationId, event, data);
+
+      return reply.status(202).send({
+        success: true,
+        message: "Webhook queued for non-blocking processing",
+        complexityScore: complexityResult.totalScore,
+      });
+    } catch (error) {
+      request.log.error({ err: error }, "Failed to ingest Web3 webhook");
+      return reply.status(500).send({ error: "Failed to ingest webhook" });
+    }
+  });
 };

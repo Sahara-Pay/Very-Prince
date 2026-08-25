@@ -1,5 +1,9 @@
 #![no_std]
 
+#[cfg(any(test, feature = "testutils"))]
+extern crate std;
+extern crate alloc;
+
 mod token_interface;
 mod fixed_point;
 /// Rounding direction protection for deterministic fractional arithmetic.
@@ -3465,7 +3469,6 @@ mod bls_tests;
 #[cfg(test)]
 mod vault_tests;
 #[cfg(test)]
-mod list_tests;
 mod list_tests;
 #[cfg(test)]
 mod flash_loan_tests;

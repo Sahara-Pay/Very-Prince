@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod sdk_compatibility_tests {
-    use soroban_sdk::{Address, Env, Symbol};
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::{symbol_short, Address, Bytes, Env, IntoVal, Symbol};
 
     /// Test that the contract registration API works correctly with the current SDK version.
     /// This test ensures compatibility with SDK 22.x registration API changes.
@@ -76,15 +77,17 @@ mod sdk_compatibility_tests {
     #[test]
     fn test_sdk_storage_operations() {
         let env = Env::default();
+        let contract_id = env.register(crate::PayoutRegistry, ());
         
         let key = Symbol::new(&env, "test_key");
         let value = 42i128;
         
-        // Test instance storage
-        env.storage().instance().set(&key, &value);
-        let retrieved = env.storage().instance().get::<Symbol, i128>(&key);
-        
-        assert_eq!(retrieved, Some(value));
+        // Test instance storage within contract context
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&key, &value);
+            let retrieved = env.storage().instance().get::<Symbol, i128>(&key);
+            assert_eq!(retrieved, Some(value));
+        });
     }
 
     /// Test that events can be published correctly with the current SDK.
@@ -106,16 +109,15 @@ mod sdk_compatibility_tests {
     /// This ensures hash and signature operations are compatible.
     #[test]
     fn test_sdk_crypto_operations() {
-        use soroban_sdk::BytesN;
-        
         let env = Env::default();
         
         // Test hash operations
         let data = [1u8, 2, 3, 4];
-        let hash = env.crypto().sha256(&data);
+        let bytes_data = Bytes::from_slice(&env, &data);
+        let hash = env.crypto().sha256(&bytes_data);
         
         // Verify hash is 32 bytes
-        assert_eq!(hash.len(), 32);
+        assert_eq!(hash.to_array().len(), 32);
     }
 
     /// Test that the contract client can be created and used correctly.
@@ -175,7 +177,7 @@ mod sdk_compatibility_tests {
         let env = Env::default();
         
         let symbol1 = Symbol::new(&env, "test");
-        let symbol2 = Symbol::short("test");
+        let symbol2 = symbol_short!("test");
         
         // Both should create valid symbols
         assert_eq!(symbol1, symbol2);
@@ -225,8 +227,6 @@ mod sdk_compatibility_tests {
     /// This ensures large integer operations work correctly.
     #[test]
     fn test_sdk_bigint_operations() {
-        let env = Env::default();
-        
         let large_value: i128 = 1_000_000_000_000_000_000;
         let result = large_value.checked_add(1);
         
@@ -254,6 +254,6 @@ mod sdk_compatibility_tests {
         
         let string = soroban_sdk::String::from_str(&env, "test");
         
-        assert_eq!(string.to_string(), "test");
+        assert_eq!(string, soroban_sdk::String::from_str(&env, "test"));
     }
 }

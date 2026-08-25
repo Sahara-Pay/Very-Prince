@@ -484,9 +484,10 @@ mod tests {
     #[test]
     fn single_byte_below_128() {
         for b in 0u8..=0x7f {
-            let (item, consumed) = decode(&[b]).unwrap();
+            let buf = [b];
+            let (item, consumed) = decode(&buf).unwrap();
             assert_eq!(consumed, 1);
-            assert_eq!(item, RlpItem::Bytes(&[b]));
+            assert_eq!(item, RlpItem::Bytes(&buf));
         }
     }
 

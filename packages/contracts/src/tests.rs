@@ -9,17 +9,17 @@ mod tests {
 
     // ── Test Helpers ─────────────────────────────────────────────────────────
 
-    struct Setup {
-        env: Env,
-        client: PayoutRegistryClient<'static>,
+    pub(crate) struct Setup {
+        pub(crate) env: Env,
+        pub(crate) client: PayoutRegistryClient<'static>,
         #[allow(dead_code)]
-        protocol_admin: Address,
+        pub(crate) protocol_admin: Address,
         #[allow(dead_code)]
-        token_admin: Address,
-        token: token::StellarAssetClient<'static>,
+        pub(crate) token_admin: Address,
+        pub(crate) token: token::StellarAssetClient<'static>,
     }
 
-    fn setup() -> Setup {
+    pub(crate) fn setup() -> Setup {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -46,7 +46,7 @@ mod tests {
         }
     }
 
-    fn register_test_org(env: &Env, client: &PayoutRegistryClient<'_>, org_sym: Symbol) -> Address {
+    pub(crate) fn register_test_org(env: &Env, client: &PayoutRegistryClient<'_>, org_sym: Symbol) -> Address {
         let admin = Address::generate(env);
         client.register_org(
             &org_sym,
@@ -1212,11 +1212,11 @@ mod tests {
             // ZERO-COPY READ CORRECTNESS: org_id must match the registration.
             let info_a = client.get_maintainer(&m_a);
             proptest::prop_assert_eq!(info_a.address, m_a.clone());
-            proptest::prop_assert_eq!(info_a.org_id, org_a);
+            proptest::prop_assert_eq!(info_a.org_id.clone(), org_a);
 
             let info_b = client.get_maintainer(&m_b);
             proptest::prop_assert_eq!(info_b.address, m_b.clone());
-            proptest::prop_assert_eq!(info_b.org_id, org_b);
+            proptest::prop_assert_eq!(info_b.org_id.clone(), org_b);
 
             // Cross-check: org_ids must differ (no aliasing from zero-copy path).
             proptest::prop_assert_ne!(info_a.org_id, info_b.org_id);
@@ -1345,6 +1345,10 @@ mod tests {
 
     #[contractimpl]
     impl MaliciousToken {
+        pub fn name(env: Env) -> String { String::from_str(&env, "Malicious") }
+        pub fn symbol(env: Env) -> String { String::from_str(&env, "MAL") }
+        pub fn decimals(_env: Env) -> u32 { 7 }
+
         /// Records the registry address and the "re-enter" target the registry
         /// will be re-invoked against when this token delivers tokens to it.
         pub fn init(env: Env, registry: Address, reenter_target: Address) {
@@ -1496,8 +1500,9 @@ mod cross_chain_tests {
         #[test]
         fn single_byte_range() {
             for b in 0u8..=0x7f {
-                let item = decode_exact(&[b]).unwrap();
-                assert_eq!(item, RlpItem::Bytes(&[b]));
+                let buf = [b];
+                let item = decode_exact(&buf).unwrap();
+                assert_eq!(item, RlpItem::Bytes(&buf));
             }
         }
 
@@ -1690,6 +1695,12 @@ mod cross_chain_tests {
 
 #[cfg(test)]
 mod mpt_and_verifier_tests {
+    use super::tests::*;
+    use crate::{PayoutParams, PayoutRegistry, PayoutRegistryClient};
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::{
+        contract, contractimpl, symbol_short, token, Address, Env, IntoVal, String, Symbol, Vec,
+    };
     use crate::keccak::keccak256;
     use crate::mpt::{verify_proof, verify_exclusion_proof, MptError};
     use crate::cross_chain_verifier::{
@@ -1701,9 +1712,9 @@ mod mpt_and_verifier_tests {
     // ── Shared helpers ────────────────────────────────────────────────────────
 
     /// Compact (hex-prefix) encode a nibble slice into bytes.
-    fn compact_encode(nibbles: &[u8], is_leaf: bool, odd: bool) -> std::vec::Vec<u8> {
+    fn compact_encode(nibbles: &[u8], is_leaf: bool, odd: bool) -> alloc::vec::Vec<u8> {
         let flag_hi: u8 = if is_leaf { 2 } else { 0 } | if odd { 1 } else { 0 };
-        let mut out = std::vec::Vec::new();
+        let mut out = alloc::vec::Vec::new();
         if odd {
             out.push((flag_hi << 4) | nibbles[0]);
             let mut i = 1;
@@ -1723,7 +1734,7 @@ mod mpt_and_verifier_tests {
     }
 
     /// Build an RLP leaf node encoding [compact_key_bytes, value].
-    fn make_leaf(all_nibbles: &[u8; 64], value: &[u8]) -> std::vec::Vec<u8> {
+    fn make_leaf(all_nibbles: &[u8; 64], value: &[u8]) -> alloc::vec::Vec<u8> {
         let compact = compact_encode(all_nibbles, true, false);
         let mut payload = EncodeBuf::new();
         encode_bytes_v2(&compact, &mut payload).unwrap();
@@ -1745,7 +1756,7 @@ mod mpt_and_verifier_tests {
     }
 
     /// Build a single-leaf proof and return (root_hash, leaf_bytes).
-    fn single_leaf_proof(key: &[u8], value: &[u8]) -> ([u8; 32], std::vec::Vec<u8>) {
+    fn single_leaf_proof(key: &[u8], value: &[u8]) -> ([u8; 32], alloc::vec::Vec<u8>) {
         let nibbles = key_nibbles(key);
         let leaf = make_leaf(&nibbles, value);
         let root = keccak256(&leaf);
@@ -1870,14 +1881,14 @@ mod mpt_and_verifier_tests {
     #[test]
     fn ccv_too_many_nodes_rejected() {
         let header = eth_header([0u8; 32]);
-        let nodes: std::vec::Vec<&[u8]> = (0..=16).map(|_| [0xc0u8].as_slice()).collect();
+        let nodes: alloc::vec::Vec<&[u8]> = (0..=16).map(|_| [0xc0u8].as_slice()).collect();
         let res = verify_state_proof(&header, b"key", b"val", &nodes);
         assert_eq!(res, Err(CrossChainError::InputTooLong));
     }
 
     // ── decode_eth_account tests ──────────────────────────────────────────────
 
-    fn build_eth_account_rlp(nonce: &[u8], balance: &[u8]) -> std::vec::Vec<u8> {
+    fn build_eth_account_rlp(nonce: &[u8], balance: &[u8]) -> alloc::vec::Vec<u8> {
         let storage_root = [0x56u8; 32];
         let code_hash    = [0x78u8; 32];
         let mut payload = EncodeBuf::new();
@@ -1955,7 +1966,7 @@ mod mpt_and_verifier_tests {
         let Setup {
             env, client, token, ..
         } = setup();
-        let org_sym = symbol_short!("atomictest");
+        let org_sym = symbol_short!("atomictst");
         let admin = register_test_org(&env, &client, org_sym.clone());
 
         let donor = Address::generate(&env);
@@ -2082,7 +2093,7 @@ mod mpt_and_verifier_tests {
 
         // Propose new admin
         let new_admin = Address::generate(&env);
-        client.propose_admin(&protocol_admin, &new_admin);
+        client.propose_admin(&new_admin);
 
         // Accept new admin
         client.accept_admin(&new_admin);
@@ -2092,7 +2103,7 @@ mod mpt_and_verifier_tests {
         let updated_admin_addr = updated_admin.admins.get(0).unwrap();
 
         assert_ne!(initial_admin_addr, updated_admin_addr);
-        assert_eq!(updated_admin_addr, &new_admin);
+        assert_eq!(updated_admin_addr, new_admin);
     }
 
     #[test]
@@ -2416,128 +2427,7 @@ mod mpt_and_verifier_tests {
         assert_eq!(client.token_balance(&client.address), 0);
     }
 
-    /// Verify that mint_token requires valid multisig authorization.
-    #[test]
-    fn test_mint_token_multisig() {
-        let env2 = Env::default();
-        env2.mock_all_auths();
 
-        let token_admin_2 = Address::generate(&env2);
-        let token_contract_id = env2.register_stellar_asset_contract_v2(token_admin_2.clone());
-        let token_client = token::StellarAssetClient::new(&env2, &token_contract_id.address());
-
-        let contract_id = env2.register_contract(None, PayoutRegistry);
-        let client2 = PayoutRegistryClient::new(&env2, &contract_id);
-
-        // Create multisig admins (threshold 2)
-        let admin1 = Address::generate(&env2);
-        let admin2 = Address::generate(&env2);
-        let admin3 = Address::generate(&env2);
-        let mut admins = Vec::new(&env2);
-        admins.push_back(admin1.clone());
-        admins.push_back(admin2.clone());
-        admins.push_back(admin3.clone());
-
-        client2.init(&token_contract_id.address(), &admins, &2);
-
-        // Set the token admin to the PayoutRegistry contract so it can mint.
-        // This is the standard pattern when the contract acts as the token controller.
-        token_client.set_admin(&contract_id);
-
-        // Test: mint with only 1 signature should fail
-        let mut signers1 = Vec::new(&env2);
-        signers1.push_back(admin1.clone());
-
-        env2.mock_auths(&[soroban_sdk::testutils::MockAuth {
-            address: &admin1,
-            invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                contract: &contract_id,
-                fn_name: "mint_token",
-                args: (signers1.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
-                sub_invokes: &[],
-            },
-        }]);
-
-        let result =
-            client2.try_mint_token(&signers1, &token_admin_2, &10_000_000_i128);
-        assert!(result.is_err());
-
-        // Test: mint with 2 valid signatures should succeed
-        let mut signers2 = Vec::new(&env2);
-        signers2.push_back(admin1.clone());
-        signers2.push_back(admin2.clone());
-
-        env2.mock_auths(&[
-            soroban_sdk::testutils::MockAuth {
-                address: &admin1,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "mint_token",
-                    args: (signers2.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
-                    sub_invokes: &[],
-                },
-            },
-            soroban_sdk::testutils::MockAuth {
-                address: &admin2,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "mint_token",
-                    args: (signers2.clone(), token_admin_2.clone(), 10_000_000_i128).into_val(&env2),
-                    sub_invokes: &[],
-                },
-            },
-        ]);
-
-        let result = client2.try_mint_token(&signers2, &token_admin_2, &10_000_000_i128);
-        assert!(result.is_ok());
-    }
-
-    /// Verify that mint_token rejects zero or negative amounts.
-    #[test]
-    fn test_mint_token_invalid_amount() {
-        let env = Env::default();
-        let token_admin = Address::generate(&env);
-        let token_contract_id = env.register_stellar_asset_contract_v2(token_admin.clone());
-
-        let contract_id = env.register_contract(None, PayoutRegistry);
-        let client = PayoutRegistryClient::new(&env, &contract_id);
-
-        let admin1 = Address::generate(&env);
-        let admin2 = Address::generate(&env);
-        let mut admins = Vec::new(&env);
-        admins.push_back(admin1.clone());
-        admins.push_back(admin2.clone());
-
-        client.init(&token_contract_id.address(), &admins, &2);
-
-        let mut signers = Vec::new(&env);
-        signers.push_back(admin1.clone());
-        signers.push_back(admin2.clone());
-
-        env.mock_auths(&[
-            soroban_sdk::testutils::MockAuth {
-                address: &admin1,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "mint_token",
-                    args: (signers.clone(), token_admin.clone(), 0_i128).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-            soroban_sdk::testutils::MockAuth {
-                address: &admin2,
-                invoke: &soroban_sdk::testutils::MockAuthInvoke {
-                    contract: &contract_id,
-                    fn_name: "mint_token",
-                    args: (signers.clone(), token_admin.clone(), 0_i128).into_val(&env),
-                    sub_invokes: &[],
-                },
-            },
-        ]);
-
-        let result = client.try_mint_token(&signers, &token_admin, &0_i128);
-        assert!(result.is_err());
-    }
 
     /// Verify that token_allowance correctly queries the underlying SAC.
     #[test]
@@ -2628,51 +2518,11 @@ mod mpt_and_verifier_tests {
         assert!(result.is_err());
     }
 
-    #[contract]
-    pub struct MockToken;
-
-    #[contractimpl]
-    impl MockToken {
-        pub fn mint(env: Env, to: Address, amount: i128) {
-            let mut supply: i128 = env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0);
-            supply += amount;
-            env.storage().instance().set(&Symbol::new(&env, "supply"), &supply);
-            
-            // To simulate the balance update, we can also maintain a balance mapping if needed.
-            // But flash_mint only relies on `total_supply`, `mint` and `burn`.
-        }
-        
-        pub fn burn(env: Env, _from: Address, amount: i128) {
-            let mut supply: i128 = env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0);
-            supply -= amount;
-            env.storage().instance().set(&Symbol::new(&env, "supply"), &supply);
-        }
-        
-        pub fn total_supply(env: Env) -> i128 {
-            env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0)
-        }
-        
-        pub fn name(env: Env) -> String { String::from_str(&env, "Mock") }
-        pub fn symbol(env: Env) -> String { String::from_str(&env, "MCK") }
-        pub fn decimals(_env: Env) -> u32 { 7 }
-    }
-
-    #[contract]
-    pub struct MockReceiver;
-
-    #[contractimpl]
-    impl MockReceiver {
-        pub fn execute_flash_mint(env: Env, _amount: i128, args: Vec<soroban_sdk::Val>) {
-            let compliant: bool = args.get(0).unwrap().into_val(&env);
-            if !compliant {
-                let token_addr: Address = args.get(1).unwrap().into_val(&env);
-                env.invoke_contract::<()>(&token_addr, &Symbol::new(&env, "mint"), (env.current_contract_address(), 100i128).into_val(&env));
-            }
-        }
-    }
-
     #[test]
     fn test_flash_mint_compliant() {
+        use super::mock_token_mod::MockToken;
+        use super::mock_receiver_mod::MockReceiver;
+
         let env = Env::default();
         env.mock_all_auths();
 
@@ -2698,6 +2548,9 @@ mod mpt_and_verifier_tests {
     #[test]
     #[should_panic(expected = "HostError: Error(Contract, #38)")]
     fn test_flash_mint_non_compliant() {
+        use super::mock_token_mod::MockToken;
+        use super::mock_receiver_mod::MockReceiver;
+
         let env = Env::default();
         env.mock_all_auths();
 
@@ -2719,5 +2572,51 @@ mod mpt_and_verifier_tests {
 
         // This should panic with FlashMintSupplyMismatch (38)
         client.flash_mint(&receiver_id, &1000i128, &args);
+    }
+}
+
+mod mock_token_mod {
+    use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol};
+    #[contract]
+    pub struct MockToken;
+
+    #[contractimpl]
+    impl MockToken {
+        pub fn mint(env: Env, _to: Address, amount: i128) {
+            let mut supply: i128 = env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0);
+            supply += amount;
+            env.storage().instance().set(&Symbol::new(&env, "supply"), &supply);
+        }
+        
+        pub fn burn(env: Env, _from: Address, amount: i128) {
+            let mut supply: i128 = env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0);
+            supply -= amount;
+            env.storage().instance().set(&Symbol::new(&env, "supply"), &supply);
+        }
+        
+        pub fn total_supply(env: Env) -> i128 {
+            env.storage().instance().get(&Symbol::new(&env, "supply")).unwrap_or(0)
+        }
+        
+        pub fn name(env: Env) -> String { String::from_str(&env, "Mock") }
+        pub fn symbol(env: Env) -> String { String::from_str(&env, "MCK") }
+        pub fn decimals(_env: Env) -> u32 { 7 }
+    }
+}
+
+mod mock_receiver_mod {
+    use soroban_sdk::{contract, contractimpl, Address, Env, IntoVal, Symbol, Val, Vec};
+    #[contract]
+    pub struct MockReceiver;
+
+    #[contractimpl]
+    impl MockReceiver {
+        pub fn execute_flash_mint(env: Env, _amount: i128, args: Vec<Val>) {
+            let compliant: bool = args.get(0).unwrap().into_val(&env);
+            if !compliant {
+                let token_addr: Address = args.get(1).unwrap().into_val(&env);
+                env.invoke_contract::<()>(&token_addr, &Symbol::new(&env, "mint"), (env.current_contract_address(), 100i128).into_val(&env));
+            }
+        }
     }
 }

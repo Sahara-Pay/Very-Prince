@@ -193,15 +193,18 @@ mod tests {
     #[test]
     fn test_issue_and_validate_round_trip() {
         let env = Env::default();
+        let contract_id = env.register(crate::PayoutRegistry, ());
         let caller = Address::generate(&env);
         let tag = Symbol::new(&env, "batch_pay");
         let seq = env.ledger().sequence();
         let expiry = seq + 1;
 
-        let token = issue_capability(&env, &caller, &tag, expiry);
+        env.as_contract(&contract_id, || {
+            let token = issue_capability(&env, &caller, &tag, expiry);
 
-        // Must succeed without any require_auth() call.
-        validate_and_consume_capability(&env, &token, &caller, &tag, seq, expiry);
+            // Must succeed without any require_auth() call.
+            validate_and_consume_capability(&env, &token, &caller, &tag, seq, expiry);
+        });
     }
 
     // ── Acceptance criterion 2: wrong caller is rejected ────────────────────

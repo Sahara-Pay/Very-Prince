@@ -575,7 +575,7 @@ mod tests {
             let env = Env::default();
             let r_ab = safe_mul_div(&env, a, b, d, RoundingDirection::Floor);
             let r_ba = safe_mul_div(&env, b, a, d, RoundingDirection::Floor);
-            proptest::prop_assert_eq!(r_ab, r_ba, "mul_div not commutative for a={a}, b={b}, d={d}");
+            proptest::prop_assert_eq!(r_ab, r_ba, "mul_div not commutative for a={}, b={}, d={}", a, b, d);
         }
 
         // ── Invariant 11: Dust is always < number of projects ─────────────────

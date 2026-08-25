@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod bls_tests {
     use crate::{PayoutRegistry, PayoutRegistryClient};
-    use bls12_381_plus::{G1Affine, G2Affine, G1Projective, G2Projective, Scalar, ExpandMsgXmd, group::Group, group::ff::Field};
+    use bls12_381_plus::{G1Affine, G2Affine, G1Projective, G2Projective, Scalar, elliptic_curve::hash2curve::ExpandMsgXmd, group::Group, group::ff::Field, group::Curve};
     use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Bytes};
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
@@ -13,10 +13,11 @@ mod bls_tests {
         let client = PayoutRegistryClient::new(&env, &contract_id);
         
         let admin = Address::generate(&env);
-        let token = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token_contract = env.register_stellar_asset_contract_v2(token_admin);
         let mut admins = soroban_sdk::Vec::new(&env);
         admins.push_back(admin.clone());
-        client.init(&token, &admins, &1);
+        client.init(&token_contract.address(), &admins, &1);
         
         (env, client)
     }
@@ -40,12 +41,13 @@ mod bls_tests {
             Scalar::random(&mut rng),
         ];
         
-        let pks = sks.iter().map(|sk| (G2Affine::generator() * sk).to_affine()).collect::<std::vec::Vec<_>>();
+        extern crate alloc;
+        let pks = sks.iter().map(|sk| (G2Affine::generator() * sk).to_affine()).collect::<alloc::vec::Vec<_>>();
         
         // Register each signer with PoP
         for (i, pk) in pks.iter().enumerate() {
             let pk_bytes = pk.to_compressed();
-            let h_pk = G1Projective::hash_to_curve::<ExpandMsgXmd<sha2::Sha256>>(&pk_bytes, b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_").to_affine();
+            let h_pk = G1Projective::hash::<ExpandMsgXmd<sha2::Sha256>>(&pk_bytes, b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_").to_affine();
             let pop = (h_pk * sks[i]).to_affine();
             let pop_bytes = pop.to_compressed();
             
@@ -55,7 +57,7 @@ mod bls_tests {
         // Aggregate signatures off-chain
         let payout_id = 123u64;
         let msg = payout_id.to_be_bytes();
-        let h_m = G1Projective::hash_to_curve::<ExpandMsgXmd<sha2::Sha256>>(&msg, b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_").to_affine();
+        let h_m = G1Projective::hash::<ExpandMsgXmd<sha2::Sha256>>(&msg, b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_").to_affine();
         
         let mut agg_sig = G1Projective::identity();
         for sk in sks {

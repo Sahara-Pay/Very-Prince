@@ -385,41 +385,39 @@ mod tests {
         }
 
         #[test]
+        #[should_panic]
         fn compute_wrap_zero_shares_rejected() {
             let env = Env::default();
             // 1 * 4 / 11 = 0 → ZeroSharesMinted
-            let result = std::panic::catch_unwind(|| compute_wrap(&env, 1, 3, 10, 0));
-            assert!(result.is_err());
+            compute_wrap(&env, 1, 3, 10, 0);
         }
 
         #[test]
+        #[should_panic]
         fn compute_unwrap_excess_shares_rejected() {
             let env = Env::default();
-            let result =
-                std::panic::catch_unwind(|| compute_unwrap(&env, 100, 1_000, 1_000, 50));
-            assert!(result.is_err());
+            compute_unwrap(&env, 100, 1_000, 1_000, 50);
         }
 
         #[test]
+        #[should_panic]
         fn compute_unwrap_zero_shares_rejected() {
             let env = Env::default();
-            let result = std::panic::catch_unwind(|| compute_unwrap(&env, 0, 1_000, 1_000, 50));
-            assert!(result.is_err());
+            compute_unwrap(&env, 0, 1_000, 1_000, 50);
         }
 
         #[test]
+        #[should_panic]
         fn compute_wrap_negative_amount_rejected() {
             let env = Env::default();
-            let result = std::panic::catch_unwind(|| compute_wrap(&env, -1, 0, 0, 0));
-            assert!(result.is_err());
+            compute_wrap(&env, -1, 0, 0, 0);
         }
 
         #[test]
+        #[should_panic]
         fn compute_wrap_exceeds_limit_rejected() {
             let env = Env::default();
-            let result =
-                std::panic::catch_unwind(|| compute_wrap(&env, WRAP_MAX_AMOUNT + 1, 0, 0, 0));
-            assert!(result.is_err());
+            compute_wrap(&env, WRAP_MAX_AMOUNT + 1, 0, 0, 0);
         }
 
         #[test]

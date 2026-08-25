@@ -54,7 +54,7 @@ mod vault_tests {
         
         // Check contract balance
         let token_contract = token::Client::new(&env, &token_id);
-        assert_eq!(token_contract.balance(&env.current_contract_address()), amount);
+        assert_eq!(token_contract.balance(&client.address), amount);
 
         // Try to claim before maturity (at now + 1800)
         env.ledger().set_timestamp(now + 1800);
@@ -69,7 +69,7 @@ mod vault_tests {
         
         // User should have their tokens back
         assert_eq!(token_contract.balance(&user), amount);
-        assert_eq!(token_contract.balance(&env.current_contract_address()), 0);
+        assert_eq!(token_contract.balance(&client.address), 0);
     }
 
     #[test]

@@ -15,7 +15,8 @@ jobs:
     steps:
       - name: Check PR body and merge or comment
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Swapped to use your Personal Access Token
+          GH_TOKEN: ${{ secrets.PERSONAL_AUTH_TOKEN }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           REPO: ${{ github.repository }}
@@ -30,7 +31,7 @@ jobs:
               ISSUE_NUMBER=$(echo "$PR_BODY" | grep -ioE "(closes|fixes|resolves)\s*#[0-9]+" | head -n 1 | grep -oE "[0-9]+")
               
               echo "Manually closing issue #$ISSUE_NUMBER..."
-              gh issue close "$ISSUE_NUMBER" --repo "$REPO" -c "Automatically closed by auto-merge bot."
+              gh issue close "$ISSUE_NUMBER" --repo "$REPO" -c "Automatically closed by auto-merge."
               
             else
               echo "Merge failed! Leaving a comment..."

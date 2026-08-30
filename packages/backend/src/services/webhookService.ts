@@ -15,6 +15,7 @@ import {
 } from "../schemas/webhookJobSchemas.js";
 import { bullRedisConnection } from "./cache.js";
 import { staleCacheService } from "./staleCache.js";
+import { jwtCapabilityParser } from "./jwtCapabilityParser.js";
 import { logger } from "../utils/logger.js";
 import { calculateSignature as hmacCalculateSignature } from "../utils/signatureVerify.js";
 
@@ -131,12 +132,38 @@ export class WebhookService {
    * @param organizationId The organization to notify.
    * @param event The event name.
    * @param data The payload data.
+   * @param capabilityToken Optional JWT capability token for authorization
    */
   async queueWebhook(
     organizationId: string,
     event: string,
     data: WebhookEventData,
+    capabilityToken?: string,
   ) {
+    // Validate JWT capability if provided (non-blocking)
+    if (capabilityToken) {
+      try {
+        const hasPermission = await jwtCapabilityParser.hasPermission(
+          capabilityToken,
+          "webhook:dispatch"
+        );
+        
+        if (!hasPermission.granted) {
+          logger.warn(
+            { organizationId, event, reason: hasPermission.reason },
+            "Webhook dispatch denied: insufficient capability permissions"
+          );
+          return;
+        }
+      } catch (error) {
+        logger.error(
+          { err: error, organizationId, event },
+          "Failed to validate JWT capability, denying webhook dispatch"
+        );
+        return;
+      }
+    }
+
     const config = await this.getConfig(organizationId);
     if (!config || !config.url) {
       logger.debug(

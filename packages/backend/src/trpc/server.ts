@@ -52,7 +52,7 @@ export async function configureTRPC(server: FastifyInstance) {
         const results = await Promise.all(
           paths.map(async (p, index) => {
             const input = bodies[String(index)];
-            const ctx: TRPCContext = {};
+            const ctx: TRPCContext = { reply };
 
             try {
               evictionEngine.recordAccess(`trpc:${p}`);
@@ -75,8 +75,8 @@ export async function configureTRPC(server: FastifyInstance) {
       const clientStateHash = request.headers['x-state-hash'] as string | undefined;
 
       const ctx: TRPCContext = clientStateHash
-        ? { stateHash: clientStateHash }
-        : {};
+        ? { stateHash: clientStateHash, reply }
+        : { reply };
 
       try {
         evictionEngine.recordAccess(`trpc:${path}`);

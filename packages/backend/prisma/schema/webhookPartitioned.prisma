@@ -1,15 +1,10 @@
-/**
- * @file webhookPartitioned.prisma
- * @description Partitioned schema for high-throughput webhook event ingestion.
- * 
- * This schema defines time-partitioned tables specifically designed for Web3 webhook
- * ingestion to handle high-frequency events without blocking the event loop.
- * 
- * Partitioning Strategy:
- * - Monthly partitions by createdAt timestamp (YYYY_MM)
- * - Automatic partition creation via migration
- * - Optimized for bulk inserts and time-based queries
- */
+/// Partitioned schema for high-throughput webhook event ingestion.
+/// This schema defines time-partitioned tables specifically designed for Web3 webhook
+/// ingestion to handle high-frequency events without blocking the event loop.
+/// Partitioning Strategy:
+/// - Monthly partitions by createdAt timestamp (YYYY_MM)
+/// - Automatic partition creation via migration
+/// - Optimized for bulk inserts and time-based queries
 
 /// High-throughput webhook event storage (partitioned by month)
 model WebhookEvent {
@@ -33,7 +28,7 @@ model WebhookEvent {
 }
 
 /// Webhook delivery tracking (partitioned by month)
-/// This extends the existing WebhookDelivery with additional partitioning support
+/// Extends the existing WebhookDelivery with additional partitioning support
 model WebhookDeliveryLog {
   id              String   @default(cuid())
   webhookEventId  String

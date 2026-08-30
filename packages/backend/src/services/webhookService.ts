@@ -18,6 +18,7 @@ import { staleCacheService } from "./staleCache.js";
 import { jwtCapabilityParser } from "./jwtCapabilityParser.js";
 import { logger } from "../utils/logger.js";
 import { calculateSignature as hmacCalculateSignature } from "../utils/signatureVerify.js";
+import { nonBlockingStringify } from "../utils/streamingJson.js";
 
 export type { WebhookJobData } from "../schemas/webhookJobSchemas.js";
 
@@ -215,10 +216,25 @@ export class WebhookService {
       throw new Error("SQS webhook queue is not initialized");
     }
 
+    // Use non-blocking stringify for large payloads to prevent event loop blocking
+    let messageBody: string;
+    const estimatedSize = JSON.stringify(jobData).length;
+    
+    if (estimatedSize > 256 * 1024) { // 256KB threshold
+      // For large payloads, use streaming serialization
+      const chunks: string[] = [];
+      for await (const chunk of nonBlockingStringify(jobData, 64 * 1024)) {
+        chunks.push(chunk);
+      }
+      messageBody = chunks.join('');
+    } else {
+      messageBody = JSON.stringify(jobData);
+    }
+
     await this.sqsClient.send(
       new SendMessageCommand({
         QueueUrl: WEBHOOK_QUEUE_URL,
-        MessageBody: JSON.stringify(jobData),
+        MessageBody: messageBody,
         MessageAttributes: {
           organizationId: {
             DataType: "String",

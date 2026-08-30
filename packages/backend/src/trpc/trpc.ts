@@ -5,9 +5,11 @@
 
 import { initTRPC } from "@trpc/server";
 import { ZodError } from "zod";
+import type { FastifyReply } from "fastify";
 
 export interface TRPCContext {
   stateHash?: string;
+  reply?: FastifyReply;
 }
 
 export const t = initTRPC.context<TRPCContext>().create({

@@ -1,0 +1,70 @@
+/**
+ * @file webhookPartitioned.prisma
+ * @description Partitioned schema for high-throughput webhook event ingestion.
+ * 
+ * This schema defines time-partitioned tables specifically designed for Web3 webhook
+ * ingestion to handle high-frequency events without blocking the event loop.
+ * 
+ * Partitioning Strategy:
+ * - Monthly partitions by createdAt timestamp (YYYY_MM)
+ * - Automatic partition creation via migration
+ * - Optimized for bulk inserts and time-based queries
+ */
+
+/// High-throughput webhook event storage (partitioned by month)
+model WebhookEvent {
+  id              String   @default(cuid())
+  organizationId  String
+  eventType       String   // e.g., "payout_claimed", "funding_received", "block_processed"
+  source          String   // e.g., "stellar_horizon", "soroban_rpc", "custom_indexer"
+  priority        String   @default("normal") // "low", "normal", "high", "critical"
+  payload         String   // JSON string containing the full webhook payload
+  metadata        String?  // Optional metadata for processing
+  processedAt     DateTime @default(now())
+  createdAt       DateTime @default(now()) // Partition Key
+  deliveredAt     DateTime? // When the webhook was successfully delivered
+  
+  @@id([id, createdAt])
+  @@index([organizationId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@index([processedAt])
+  @@index([organizationId, createdAt])
+}
+
+/// Webhook delivery tracking (partitioned by month)
+/// This extends the existing WebhookDelivery with additional partitioning support
+model WebhookDeliveryLog {
+  id              String   @default(cuid())
+  webhookEventId  String
+  webhookConfigId String
+  payload         String
+  statusCode      Int?
+  responseBody    String?
+  errorMessage    String?
+  retryCount      Int      @default(0)
+  deliveredAt     DateTime?
+  createdAt       DateTime @default(now()) // Partition Key
+
+  @@id([id, createdAt])
+  @@index([webhookEventId])
+  @@index([webhookConfigId])
+  @@index([createdAt])
+  @@index([deliveredAt])
+}
+
+/// Partition metadata table for managing partition lifecycle
+model PartitionMetadata {
+  id              String   @id @default(cuid())
+  tableName       String   // e.g., "WebhookEvent", "WebhookDeliveryLog"
+  partitionName   String   // e.g., "WebhookEvent_2024_01"
+  partitionStart  DateTime // Partition range start
+  partitionEnd    DateTime // Partition range end
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([tableName, partitionName])
+  @@index([tableName])
+  @@index([isActive])
+}

@@ -14,6 +14,7 @@ import {
   type WebhookJobData,
 } from "../schemas/webhookJobSchemas.js";
 import { bullRedisConnection } from "./cache.js";
+import { staleCacheService } from "./staleCache.js";
 import { logger } from "../utils/logger.js";
 import { calculateSignature as hmacCalculateSignature } from "../utils/signatureVerify.js";
 
@@ -89,24 +90,44 @@ export class WebhookService {
 
   /**
    * Retrieves the current webhook configuration for an organization.
+   * Uses stale cache for non-blocking reads during high load.
    * @param organizationId The ID of the organization.
    */
   async getConfig(organizationId: string) {
-    return webhookRepository.getConfig(organizationId);
+    const cacheKey = `webhook:config:${organizationId}`;
+    
+    return staleCacheService.get(
+      cacheKey,
+      () => webhookRepository.getConfig(organizationId),
+      {
+        staleThresholdMs: 15000, // 15 seconds stale threshold for webhook configs
+        expireThresholdMs: 120000, // 2 minutes expire threshold
+        baseRefreshProbability: 0.2,
+        defaultTTL: 30,
+      }
+    );
   }
 
   /**
    * Updates or creates a webhook URL configuration for an organization.
+   * Invalidates stale cache after update to ensure consistency.
    * @param organizationId The ID of the organization.
    * @param url The external HTTP POST endpoint.
    */
   async updateConfig(organizationId: string, url: string) {
     const secret = await this.generateSecretForOrganization(organizationId);
-    return webhookRepository.upsertConfig(organizationId, url, secret);
+    const result = await webhookRepository.upsertConfig(organizationId, url, secret);
+    
+    // Invalidate cache to ensure consistency
+    const cacheKey = `webhook:config:${organizationId}`;
+    await staleCacheService.invalidate(cacheKey);
+    
+    return result;
   }
 
   /**
    * Dispatches a webhook asynchronously using BullMQ or SQS.
+   * Uses stale cache for config lookup to avoid blocking during high load.
    * @param organizationId The organization to notify.
    * @param event The event name.
    * @param data The payload data.
@@ -116,7 +137,7 @@ export class WebhookService {
     event: string,
     data: WebhookEventData,
   ) {
-    const config = await webhookRepository.getConfig(organizationId);
+    const config = await this.getConfig(organizationId);
     if (!config || !config.url) {
       logger.debug(
         { organizationId, event },
@@ -212,10 +233,11 @@ export class WebhookService {
 
   /**
    * Dispatches a test webhook event.
+   * Uses stale cache for config lookup.
    * @param organizationId The ID of the organization.
    */
   async sendTestWebhook(organizationId: string) {
-    const config = await webhookRepository.getConfig(organizationId);
+    const config = await this.getConfig(organizationId);
     if (!config || !config.url) {
       throw new Error("No webhook configuration found for this organization");
     }

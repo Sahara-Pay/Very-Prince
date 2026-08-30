@@ -125,13 +125,13 @@ export class IndexerService {
     // processing new events. This is non-blocking and uses the singleton
     // chainReorgHandler which maintains checkpoint state in memory.
     try {
-      const latestLedgerInfo = await stellarService.getLatestLedger();
-      if (latestLedgerInfo) {
-        const reorgResult = await chainReorgHandler.detectReorg(latestLedgerInfo.sequence);
+      const latestLedgerSequence = await stellarService.getLatestLedger();
+      if (latestLedgerSequence) {
+        const reorgResult = await chainReorgHandler.detectReorg(latestLedgerSequence);
         if (reorgResult.isReorg && reorgResult.orphanedLedgers && reorgResult.orphanedLedgers.length > 0) {
           logger.warn(
             {
-              currentLedger: latestLedgerInfo.sequence,
+              currentLedger: latestLedgerSequence,
               lastProcessed: lastProcessedLedger,
               orphanedLedgers: reorgResult.orphanedLedgers,
             },

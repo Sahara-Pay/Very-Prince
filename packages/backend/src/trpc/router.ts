@@ -22,6 +22,7 @@ import {
 import { syncRouter } from "./syncRouter.js";
 import { subscriptionRouter } from "./subscriptions.js";
 import { txSimulationService } from "../services/txSimulationService.js";
+import { webhookRouter } from "./webhookRouter.js";
 
 export { t };
 
@@ -292,6 +293,8 @@ export const appRouter = t.router({
   }),
 
   sync: syncRouter,
+
+  webhook: webhookRouter,
 });
 
 export type AppRouter = typeof appRouter;

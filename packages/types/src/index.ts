@@ -12,13 +12,11 @@ export * from "./api-responses.js";
 
 // ── Stellar / Soroban primitives ──────────────────────────────────────────────
 
-/** A Stellar public key (G…). */
-export type StellarAddress = string;
-
-/** A Soroban Symbol used as an organisation identifier. */
-export type OrgId = string;
+export { type StellarAddress, type OrgId } from "./primitives.js";
 
 // ── Core domain types ─────────────────────────────────────────────────────────
+
+import type { StellarAddress, OrgId } from "./primitives.js";
 
 /** Organisation as stored in the Soroban contract (DataKey::Organization). */
 export interface Organization {

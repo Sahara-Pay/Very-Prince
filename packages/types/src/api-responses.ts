@@ -6,6 +6,8 @@
  * the Fastify backend and Next.js frontend, catching mismatches early.
  */
 
+import type { StellarAddress, OrgId } from "./primitives.js";
+
 // ── Common response primitives ────────────────────────────────────────────────
 
 /** Standard offset pagination metadata returned by paginated endpoints. */
@@ -558,4 +560,159 @@ export interface TRPCStatsOverviewResponse {
   totalPayouts: number;
   totalVolume: string;
   lastSync: string;
+}
+
+// ── Fractional NFT (SVG Rendering) ────────────────────────────────────────────
+
+/** Rarity tier for fractional NFT visual characteristics. */
+export type NFTRarityTier =
+  | "COMMON"
+  | "UNCOMMON"
+  | "RARE"
+  | "EPIC"
+  | "LEGENDARY"
+  | "MYTHIC";
+
+/** Visual layer used to compose the final SVG artwork. */
+export interface NFTVisualLayer {
+  id: string;
+  name: string;
+  category:
+    | "background"
+    | "frame"
+    | "pattern"
+    | "emblem"
+    | "overlay"
+    | "badge";
+  variant: number;
+  palette: {
+    primary: string;
+    secondary: string;
+    accent: string;
+  };
+  opacity: number;
+  rotation: number;
+  scale: number;
+  seed: number;
+}
+
+/** A single fractional ownership record inside an NFT. */
+export interface FractionalShare {
+  owner: StellarAddress;
+  /** Numerator of total supply (bigint-safe string). */
+  shares: string;
+  /** Human-readable ownership percentage (0-100). */
+  ownershipPercent: number;
+  /** Vesting unlock in seconds since epoch; 0 = liquid. */
+  unlockTimestamp: number;
+  /** True when the fraction has been listed for sale. */
+  isListed: boolean;
+  /** Optional floor ask price in stroops, only set when listed. */
+  askPriceStroops?: string;
+}
+
+/** Core metadata for a fractionalized NFT token. */
+export interface FractionalNFTMetadata {
+  tokenId: string;
+  collectionId: string;
+  name: string;
+  description: string;
+  /** Total supply across all fractions (bigint-safe string). */
+  totalSupply: string;
+  rarity: NFTRarityTier;
+  /** IPFS/Arweave CID of the provenance certificate. */
+  provenanceCid?: string;
+  /** Organisation that issued the NFT (optional — used for org badges). */
+  orgId?: OrgId;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Fully rendered fractional NFT — metadata + shares + visual layers. */
+export interface FractionalNFT {
+  metadata: FractionalNFTMetadata;
+  shares: FractionalShare[];
+  /** Pre-computed visual layers; the worker derives deterministic SVG from these. */
+  layers: NFTVisualLayer[];
+  /** Deterministic 32-bit hash: seed = hash(tokenId) so the artwork is stable. */
+  seed: number;
+}
+
+/** Compact ownership bar slice (derived helper type for UI). */
+export interface OwnershipSlice {
+  owner: StellarAddress;
+  startPercent: number;
+  endPercent: number;
+  color: string;
+  unlockTimestamp: number;
+  isListed: boolean;
+}
+
+/** Web Worker inbound messages for the SVG fractional NFT renderer. */
+export type NftWorkerInboundMessage =
+  | {
+      type: "RENDER";
+      requestId: string;
+      nft: FractionalNFT;
+      width: number;
+      height: number;
+      /** When true, also compute a data URL version of the SVG. */
+      includeDataUrl?: boolean;
+    }
+  | {
+      type: "COMPUTE_SLICES";
+      requestId: string;
+      shares: FractionalShare[];
+      paletteSeed: number;
+    }
+  | {
+      type: "GENERATE_LAYERS";
+      requestId: string;
+      tokenId: string;
+      rarity: NFTRarityTier;
+      seed: number;
+    }
+  | { type: "CLEANUP" };
+
+/** Render result shape returned by the SVG Web Worker. */
+export interface NftWorkerRenderResult {
+  type: "RENDER_RESULT";
+  requestId: string;
+  svgMarkup: string;
+  viewBox: string;
+  intrinsicSize: { width: number; height: number };
+  dataUrl?: string;
+  /** Nanosecond rendering time inside the worker. */
+  renderTimeNs: number;
+}
+
+/** Ownership slices result from the SVG Web Worker. */
+export interface NftWorkerSlicesResult {
+  type: "SLICES_RESULT";
+  requestId: string;
+  slices: OwnershipSlice[];
+}
+
+/** Layer generation result from the SVG Web Worker. */
+export interface NftWorkerLayersResult {
+  type: "LAYERS_RESULT";
+  requestId: string;
+  layers: NFTVisualLayer[];
+}
+
+export type NftWorkerOutboundMessage =
+  | NftWorkerRenderResult
+  | NftWorkerSlicesResult
+  | NftWorkerLayersResult
+  | { type: "ERROR"; requestId: string; error: string; details?: unknown }
+  | { type: "READY" };
+
+/** WCAG AAA accessibility metadata appended to every mounted SVG. */
+export interface NFTAccessibilityMeta {
+  accessibleTitle: string;
+  accessibleDescription: string;
+  /** For screen reader users — plain-English breakdown of the fractions. */
+  ownershipSummary: string;
+  /** Keyboard-navigable focus order of ownership slices. */
+  focusOrder: string[];
 }

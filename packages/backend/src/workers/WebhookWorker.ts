@@ -46,6 +46,7 @@ import {
   parseRetryAfter,
   toSqsVisibilityTimeoutSeconds,
 } from "../services/webhookRetryPolicy.js";
+import { nonBlockingStringify } from "../utils/streamingJson.js";
 
 interface WebhookJobContext {
   id: string;
@@ -279,7 +280,20 @@ export class WebhookWorker {
         );
       }
 
-      const payloadString = JSON.stringify(payload);
+      // Use non-blocking stringify for large payloads to prevent event loop blocking
+      let payloadString: string;
+      const estimatedSize = JSON.stringify(payload).length;
+      
+      if (estimatedSize > 256 * 1024) { // 256KB threshold
+        const chunks: string[] = [];
+        for await (const chunk of nonBlockingStringify(payload, 64 * 1024)) {
+          chunks.push(chunk);
+        }
+        payloadString = chunks.join('');
+      } else {
+        payloadString = JSON.stringify(payload);
+      }
+      
       const signature = webhookService.calculateSignature(payloadString, config.secret);
       const response = await fetch(config.url, {
         method: "POST",

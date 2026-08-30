@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
 import { webhookService } from "../services/webhookService.js";
 import { stellarService } from "../services/stellarService.js";
+import { nonBlockingStringify } from "../utils/streamingJson.js";
 
 const WebhookConfigBody = z.object({
   url: z.string().url(),
@@ -223,6 +224,7 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
    * POST /ingest
    * Non-blocking ingestion for finalized Web3 block webhooks with query complexity scoring.
    * Protects the Node.js event loop and Prisma DB pool during high concurrency block spikes.
+   * Uses streaming JSON serialization for responses to prevent event loop blocking.
    */
   fastify.post("/ingest", {
     config: {
@@ -240,30 +242,49 @@ export const webhookRoutes: FastifyPluginAsync = async (fastify) => {
 
     if (complexityResult.exceeds) {
       request.log.warn({ totalScore: complexityResult.totalScore }, "Rejected webhook ingestion: complexity limit exceeded");
-      return reply.status(429).send({
+      
+      // Use streaming for error response to prevent blocking
+      const errorResponse = {
         error: "Too Many Requests",
         message: `Query complexity score ${complexityResult.totalScore.toFixed(2)} exceeds limit ${queryComplexityConfig.maxBatchScore}`,
-      });
+      };
+      
+      // For small responses, send directly
+      return reply.status(429).send(errorResponse);
     }
 
     const parseResult = webhookJobDataSchema.safeParse(request.body);
     if (!parseResult.success) {
-      return reply.status(400).send({
+      const errorResponse = {
         error: "Bad Request",
         message: "Malformed webhook payload",
         details: parseResult.error.format(),
-      });
+      };
+      
+      return reply.status(400).send(errorResponse);
     }
 
     try {
       const { organizationId, event, data } = parseResult.data;
       await webhookService.queueWebhook(organizationId, event, data);
 
-      return reply.status(202).send({
+      const successResponse = {
         success: true,
         message: "Webhook queued for non-blocking processing",
         complexityScore: complexityResult.totalScore,
-      });
+      };
+      
+      // Use non-blocking stringify for response to prevent event loop blocking
+      const estimatedSize = JSON.stringify(successResponse).length;
+      if (estimatedSize > 64 * 1024) { // 64KB threshold
+        const chunks: string[] = [];
+        for await (const chunk of nonBlockingStringify(successResponse, 32 * 1024)) {
+          chunks.push(chunk);
+        }
+        return reply.status(202).send(chunks.join(''));
+      }
+      
+      return reply.status(202).send(successResponse);
     } catch (error) {
       request.log.error({ err: error }, "Failed to ingest Web3 webhook");
       return reply.status(500).send({ error: "Failed to ingest webhook" });

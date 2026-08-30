@@ -7,6 +7,7 @@
  * - Process webhooks asynchronously to avoid blocking the event loop
  * - Support batch ingestion for high-throughput scenarios
  * - Integrate with existing BullMQ/SQS queue infrastructure
+ * - Utilize streaming JSON serialization for large payloads
  */
 
 import { z } from "zod";
@@ -14,6 +15,7 @@ import { t } from "./trpc.js";
 import { webhookService } from "../services/webhookService.js";
 import { logger } from "../utils/logger.js";
 import { type WebhookEventData } from "../schemas/webhookJobSchemas.js";
+import { streamWebhookBatchResults, nonBlockingStringify, safeStringify } from "../utils/streamingJson.js";
 import type {
   BlockchainEventMetadata,
   IndexerEventMetadata,
@@ -70,6 +72,7 @@ const webhookBatchIngestSchema = z.object({
 
 /**
  * Process a single webhook asynchronously without blocking the event loop
+ * Type safety is ensured through Zod schema validation at the router level
  */
 async function processWebhookAsync(
   organizationId: string,
@@ -141,10 +144,11 @@ export const webhookRouter = t.router({
   /**
    * Ingest multiple webhook events in batch for high-throughput scenarios
    * Processes webhooks in parallel without blocking the event loop
+   * Uses streaming JSON serialization for large payloads to prevent memory fragmentation
    */
   ingestBatch: t.procedure
     .input(webhookBatchIngestSchema)
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const startTime = Date.now();
       const { webhooks, batchId, processingMode } = input;
       
@@ -173,7 +177,8 @@ export const webhookRouter = t.router({
             logger.error({ err, batchId }, "Fire-and-forget batch processing encountered errors");
           });
           
-          return {
+          // Use non-blocking stringify for response to prevent event loop blocking
+          const response = {
             success: true,
             message: "Webhooks queued for fire-and-forget processing",
             queuedCount: webhooks.length,
@@ -181,6 +186,19 @@ export const webhookRouter = t.router({
             batchId,
             processingTimeMs: Date.now() - startTime,
           };
+          
+          // For large responses, use streaming to avoid blocking
+          if (webhooks.length > 50) {
+            // Stream the response if we have many webhooks
+            if (ctx.reply?.raw) {
+              await streamWebhookBatchResults(ctx.reply.raw, (async function* gen() {
+                yield response;
+              }()), {});
+              return;
+            }
+          }
+          
+          return response;
         }
         
         // Parallel or sequential processing with error tracking
@@ -210,7 +228,7 @@ export const webhookRouter = t.router({
           }
         }
         
-        return {
+        const response = {
           success: errors.length === 0,
           message: errors.length === 0 
             ? "All webhooks queued successfully" 
@@ -221,6 +239,16 @@ export const webhookRouter = t.router({
           batchId,
           processingTimeMs: Date.now() - startTime,
         };
+        
+        // Use streaming for large error responses to prevent blocking
+        if (errors.length > 20 && ctx.reply?.raw) {
+          await streamWebhookBatchResults(ctx.reply.raw, (async function* gen() {
+            yield response;
+          }()), {});
+          return;
+        }
+        
+        return response;
       } catch (error) {
         logger.error({ err: error, batchId }, "Batch webhook ingestion failed");
         

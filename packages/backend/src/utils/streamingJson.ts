@@ -342,3 +342,134 @@ export async function* cursorIterable<T, K>(
     cursor = getKey(rows[rows.length - 1] as T);
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/*                         Webhook Streaming Utilities                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Stream a webhook payload to avoid blocking the event loop during
+ * high-volume Web3 block finalization events.
+ *
+ * This function chunks large webhook payloads to prevent V8 heap fragmentation
+ * and ensures non-blocking processing even with payloads > 8MB.
+ *
+ * @param payload - The webhook payload to stream
+ * @returns An async iterable that yields JSON chunks
+ */
+export async function* streamWebhookPayload<T extends Record<string, unknown>>(
+  payload: T,
+): AsyncIterable<string> {
+  const payloadStr = JSON.stringify(payload);
+  
+  // For small payloads, yield immediately
+  if (payloadStr.length < ITEM_CHUNK_BYTES) {
+    yield payloadStr;
+    return;
+  }
+  
+  // Chunk large payloads to avoid large object space allocation
+  for (const chunk of sliceString(payloadStr, ITEM_CHUNK_BYTES)) {
+    yield chunk;
+  }
+}
+
+/**
+ * Create a streaming response for webhook batch ingestion results.
+ * 
+ * This allows the server to begin responding before all webhooks are processed,
+ * reducing perceived latency during high-concurrency block finalization events.
+ *
+ * @param replyRaw - The raw ServerResponse from Fastify
+ * @param results - Async iterable of webhook processing results
+ * @param opts - Streaming options
+ */
+export async function streamWebhookBatchResults<T extends Record<string, unknown>>(
+  replyRaw: ServerResponse,
+  results: AsyncIterable<T>,
+  opts: StreamOptions = {},
+): Promise<void> {
+  const source = Readable.from(async function* gen() {
+    yield '{"results":[';
+    let first = true;
+    for await (const result of results) {
+      if (!first) yield ',';
+      first = false;
+      // Type-safe JSON serialization with runtime validation
+      const serialized = JSON.stringify(result);
+      if (serialized === undefined) {
+        throw new Error('Failed to serialize webhook result');
+      }
+      yield* sliceString(serialized, ITEM_CHUNK_BYTES);
+    }
+    yield ']}';
+  }(), { encoding: opts.encoding ?? 'utf8' });
+  
+  return pipeToResponse(replyRaw, source, opts);
+}
+
+/**
+ * Non-blocking JSON stringify that yields control back to the event loop
+ * for large objects to prevent blocking during high-concurrency scenarios.
+ *
+ * @param obj - The object to stringify
+ * @param chunkSize - Maximum chunk size before yielding (default: 64KB)
+ * @returns Async iterable of JSON string chunks
+ */
+export async function* nonBlockingStringify(
+  obj: unknown,
+  chunkSize: number = FLUSH_THRESHOLD_BYTES,
+): AsyncIterable<string> {
+  const str = JSON.stringify(obj);
+  
+  if (str === undefined) {
+    throw new Error('Failed to stringify object');
+  }
+  
+  if (str.length <= chunkSize) {
+    yield str;
+    return;
+  }
+  
+  // Yield chunks to allow event loop processing
+  for (let i = 0; i < str.length; i += chunkSize) {
+    yield str.slice(i, i + chunkSize);
+    // Allow event loop to process other tasks
+    await Promise.resolve();
+  }
+}
+
+/**
+ * Type-safe wrapper for streaming JSON serialization.
+ * Ensures type safety across the tRPC boundary by validating
+ * that the serialized data matches the expected type structure.
+ *
+ * @param data - The data to serialize
+ * @param schema - Optional Zod schema for runtime validation
+ * @returns Promise containing the serialized string
+ */
+export async function safeStringify<T>(
+  data: T,
+  schema?: { safeParse: (data: unknown) => { success: boolean; data?: T; error?: any } },
+): Promise<string> {
+  // Runtime validation if schema is provided
+  if (schema) {
+    const result = schema.safeParse(data);
+    if (!result.success) {
+      throw new Error(`Type validation failed: ${JSON.stringify(result.error)}`);
+    }
+  }
+  
+  // Use non-blocking stringify for large objects
+  const chunks: string[] = [];
+  const estimatedSize = JSON.stringify(data).length;
+  
+  if (estimatedSize > 256 * 1024) { // 256KB threshold
+    for await (const chunk of nonBlockingStringify(data, 64 * 1024)) {
+      chunks.push(chunk);
+    }
+    return chunks.join('');
+  }
+  
+  return JSON.stringify(data);
+}

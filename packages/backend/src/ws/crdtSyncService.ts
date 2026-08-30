@@ -12,7 +12,6 @@
  * - Graceful degradation: clients that lose sync fall back to full state pull
  */
 
-import { randomUUID } from 'node:crypto';
 import { logger } from '../utils/logger.js';
 import { prisma } from '../services/db.js';
 
@@ -115,7 +114,6 @@ export function incrementVectorClock(
 
 // ── CRDT Sync Service ────────────────────────────────────────────────────────
 
-const NODE_ID = `server-${randomUUID().slice(0, 8)}`;
 const SYNC_DEBOUNCE_MS = 100;
 const MAX_DOCUMENTS_PER_SYNC = 50;
 
@@ -207,7 +205,7 @@ export class CrdtSyncService {
    * or a full state if the client is too far behind.
    */
   async handleSyncRequest(
-    clientId: string,
+    _clientId: string,
     documentId: string,
     clientVectorClock: Record<string, number>,
   ): Promise<CrdtSyncMessage> {
@@ -342,7 +340,7 @@ export class CrdtSyncService {
       type: 'update',
       documentId,
       payload: merged,
-      vectorClock: doc?.vectorClock,
+      vectorClock: doc?.vectorClock || {},
       timestamp: Date.now(),
     };
 

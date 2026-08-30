@@ -10,6 +10,82 @@
 
 export * from "./api-responses.js";
 
+// ── Webhook types ─────────────────────────────────────────────────────────────
+
+/** Webhook event data structure for blockchain/indexer payloads */
+export type WebhookEventData = Record<string, JsonValue>;
+
+/** JSON value types for webhook data */
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+/** Blockchain event metadata from Web3 sources */
+export interface BlockchainEventMetadata {
+  blockNumber: number;
+  blockHash: string;
+  timestamp: string;
+  network: "mainnet" | "testnet" | "devnet";
+}
+
+/** Transaction event metadata for Stellar transactions */
+export interface TransactionEventMetadata {
+  txHash: string;
+  from: string;
+  to: string | undefined;
+  amount: string;
+  assetCode: string | undefined;
+  assetIssuer: string | undefined;
+  memo: string | undefined;
+}
+
+/** Indexer event metadata for custom indexers */
+export interface IndexerEventMetadata {
+  indexerId: string;
+  sequence: number;
+  eventType: "block" | "transaction" | "operation" | "ledger_close";
+}
+
+/** Webhook ingestion metadata */
+export interface WebhookIngestMetadata {
+  source: "stellar_horizon" | "soroban_rpc" | "custom_indexer" | "direct_api";
+  retryable: boolean | undefined;
+  priority: "low" | "normal" | "high" | "critical" | undefined;
+}
+
+/** Webhook ingestion request payload */
+export interface WebhookIngestRequest {
+  organizationId: string;
+  event: string;
+  data: WebhookEventData;
+  metadata?: WebhookIngestMetadata;
+}
+
+/** Batch webhook ingestion request */
+export interface WebhookBatchIngestRequest {
+  webhooks: WebhookIngestRequest[];
+  batchId: string | undefined;
+  processingMode: "sequential" | "parallel" | "fire_and_forget";
+}
+
+/** Webhook ingestion response */
+export interface WebhookIngestResponse {
+  success: boolean;
+  message: string;
+  queuedCount: number;
+  failedCount: number;
+  errors: Array<{
+    webhookIndex: number;
+    error: string;
+  }> | undefined;
+  batchId: string | undefined;
+  processingTimeMs: number;
+}
+
 // ── Stellar / Soroban primitives ──────────────────────────────────────────────
 
 /** A Stellar public key (G…). */

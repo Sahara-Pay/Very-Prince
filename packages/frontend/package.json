@@ -2,12 +2,12 @@
   "name": "@very-prince/frontend",
   "version": "0.1.0",
   "private": true,
-  "description": "Next.js frontend for the very-prince PayoutRegistry — Freighter wallet integration and Soroban contract UI.",
+  "description": "Next.js frontend for the very-prince PayoutRegistry \u2014 Freighter wallet integration and Soroban contract UI.",
   "license": "MIT",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "node init && next dev",
+    "build": "node init && next build",
+    "start": "node init && next start",
     "lint": "next lint",
     "test": "npx vitest run",
     "test:e2e": "playwright test"

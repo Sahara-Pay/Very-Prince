@@ -36,6 +36,7 @@ pub mod capability_token;
 // wrapping / unwrapping with comprehensive proptest invariant suites.
 pub mod fractional_wrap;
 pub mod vesting_search;
+pub mod vote_escrow;
 
 // SDK compatibility tests to ensure safe version upgrades
 #[cfg(test)]

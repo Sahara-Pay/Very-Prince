@@ -2,13 +2,13 @@
   "name": "@very-prince/backend",
   "version": "0.1.0",
   "private": true,
-  "description": "Fastify API server for the very-prince PayoutRegistry — reads and writes Soroban contract state.",
+  "description": "Fastify API server for the very-prince PayoutRegistry \u2014 reads and writes Soroban contract state.",
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc --project tsconfig.build.json",
-    "start": "node dist/index.js",
+    "dev": "node init && tsx watch src/index.ts",
+    "build": "node init && tsc --project tsconfig.build.json",
+    "start": "node init && node dist/index.js",
     "test": "vitest run --coverage --passWithNoTests",
     "lint": "eslint src --ext .ts",
     "postinstall": "prisma generate"

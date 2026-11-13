@@ -12,14 +12,14 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "turbo run dev",
-    "build": "turbo run build",
+    "dev": "node init && turbo run dev",
+    "build": "node init && turbo run build",
     "test": "turbo run test",
     "test:readmes": "node --test tests/package-readmes.test.mjs",
     "lint": "turbo run lint",
     "clean": "turbo run clean && rm -rf node_modules",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
-    "dev:infra": "docker compose up -d",
+    "dev:infra": "node init && docker compose up -d",
     "stop:infra": "docker compose down",
     "staging:build": "NODE_ENV=staging turbo run build",
     "staging:deploy": "npm run staging:build && npm run staging:deploy:infra",
